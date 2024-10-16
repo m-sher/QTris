@@ -6,6 +6,21 @@ class Player():
     def __init__(self):
         self.game = TetrisEnv(CustomScorer())
         self.eps = 1e-10
+
+        self.key_dict = {
+            0: 'N',
+            1: 'l',
+            2: 'r',
+            3: 'L',
+            4: 'R',
+            5: 's',
+            6: 'a',
+            7: 'c',
+            8: 'H',
+            9: 'h',
+            10: '1',
+            11: 'S',
+        }
     
     def run_episode(self, agent, max_steps=50, greedy=False, renderer=None):
         episode_boards = []
@@ -35,7 +50,7 @@ class Player():
                 inp_seq = tf.concat([inp_seq, key], axis=-1)
     
                 key = tf.squeeze(key).numpy()
-                key_chars.append(key_dict[key])
+                key_chars.append(self.key_dict[key])
                 if key == 8:
                     break
     
