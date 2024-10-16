@@ -3,10 +3,12 @@ from TetrisEnv import TetrisEnv
 from TetrisEnv import CustomScorer
 
 class Player():
-    def __init__(self):
+    def __init__(self, max_len, gamma):
         self.game = TetrisEnv(CustomScorer())
         self.eps = 1e-10
-
+        self.max_len = max_len
+        self.gamma = gamma
+        
         self.key_dict = {
             0: 'N',
             1: 'l',
@@ -21,6 +23,31 @@ class Player():
             10: '1',
             11: 'S',
         }
+
+    @tf.function
+    def _get_expected_return(self, rewards, gamma):
+        n = tf.shape(rewards)[0]
+        returns = tf.TensorArray(dtype=tf.float32, size=n)
+        
+        rewards = tf.cast(rewards[::-1], dtype=tf.float32)
+        discounted_sum = tf.constant(0.0)
+        
+        for i in tf.range(n):
+            reward = rewards[i]
+            discounted_sum = reward + gamma * discounted_sum
+            returns = returns.write(i, discounted_sum)
+            
+        returns = returns.stack()[::-1]
+    
+        return returns
+
+    def _pad(self, item, length, pad_value=0):
+        num_valid = tf.shape(item)[0]
+        if num_valid > length:
+            padded = item[:length]
+        else:
+            padded = tf.concat([item, tf.zeros((length - num_valid), dtype=item.dtype) + pad_value], axis=0)
+        return padded
     
     def run_episode(self, agent, max_steps=50, greedy=False, renderer=None):
         episode_boards = []
@@ -38,7 +65,7 @@ class Player():
             inp_seq = tf.cast([[11]], tf.int32)
             key_chars = []
             board_rep, _ = agent.process_board((board_obs[None, ...], piece_obs[None, ...]), training=False)
-            for _ in range(max_len-1):
+            for _ in range(self.max_len-1):
                 logits, _ = agent.process_keys((board_rep, inp_seq), training=False)
                 values, _ = agent.process_vals(board_rep, training=False)
                 
@@ -73,8 +100,8 @@ class Player():
             
             episode_boards.append(board_obs)
             episode_pieces.append(piece_obs)
-            episode_actions.append(pad(inp_seq[0], max_len))
-            episode_probs.append(pad(chosen_prob[0], max_len-1))
+            episode_actions.append(self._pad(inp_seq[0], self.max_len))
+            episode_probs.append(self._pad(chosen_prob[0], self.max_len-1))
             episode_values.append(values[0])
             episode_rewards.append(reward + self.eps)
     
@@ -89,26 +116,9 @@ class Player():
         episode_actions = tf.stack(episode_actions, axis=0)
         episode_probs = tf.stack(episode_probs, axis=0)[..., None]
         episode_rewards = tf.stack(episode_rewards, axis=0)
-        episode_returns = self.get_expected_return(episode_rewards, gamma)[..., None]
+        episode_returns = self._get_expected_return(episode_rewards, self.gamma)[..., None]
         episode_values = tf.stack(episode_values, axis=0)
         episode_advantages = episode_returns - episode_values
         
         return (episode_boards, episode_pieces, episode_actions, episode_probs, 
                 episode_rewards, episode_returns, episode_values, episode_advantages)
-
-    @tf.function
-    def get_expected_return(rewards, gamma):
-        n = tf.shape(rewards)[0]
-        returns = tf.TensorArray(dtype=tf.float32, size=n)
-        
-        rewards = tf.cast(rewards[::-1], dtype=tf.float32)
-        discounted_sum = tf.constant(0.0)
-        
-        for i in tf.range(n):
-            reward = rewards[i]
-            discounted_sum = reward + gamma * discounted_sum
-            returns = returns.write(i, discounted_sum)
-            
-        returns = returns.stack()[::-1]
-    
-        return returns
