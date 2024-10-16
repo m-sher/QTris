@@ -74,9 +74,26 @@ class Player():
         episode_actions = tf.stack(episode_actions, axis=0)
         episode_probs = tf.stack(episode_probs, axis=0)[..., None]
         episode_rewards = tf.stack(episode_rewards, axis=0)
-        episode_returns = get_expected_return(episode_rewards, gamma)[..., None]
+        episode_returns = self.get_expected_return(episode_rewards, gamma)[..., None]
         episode_values = tf.stack(episode_values, axis=0)
         episode_advantages = episode_returns - episode_values
         
         return (episode_boards, episode_pieces, episode_actions, episode_probs, 
                 episode_rewards, episode_returns, episode_values, episode_advantages)
+
+    @tf.function
+    def get_expected_return(rewards, gamma):
+        n = tf.shape(rewards)[0]
+        returns = tf.TensorArray(dtype=tf.float32, size=n)
+        
+        rewards = tf.cast(rewards[::-1], dtype=tf.float32)
+        discounted_sum = tf.constant(0.0)
+        
+        for i in tf.range(n):
+            reward = rewards[i]
+            discounted_sum = reward + gamma * discounted_sum
+            returns = returns.write(i, discounted_sum)
+            
+        returns = returns.stack()[::-1]
+    
+        return returns
