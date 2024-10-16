@@ -6,6 +6,7 @@ from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
     def __init__(self, model, optimizers, seq_len, gamma, max_episode_steps=2000, buffer_cap=10000):
+        self.eps = 1e-10
         self.model = model
         self.actor_optimizer, self.critic_optimizer = optimizers
         self.player = Player(max_len=seq_len,
@@ -104,15 +105,15 @@ class Trainer():
     def train(self, gens, train_steps=100, training_actor=False):
         self.critic_variables = []
         self.actor_variables = []
-        for layer in agent.layers:
+        for layer in self.model.layers:
             if 'venc' in layer.name or layer.name == 'critic_top':
                 layer.trainable = True
                 for var in layer.trainable_variables:
-                    critic_variables.append(var)
+                    self.critic_variables.append(var)
             elif training_actor and ('kdec' in layer.name or layer.name == 'actor_top'):
                 layer.trainable = True
                 for var in layer.trainable_variables:
-                    actor_variables.append(var)
+                    self.actor_variables.append(var)
             else:
                 layer.trainable = False
         
