@@ -2,6 +2,131 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
+def positional_encoding(max_length, depth):
+    half_depth = depth / 2
+    positions = tf.range(max_length, dtype=tf.float32)[..., None]
+    depths = tf.range(half_depth, dtype=tf.float32)[None, ...] / half_depth
+
+    angle_rates = 1.0 / (10000 ** depths)
+    angle_rads = positions * angle_rates
+
+    pos_encoding = tf.concat([tf.sin(angle_rads), tf.cos(angle_rads)], axis=-1)
+    return pos_encoding
+
+class SeqEmbedding(layers.Layer):
+    def __init__(self, in_dim, depth, max_length, mask_zero):
+        super().__init__()
+        
+        self.pos_embedding = positional_encoding(max_length, depth)
+        
+        self.seq_emb = tf.keras.layers.Embedding(input_dim=in_dim,
+                                                 output_dim=depth,
+                                                 mask_zero=mask_zero)
+        
+        self.add = tf.keras.layers.Add()
+
+    @tf.function
+    def call(self, seq):
+        seq = self.seq_emb(seq) # (batch, seq, key_emb_dim)
+
+        x = self.pos_embedding[None, :tf.shape(seq)[1]]
+    
+        return self.add([seq, x])
+
+class SelfAttention(layers.Layer):
+    def __init__(self, causal, **kwargs):
+        super().__init__()
+        self.causal = causal
+        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
+        self.add = tf.keras.layers.Add() 
+        self.layernorm = tf.keras.layers.LayerNormalization()
+
+    @tf.function
+    def call(self, x, training=False):
+        attn, attention_scores = self.mha(query=x, value=x,
+                                          use_causal_mask=self.causal,
+                                          return_attention_scores=True)
+        x = self.add([x, attn])
+        return self.layernorm(x, training=training), attention_scores
+
+class CrossAttention(layers.Layer):
+    def __init__(self,**kwargs):
+        super().__init__()
+        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
+        self.add = tf.keras.layers.Add() 
+        self.layernorm = tf.keras.layers.LayerNormalization()
+
+    @tf.function
+    def call(self, x, y, training=False, **kwargs):
+        attn, attention_scores = self.mha(
+                 query=x, value=y,
+                 return_attention_scores=True)
+        
+        x = self.add([x, attn])
+        return self.layernorm(x, training=training), attention_scores
+
+class FeedForward(layers.Layer):
+    def __init__(self, units, dropout_rate=0.1):
+        super().__init__()
+        self.seq = tf.keras.Sequential([
+            tf.keras.layers.Dense(units=2*units, activation='relu'),
+            tf.keras.layers.Dense(units=units),
+            tf.keras.layers.Dropout(rate=dropout_rate),
+        ])
+        
+        self.layernorm = tf.keras.layers.LayerNormalization()
+
+    @tf.function
+    def call(self, x, training=False):
+        x = x + self.seq(x, training=training)
+        return self.layernorm(x, training=training)
+
+class DecoderLayer(layers.Layer):
+    def __init__(self, units, causal, num_heads=1, dropout_rate=0.1, name='Decoder'):
+        super().__init__(name=name)
+        
+        self.self_attention = SelfAttention(causal=causal,
+                                            num_heads=num_heads,
+                                            key_dim=units,
+                                            dropout=dropout_rate)
+        self.cross_attention = CrossAttention(num_heads=num_heads,
+                                              key_dim=units,
+                                              dropout=dropout_rate)
+        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
+    
+    @tf.function
+    def call(self, inputs, training=False):
+        in_seq, out_seq = inputs
+        
+        out_seq, _ = self.self_attention(out_seq, training=training)
+        
+        out_seq, attn_scores = self.cross_attention(out_seq, in_seq, training=training)
+        
+        out_seq = self.ff(out_seq, training=training)
+        
+        return out_seq, attn_scores
+
+class EncoderLayer(layers.Layer):
+    def __init__(self, units, num_heads=1, dropout_rate=0.1, name='Encoder'):
+        super().__init__(name=name)
+
+        self.self_attention = SelfAttention(causal=False,
+                                            num_heads=num_heads,
+                                            key_dim=units,
+                                            dropout=dropout_rate)
+
+        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
+
+    @tf.function
+    def call(self, inputs, training=False):
+        in_seq = inputs
+
+        in_seq, attn_scores = self.self_attention(in_seq, training=training)
+        
+        in_seq = self.ff(in_seq, training)
+
+        return in_seq, attn_scores
+
 class TetrisModel(keras.Model):
     def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length):
         super().__init__()
