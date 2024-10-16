@@ -24,7 +24,7 @@ class Player():
             11: 'S',
         }
 
-    @tf.function
+    @tf.function(reduce_retracing=True)
     def _get_expected_return(self, rewards, gamma):
         n = tf.shape(rewards)[0]
         returns = tf.TensorArray(dtype=tf.float32, size=n)
