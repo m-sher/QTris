@@ -1,0 +1,11 @@
+{"time":"2024-10-16T12:53:50.9657972-07:00","level":"INFO","msg":"using version","core version":"0.18.3"}
+{"time":"2024-10-16T12:53:50.9657972-07:00","level":"INFO","msg":"created symlink","path":"C:\\Users\\micha\\Python Programs\\Reinforcement\\QTris\\wandb\\run-20241016_125350-iaxkajvn\\logs\\debug-core.log"}
+{"time":"2024-10-16T12:53:50.9854619-07:00","level":"ERROR","msg":"dialing: google: could not find default credentials. See https://cloud.google.com/docs/authentication/external/set-up-adc for more information"}
+{"time":"2024-10-16T12:53:50.991662-07:00","level":"INFO","msg":"created new stream","id":"iaxkajvn"}
+{"time":"2024-10-16T12:53:50.9921813-07:00","level":"INFO","msg":"stream: started","id":"iaxkajvn"}
+{"time":"2024-10-16T12:53:50.9921813-07:00","level":"INFO","msg":"handler: started","stream_id":{"value":"iaxkajvn"}}
+{"time":"2024-10-16T12:53:50.9921813-07:00","level":"INFO","msg":"writer: Do: started","stream_id":{"value":"iaxkajvn"}}
+{"time":"2024-10-16T12:53:50.9921813-07:00","level":"INFO","msg":"sender: started","stream_id":{"value":"iaxkajvn"}}
+{"time":"2024-10-16T12:53:51.1691798-07:00","level":"INFO","msg":"wandb-core","!BADKEY":null}
+{"time":"2024-10-16T12:53:51.1696954-07:00","level":"INFO","msg":"Starting system monitor"}
+{"time":"2024-10-16T12:53:51.8215662-07:00","level":"INFO","msg":"Pausing system monitor"}
