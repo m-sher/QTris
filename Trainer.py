@@ -5,21 +5,23 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, seq_len, gamma, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, seq_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
-        self.player = Player(max_len=seq_len,
-                             gamma=gamma)
+        self.gamma = gamma
+        self.lam = lam
+        self.player = Player(max_len=seq_len)
         self.max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
             project='Tetris'
         )
         
         data_spec = (tf.TensorSpec(shape=(28, 10, 1), dtype=tf.float32, name='Boards'),
-             tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
-             tf.TensorSpec(shape=(seq_len,), dtype=tf.int32, name='ChosenAction'),
-             tf.TensorSpec(shape=(1,), dtype=tf.float32, name='ActionProbs'),
-             tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Returns'))
+                     tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
+                     tf.TensorSpec(shape=(seq_len,), dtype=tf.int32, name='ChosenAction'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='ActionProbs'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantages'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Returns'))
 
         self.replay_buffer = TFUniformReplayBuffer(
             data_spec,
@@ -30,6 +32,21 @@ class Trainer():
         fig, ax = plt.subplots()
         img = ax.imshow(tf.zeros((28, 10)), vmin=0, vmax=1)
         self.renderer = (fig, img)
+
+    @tf.function(reduce_retracing=True)
+    def _compute_gae(self, values, rewards, gamma, lam):
+        advantages = tf.TensorArray(dtype=tf.float32, size=tf.shape(rewards)[0])
+        gae = tf.constant([0.0])
+
+        for t in tf.range(tf.shape(rewards)[0])[::-1]:
+            delta = rewards[t] + gamma * values[t + 1] - values[t]
+            gae = delta + gamma * lam * gae
+            advantages = advantages.write(t, gae)
+
+        advantages = advantages.stack()[::-1]
+        returns = values[:-1] + advantages
+
+        return advantages, returns
     
     def fill_replay_buffer(self, max_episodes=50):
         for i in range(max_episodes):
@@ -37,11 +54,12 @@ class Trainer():
                 break
         
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_actions, episode_probs, episode_rewards, episode_returns = episode_data
-        
-            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_returns):
-                board, pieces, action, probs, ret = frame
-                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], ret[None, ...]))
+            episode_boards, episode_pieces, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
+            episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
+            
+            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_advantages, episode_returns):
+                board, pieces, action, probs, adv, ret = frame
+                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], adv[None, ...], ret[None, ...]))
             print(f'\rCurrent Episode: {i}', end='', flush=True)
         print('\rDone filling replay buffer', end='\n', flush=True)
 
@@ -62,19 +80,17 @@ class Trainer():
         return ppo_loss
 
     @tf.function
-    def _critic_loss_fn(self, advantages):
-        critic_loss = tf.reduce_sum(advantages ** 2) / tf.cast(tf.shape(advantages)[0], tf.float32)
+    def _critic_loss_fn(self, returns, values):
+        critic_loss = tf.reduce_sum((returns - values) ** 2) / tf.cast(tf.shape(returns)[0], tf.float32)
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, action_batch, old_probs, return_batch):
+    def _ppo_train_step(self, board_batch, piece_batch, action_batch, old_probs, advantages, returns):
 
         with tf.GradientTape() as tape:
             logits, values = self.model((board_batch, piece_batch, action_batch[..., :-1]), training=True)
 
-            advantages = return_batch - values
-
-            critic_loss = self._critic_loss_fn(advantages)
+            critic_loss = self._critic_loss_fn(returns, values)
             
             action_probs = tf.nn.log_softmax(logits, axis=-1)
         
@@ -109,11 +125,12 @@ class Trainer():
         for gen in range(gens):
             # Run episode
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_actions, episode_probs, episode_rewards, episode_returns = episode_data
-        
-            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_returns):
-                board, pieces, action, probs, ret = frame
-                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], ret[None, ...]))
+            episode_boards, episode_pieces, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
+            episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
+            
+            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_advantages, episode_returns):
+                board, pieces, action, probs, adv, ret = frame
+                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], adv[None, ...], ret[None, ...]))
         
             avg_reward = tf.reduce_mean(episode_rewards)
             sum_reward = tf.reduce_sum(episode_rewards)
@@ -126,8 +143,8 @@ class Trainer():
                 num_parallel_calls=tf.data.AUTOTUNE
             ).prefetch(tf.data.AUTOTUNE)
             
-            for i, ((board_batch, piece_batch, action_batch, old_probs, return_batch), _) in enumerate(dset.take(train_steps)):
-                losses = self._ppo_train_step(board_batch, piece_batch, action_batch, old_probs, return_batch)
+            for i, ((board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
+                losses = self._ppo_train_step(board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch)
 
             actor_loss, critic_loss = losses
             print(f'\rActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
