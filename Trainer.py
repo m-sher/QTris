@@ -5,9 +5,10 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, seq_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, optimizers, seq_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
+        self.actor_optimizer, self.critic_optimizer = optimizers
         self.gamma = gamma
         self.lam = lam
         self.player = Player(max_len=seq_len)
@@ -43,7 +44,7 @@ class Trainer():
             gae = delta + gamma * lam * gae
             advantages = advantages.write(t, gae)
 
-        advantages = advantages.stack()[::-1]
+        advantages = advantages.stack()
         returns = values[:-1] + advantages
 
         return advantages, returns
@@ -85,42 +86,51 @@ class Trainer():
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, action_batch, old_probs, advantages, returns):
-
-        with tf.GradientTape() as tape:
-            logits, values = self.model((board_batch, piece_batch, action_batch[..., :-1]), training=True)
+    def _ppo_train_step(self, board_batch, piece_batch, action_batch, old_probs, advantages, returns, training_actor):
+        
+        board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
+        
+        with tf.GradientTape() as critic_tape:
+            values, _ = self.model.process_vals(board_rep, training=True)
 
             critic_loss = self._critic_loss_fn(returns, values)
-            
-            action_probs = tf.nn.log_softmax(logits, axis=-1)
         
-            mask = tf.cast(action_batch[..., 1:] != 0, tf.float32)
-            new_probs = tf.reduce_sum(tf.gather(action_probs,
-                                                action_batch[..., 1:],
-                                                batch_dims=2) * mask, axis=-1, keepdims=True)
-            
-            actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
-            loss = critic_loss + actor_loss
-        
-        grads = tape.gradient(loss, self.model.trainable_variables)
-        self.model.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        critic_grads = critic_tape.gradient(critic_loss, self.critic_variables)
+        self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic_variables))
 
-        return actor_loss, critic_loss
+        if training_actor:
+            with tf.GradientTape() as actor_tape:
+                logits, _ = self.model.process_keys((board_rep, action_batch[..., :-1]), training=True)
+                action_probs = tf.nn.log_softmax(logits, axis=-1)
+            
+                mask = tf.cast(action_batch[..., 1:] != 0, tf.float32)
+                new_probs = tf.reduce_sum(tf.gather(action_probs,
+                                                    action_batch[..., 1:],
+                                                    batch_dims=2) * mask, axis=-1, keepdims=True)
+                
+                actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
+
+            actor_grads = actor_tape.gradient(actor_loss, self.actor_variables)
+            self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_variables))
+        
+            return actor_loss, critic_loss
+        else:
+            return critic_loss
     
-    def train(self, gens, train_steps=100):
-        # self.critic_variables = []
-        # self.actor_variables = []
-        # for layer in self.model.layers:
-        #     if 'venc' in layer.name or layer.name == 'critic_top':
-        #         layer.trainable = True
-        #         for var in layer.trainable_variables:
-        #             self.critic_variables.append(var)
-        #     elif training_actor and ('kdec' in layer.name or layer.name == 'actor_top'):
-        #         layer.trainable = True
-        #         for var in layer.trainable_variables:
-        #             self.actor_variables.append(var)
-        #     else:
-        #         layer.trainable = False
+    def train(self, gens, train_steps=100, training_actor=False):
+        self.critic_variables = []
+        self.actor_variables = []
+        for layer in self.model.layers:
+            if 'venc' in layer.name or layer.name == 'critic_top':
+                layer.trainable = True
+                for var in layer.trainable_variables:
+                    self.critic_variables.append(var)
+            elif training_actor and ('kdec' in layer.name or layer.name == 'actor_top'):
+                layer.trainable = True
+                for var in layer.trainable_variables:
+                    self.actor_variables.append(var)
+            else:
+                layer.trainable = False
         
         for gen in range(gens):
             # Run episode
@@ -144,11 +154,18 @@ class Trainer():
             ).prefetch(tf.data.AUTOTUNE)
             
             for i, ((board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
-                losses = self._ppo_train_step(board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch)
+                losses = self._ppo_train_step(board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch, training_actor)
 
-            actor_loss, critic_loss = losses
-            print(f'\rActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
-            wandb.log({'actor_loss': actor_loss,
-                       'critic_loss': critic_loss,
-                       'reward': sum_reward,
-                       'reward_per_piece': avg_reward})
+            if training_actor:
+                actor_loss, critic_loss = losses
+                print(f'\rActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                wandb.log({'actor_loss': actor_loss,
+                           'critic_loss': critic_loss,
+                           'reward': sum_reward,
+                           'reward_per_piece': avg_reward})
+            else:
+                critic_loss = losses
+                print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                wandb.log({'critic_loss': critic_loss,
+                           'reward': sum_reward,
+                           'reward_per_piece': avg_reward})
