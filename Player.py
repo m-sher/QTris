@@ -67,9 +67,9 @@ class Player():
                 key_chars[-1] = 'H'
                 inp_seq = tf.concat([inp_seq[:, :-1], [[8]]], axis=-1)
     
-            chosen_prob = tf.reduce_sum(tf.gather(tf.nn.log_softmax(logits, axis=-1),
-                                                  inp_seq[..., 1:],
-                                                  batch_dims=2), axis=-1, keepdims=True)
+            chosen_prob = tf.gather(tf.nn.log_softmax(logits, axis=-1),
+                                    inp_seq[..., 1:],
+                                    batch_dims=2)
             
             board, piece, reward, terminated = self.game.step(key_chars)
     
@@ -82,7 +82,7 @@ class Player():
             episode_boards.append(board_obs)
             episode_pieces.append(piece_obs)
             episode_actions.append(self._pad(inp_seq[0], self.max_len))
-            episode_probs.append(chosen_prob[0])
+            episode_probs.append(self._pad(chosen_prob[0], self.max_len-1))
             episode_values.append(values[0])
             episode_rewards.append(reward + self.eps)
     
