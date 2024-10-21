@@ -20,7 +20,7 @@ class Trainer():
         data_spec = (tf.TensorSpec(shape=(28, 10, 1), dtype=tf.float32, name='Boards'),
                      tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
                      tf.TensorSpec(shape=(seq_len,), dtype=tf.int32, name='ChosenAction'),
-                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='ActionProbs'),
+                     tf.TensorSpec(shape=(seq_len-1,), dtype=tf.float32, name='ActionProbs'),
                      tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantages'),
                      tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Returns'))
 
@@ -65,18 +65,16 @@ class Trainer():
         print('\rDone filling replay buffer', end='\n', flush=True)
 
     @tf.function
-    def _actor_loss_fn(self, new_probs, old_probs, advantages):
-        # new_probs = tf.ensure_shape(new_probs, (None, 1))
-        # old_probs = tf.ensure_shape(old_probs, (None, 1))
-        # advantages = tf.ensure_shape(advantages, (None, 1))
+    def _actor_loss_fn(self, mask, new_probs, old_probs, advantages):
+        
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))
         
-        new_old = tf.exp(new_probs - old_probs)
+        ratio = tf.exp(new_probs - old_probs)
     
-        clipped = tf.clip_by_value(new_old, 0.9, 1.1) * advantages
-        unclipped = new_old * advantages
+        clipped = tf.clip_by_value(ratio, 0.9, 1.1) * advantages * mask
+        unclipped = ratio * advantages * mask
     
-        ppo_loss = -tf.reduce_sum(tf.minimum(clipped, unclipped)) / tf.cast(tf.shape(new_old)[0], tf.float32)
+        ppo_loss = -tf.reduce_sum(tf.minimum(clipped, unclipped)) / tf.reduce_sum(mask)
         
         return ppo_loss
 
@@ -104,11 +102,12 @@ class Trainer():
                 action_probs = tf.nn.log_softmax(logits, axis=-1)
             
                 mask = tf.cast(action_batch[..., 1:] != 0, tf.float32)
-                new_probs = tf.reduce_sum(tf.gather(action_probs,
-                                                    action_batch[..., 1:],
-                                                    batch_dims=2) * mask, axis=-1, keepdims=True)
                 
-                actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
+                new_probs = tf.gather(action_probs,
+                                      action_batch[..., 1:],
+                                      batch_dims=2)
+                
+                actor_loss = self._actor_loss_fn(mask, new_probs, old_probs, advantages)
 
             actor_grads = actor_tape.gradient(actor_loss, self.actor_variables)
             self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_variables))
