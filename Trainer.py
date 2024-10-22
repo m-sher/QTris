@@ -19,10 +19,11 @@ class Trainer():
         
         data_spec = (tf.TensorSpec(shape=(28, 10, 1), dtype=tf.float32, name='Boards'),
                      tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
-                     tf.TensorSpec(shape=(seq_len,), dtype=tf.int32, name='ChosenAction'),
-                     tf.TensorSpec(shape=(seq_len-1,), dtype=tf.float32, name='ActionProbs'),
-                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantages'),
-                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Returns'))
+                     tf.TensorSpec(shape=(seq_len,), dtype=tf.int32, name='Input'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.int32, name='Action'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='ActionProb'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantage'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Return'))
 
         self.replay_buffer = TFUniformReplayBuffer(
             data_spec,
@@ -55,42 +56,54 @@ class Trainer():
                 break
         
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
+            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
             
-            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_advantages, episode_returns):
-                board, pieces, action, probs, adv, ret = frame
-                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], adv[None, ...], ret[None, ...]))
+            for frame in zip(episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_advantages, episode_returns):
+                board, pieces, inputs, action, prob, adv, ret = frame
+                self.replay_buffer.add_batch((board[None, ...],
+                                              pieces[None, ...],
+                                              inputs[None, ...],
+                                              action[None, ...],
+                                              prob[None, ...],
+                                              adv[None, ...],
+                                              ret[None, ...]))
             print(f'\rCurrent Episode: {i}', end='', flush=True)
         print('\rDone filling replay buffer', end='\n', flush=True)
 
     @tf.function
-    def _actor_loss_fn(self, mask, new_probs, old_probs, advantages):
+    def _actor_loss_fn(self, new_probs, old_probs, advantages):
         
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))
         
         ratio = tf.exp(new_probs - old_probs)
     
-        clipped = tf.clip_by_value(ratio, 0.9, 1.1) * advantages * mask
-        unclipped = ratio * advantages * mask
+        clipped = tf.clip_by_value(ratio, 0.9, 1.1) * advantages
+        unclipped = ratio * advantages
     
-        ppo_loss = -tf.reduce_sum(tf.minimum(clipped, unclipped)) / tf.reduce_sum(mask)
+        ppo_loss = -tf.reduce_mean(tf.minimum(clipped, unclipped))
         
         return ppo_loss
 
     @tf.function
     def _critic_loss_fn(self, returns, values):
-        critic_loss = tf.reduce_sum((returns - values) ** 2) / tf.cast(tf.shape(returns)[0], tf.float32)
+        critic_loss = tf.reduce_mean((returns - values) ** 2)
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, action_batch, old_probs, advantages, returns, training_actor):
+    def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, old_probs, advantages, returns, training_actor):
         
         board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
+        seq_inds = (tf.reduce_sum(tf.cast(input_batch != 0, tf.int32), axis=-1) - 1)
+        prob_inds = tf.concat([seq_inds[..., None], action_batch], axis=-1)
         
         with tf.GradientTape() as critic_tape:
-            values, _ = self.model.process_vals(board_rep, training=True)
+            values, _ = self.model.process_vals((board_rep, input_batch), training=True)
 
+            values = tf.gather(values,
+                               seq_inds,
+                               batch_dims=1)
+            
             critic_loss = self._critic_loss_fn(returns, values)
         
         critic_grads = critic_tape.gradient(critic_loss, self.critic_variables)
@@ -98,16 +111,14 @@ class Trainer():
 
         if training_actor:
             with tf.GradientTape() as actor_tape:
-                logits, _ = self.model.process_keys((board_rep, action_batch[..., :-1]), training=True)
+                logits, _ = self.model.process_keys((board_rep, input_batch), training=True)
                 action_probs = tf.nn.log_softmax(logits, axis=-1)
-            
-                mask = tf.cast(action_batch[..., 1:] != 0, tf.float32)
                 
-                new_probs = tf.gather(action_probs,
-                                      action_batch[..., 1:],
-                                      batch_dims=2)
+                new_probs = tf.gather_nd(action_probs,
+                                         prob_inds,
+                                         batch_dims=1)[..., None]
                 
-                actor_loss = self._actor_loss_fn(mask, new_probs, old_probs, advantages)
+                actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
 
             actor_grads = actor_tape.gradient(actor_loss, self.actor_variables)
             self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_variables))
@@ -134,12 +145,18 @@ class Trainer():
         for gen in range(gens):
             # Run episode
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
+            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
             
-            for frame in zip(episode_boards, episode_pieces, episode_actions, episode_probs, episode_advantages, episode_returns):
-                board, pieces, action, probs, adv, ret = frame
-                self.replay_buffer.add_batch((board[None, ...], pieces[None, ...], action[None, ...], probs[None, ...], adv[None, ...], ret[None, ...]))
+            for frame in zip(episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_advantages, episode_returns):
+                board, pieces, inputs, action, prob, adv, ret = frame
+                self.replay_buffer.add_batch((board[None, ...],
+                                              pieces[None, ...],
+                                              inputs[None, ...],
+                                              action[None, ...],
+                                              prob[None, ...],
+                                              adv[None, ...],
+                                              ret[None, ...]))
         
             avg_reward = tf.reduce_mean(episode_rewards)
             sum_reward = tf.reduce_sum(episode_rewards)
@@ -152,8 +169,8 @@ class Trainer():
                 num_parallel_calls=tf.data.AUTOTUNE
             ).prefetch(tf.data.AUTOTUNE)
             
-            for i, ((board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
-                losses = self._ppo_train_step(board_batch, piece_batch, action_batch, old_probs, advantage_batch, return_batch, training_actor)
+            for i, ((board_batch, piece_batch, input_batch, action_batch, old_probs, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
+                losses = self._ppo_train_step(board_batch, piece_batch, input_batch, action_batch, old_probs, advantage_batch, return_batch, training_actor)
 
             if training_actor:
                 actor_loss, critic_loss = losses
