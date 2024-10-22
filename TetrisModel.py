@@ -216,7 +216,7 @@ class TetrisModel(keras.Model):
         
         logits, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
         
-        values, val_scores = self.process_vals(piece_dec, training=training)
+        values, val_scores = self.process_vals((piece_dec, inp_seq), training=training)
 
         if return_scores:
             return logits, values, piece_scores, key_scores, val_scores
