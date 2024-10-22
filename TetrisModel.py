@@ -106,26 +106,26 @@ class DecoderLayer(layers.Layer):
         
         return out_seq, attn_scores
 
-class EncoderLayer(layers.Layer):
-    def __init__(self, units, num_heads=1, dropout_rate=0.1, name='Encoder'):
-        super().__init__(name=name)
+# class EncoderLayer(layers.Layer):
+#     def __init__(self, units, num_heads=1, dropout_rate=0.1, name='Encoder'):
+#         super().__init__(name=name)
 
-        self.self_attention = SelfAttention(causal=False,
-                                            num_heads=num_heads,
-                                            key_dim=units,
-                                            dropout=dropout_rate)
+#         self.self_attention = SelfAttention(causal=False,
+#                                             num_heads=num_heads,
+#                                             key_dim=units,
+#                                             dropout=dropout_rate)
 
-        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
+#         self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
 
-    @tf.function
-    def call(self, inputs, training=False):
-        in_seq = inputs
+#     @tf.function
+#     def call(self, inputs, training=False):
+#         in_seq = inputs
 
-        in_seq, attn_scores = self.self_attention(in_seq, training=training)
+#         in_seq, attn_scores = self.self_attention(in_seq, training=training)
         
-        in_seq = self.ff(in_seq, training)
+#         in_seq = self.ff(in_seq, training)
 
-        return in_seq, attn_scores
+#         return in_seq, attn_scores
 
 class TetrisModel(keras.Model):
     def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length):
@@ -160,12 +160,11 @@ class TetrisModel(keras.Model):
         self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'kdec_{i}')
                                    for i in range(num_layers)]
 
-        self.val_encoder_layers = [EncoderLayer(units=depth, num_heads=num_heads, dropout_rate=0.1, name=f'venc_{i}')
+        self.val_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'vdec_{i}')
                                    for i in range(num_layers)]
         
         self.actor_top = layers.Dense(key_dim, name='actor_top')
-        self.critic_top = keras.Sequential([layers.Flatten(),
-                                            layers.Dense(1)], name='critic_top')
+        self.critic_top = layers.Dense(1, name='critic_top')
     
     @tf.function
     def process_board(self, inputs, training=False):
@@ -197,14 +196,15 @@ class TetrisModel(keras.Model):
 
     @tf.function
     def process_vals(self, inputs, training=False):
-        val_enc = inputs
+        piece_dec, inp_seq = inputs
 
         val_scores = []
-        for val_layer in self.val_encoder_layers:
-            val_enc, last_attn = val_layer(val_enc, training=training)
+        val_dec = self.key_embedding(inp_seq)
+        for dec_layer in self.val_decoder_layers:
+            val_dec, last_attn = dec_layer([piece_dec, val_dec], training=training)
             val_scores.append(last_attn)
 
-        values = self.critic_top(val_enc, training=training)
+        values = self.critic_top(val_dec, training=training)
         
         return values, val_scores
     
