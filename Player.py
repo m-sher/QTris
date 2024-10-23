@@ -65,7 +65,7 @@ class Player():
                 episode_actions.append(key[0])
                 episode_probs.append(tf.nn.log_softmax(logits, axis=-1)[0, -1, tf.squeeze(key)])
                 episode_values.append(values[0, -1])
-                episode_rewards.append(-0.1 * i)
+                episode_rewards.append(0.0)
                 
                 inp_seq = tf.concat([inp_seq, key], axis=-1)
                 key = tf.squeeze(key).numpy()
@@ -75,7 +75,7 @@ class Player():
                     break
             
             board, piece, reward, terminated = self.game.step(key_chars)
-            episode_rewards[-1] = (reward - 5.0) / 10.0
+            episode_rewards[-1] = reward - (0.1 * i)
             
             if renderer:
                 fig, img = renderer
