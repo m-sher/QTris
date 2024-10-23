@@ -50,7 +50,7 @@ class Player():
             
             board_rep, _ = agent.process_board((board_obs[None, ...], piece_obs[None, ...]), training=False)
             
-            for _ in range(self.max_len-1):
+            for i in range(self.max_len-1):
                 logits, _ = agent.process_keys((board_rep, inp_seq), training=False)
                 values, _ = agent.process_vals((board_rep, inp_seq), training=False)
                 
@@ -65,7 +65,7 @@ class Player():
                 episode_actions.append(key[0])
                 episode_probs.append(tf.nn.log_softmax(logits, axis=-1)[0, -1, tf.squeeze(key)])
                 episode_values.append(values[0, -1])
-                episode_rewards.append(-0.1)
+                episode_rewards.append(-0.1 * i)
                 
                 inp_seq = tf.concat([inp_seq, key], axis=-1)
                 key = tf.squeeze(key).numpy()
@@ -75,7 +75,7 @@ class Player():
                     break
             
             board, piece, reward, terminated = self.game.step(key_chars)
-            episode_rewards[-1] = reward - 0.1
+            episode_rewards[-1] = (reward - 5.0) / 10.0
             
             if renderer:
                 fig, img = renderer
