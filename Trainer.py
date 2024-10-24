@@ -74,7 +74,7 @@ class Trainer():
     @tf.function
     def _actor_loss_fn(self, new_probs, old_probs, advantages):
         
-        advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))
+        advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps)
         
         ratio = tf.exp(new_probs - old_probs)
     
