@@ -157,10 +157,10 @@ class TetrisModel(keras.Model):
         self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'pdec_{i}')
                                      for i in range(num_layers)]
         
-        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'kdec_{i}')
+        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'actor_dec_{i}')
                                    for i in range(num_layers)]
 
-        self.val_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'vdec_{i}')
+        self.val_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'critic_dec_{i}')
                                    for i in range(num_layers)]
         
         self.actor_top = layers.Dense(key_dim, name='actor_top')
