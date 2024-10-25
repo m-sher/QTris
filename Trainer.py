@@ -46,8 +46,10 @@ class Trainer():
             advantages = advantages.write(t, gae)
 
         advantages = advantages.stack()
+        
         returns = values[:-1] + advantages
-
+        # returns = (returns - tf.reduce_mean(returns)) / (tf.math.reduce_std(returns) + 1e-10)
+        
         return advantages, returns
     
     def fill_replay_buffer(self, max_episodes=50):
@@ -97,7 +99,7 @@ class Trainer():
         seq_inds = (tf.reduce_sum(tf.cast(input_batch != 0, tf.int32), axis=-1) - 1)
         prob_inds = tf.concat([seq_inds[..., None], action_batch], axis=-1)
         
-        with tf.GradientTape() as critic_tape:
+        with tf.GradientTape() as tape:
             values, _ = self.model.process_vals((board_rep, input_batch), training=True)
 
             values = tf.gather(values,
@@ -105,12 +107,8 @@ class Trainer():
                                batch_dims=1)
             
             critic_loss = self._critic_loss_fn(returns, values)
-        
-        critic_grads = critic_tape.gradient(critic_loss, self.critic_variables)
-        self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic_variables))
 
-        if training_actor:
-            with tf.GradientTape() as actor_tape:
+            if training_actor:
                 logits, _ = self.model.process_keys((board_rep, input_batch), training=True)
                 action_probs = tf.nn.log_softmax(logits, axis=-1)
                 
@@ -120,25 +118,21 @@ class Trainer():
                 
                 actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
 
-            actor_grads = actor_tape.gradient(actor_loss, self.actor_variables)
-            self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_variables))
+                total_loss = actor_loss + critic_loss
+            else:
+                total_loss = critic_loss
         
-            return actor_loss, critic_loss
-        else:
-            return critic_loss
+        grads = tape.gradient(total_loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+
+        return (actor_loss, critic_loss) if training_actor else critic_loss
     
     def train(self, gens, train_steps=100, training_actor=False):
-        self.critic_variables = []
-        self.actor_variables = []
         for layer in self.model.layers:
-            if 'venc' in layer.name or layer.name == 'critic_top':
+            if 'critic' in layer.name:
                 layer.trainable = True
-                for var in layer.trainable_variables:
-                    self.critic_variables.append(var)
-            elif training_actor and ('kdec' in layer.name or layer.name == 'actor_top'):
+            elif training_actor and 'actor' in layer.name:
                 layer.trainable = True
-                for var in layer.trainable_variables:
-                    self.actor_variables.append(var)
             else:
                 layer.trainable = False
         
