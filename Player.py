@@ -75,7 +75,7 @@ class Player():
                     break
             
             board, piece, reward, terminated = self.game.step(key_chars)
-            episode_rewards[-1] = reward - (0.01 * i)
+            episode_rewards[-1] = reward / tf.cast(i + 1, tf.float32)
             
             if renderer:
                 fig, img = renderer
