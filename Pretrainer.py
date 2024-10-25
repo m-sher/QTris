@@ -45,7 +45,8 @@ class Pretrainer():
             returns.append(discounted_sum)
             
         returns = returns[::-1]
-        return returns
+        # returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-10)
+        return returns # .tolist()
 
     def _load_dset(self, players_data):
         self._dset_pieces = []
@@ -90,7 +91,7 @@ class Pretrainer():
                 episode_pieces.append(piece_seq)
                 episode_boards.append(board)
                 episode_actions.append(action)
-                episode_attacks.append(attack)
+                episode_attacks.append(attack / len(action))
         
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
