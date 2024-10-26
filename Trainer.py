@@ -5,10 +5,9 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, optimizers, seq_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, seq_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
-        self.actor_optimizer, self.critic_optimizer = optimizers
         self.gamma = gamma
         self.lam = lam
         self.player = Player(max_len=seq_len)
@@ -48,7 +47,6 @@ class Trainer():
         advantages = advantages.stack()
         
         returns = values[:-1] + advantages
-        # returns = (returns - tf.reduce_mean(returns)) / (tf.math.reduce_std(returns) + 1e-10)
         
         return advantages, returns
     
@@ -75,12 +73,15 @@ class Trainer():
 
     @tf.function
     def _actor_loss_fn(self, new_probs, old_probs, advantages):
+
+        epsilon = 0.2
         
         advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps)
         
         ratio = tf.exp(new_probs - old_probs)
-    
-        clipped = tf.clip_by_value(ratio, 0.9, 1.1) * advantages
+        clipped_ratio = tf.clip_by_value(ratio, 1 - epsilon, 1 + epsilon)
+        
+        clipped = clipped_ratio * advantages
         unclipped = ratio * advantages
     
         ppo_loss = -tf.reduce_mean(tf.minimum(clipped, unclipped))
@@ -95,11 +96,10 @@ class Trainer():
     @tf.function
     def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, old_probs, advantages, returns, training_actor):
         
-        board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
-        seq_inds = (tf.reduce_sum(tf.cast(input_batch != 0, tf.int32), axis=-1) - 1)
-        prob_inds = tf.concat([seq_inds[..., None], action_batch], axis=-1)
-        
         with tf.GradientTape() as tape:
+            board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
+            seq_inds = tf.reduce_sum(tf.cast(input_batch != 0, tf.int32), axis=-1) - 1
+            
             values, _ = self.model.process_vals((board_rep, input_batch), training=True)
 
             values = tf.gather(values,
@@ -109,12 +109,17 @@ class Trainer():
             critic_loss = self._critic_loss_fn(returns, values)
 
             if training_actor:
+                # batch, max_len, num_actions
                 logits, _ = self.model.process_keys((board_rep, input_batch), training=True)
                 action_probs = tf.nn.log_softmax(logits, axis=-1)
-                
-                new_probs = tf.gather_nd(action_probs,
-                                         prob_inds,
-                                         batch_dims=1)[..., None]
+
+                # batch, num_actions
+                log_probs = tf.gather(action_probs,
+                                      seq_inds,
+                                      batch_dims=1)
+
+                action_mask = tf.one_hot(tf.squeeze(action_batch, axis=-1), depth=tf.shape(log_probs)[-1])
+                new_probs = tf.reduce_sum(log_probs * action_mask, axis=-1)
                 
                 actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
 
