@@ -36,6 +36,7 @@ class Player():
         episode_pieces = []
         episode_inputs = []
         episode_actions = []
+        episode_valid = []
         episode_probs = []
         episode_values = []
         episode_rewards = []
@@ -50,11 +51,11 @@ class Player():
             
             board_rep, _ = agent.process_board((board_obs[None, ...], piece_obs[None, ...]), training=False)
             
-            for i in range(self.max_len-1):
+            for i in range(self.max_len):
                 logits, _ = agent.process_keys((board_rep, inp_seq), training=False)
                 values, _ = agent.process_vals((board_rep, inp_seq), training=False)
                 
-                if greedy or tf.random.uniform(()) > 0.1:
+                if greedy or tf.random.uniform(()) > 0.5:
                     key = tf.argmax(logits[:, -1:], axis=-1, output_type=tf.int32) # (1, 1)
                 else:
                     key = tf.random.categorical(logits[:, -1], num_samples=1, dtype=tf.int32) # (1, 1)
@@ -62,7 +63,8 @@ class Player():
                 episode_boards.append(board_obs)
                 episode_pieces.append(piece_obs)
                 episode_inputs.append(self._pad(inp_seq[0], self.max_len))
-                episode_actions.append(key[0])
+                episode_actions.append(key[0, 0])
+                episode_valid.append(i)
                 episode_probs.append(tf.nn.log_softmax(logits, axis=-1)[0, -1, tf.squeeze(key)])
                 episode_values.append(values[0, -1])
                 episode_rewards.append(0.0)
@@ -73,9 +75,10 @@ class Player():
                 
                 if key == 8:
                     break
-            
+
+            key_chars[-1] = 'H'
             board, piece, reward, terminated = self.game.step(key_chars)
-            episode_rewards[-1] = (reward / 4.0) / 1.0
+            episode_rewards[-1] = reward / 4.0 + 0.1
             
             if renderer:
                 fig, img = renderer
@@ -90,8 +93,9 @@ class Player():
         episode_pieces = tf.stack(episode_pieces, axis=0)
         episode_inputs = tf.stack(episode_inputs, axis=0)
         episode_actions = tf.stack(episode_actions, axis=0)
+        episode_valid = tf.stack(episode_valid, axis=0)
         episode_probs = tf.stack(episode_probs, axis=0)[..., None]
         episode_values = tf.stack(episode_values + [[0.0]], axis=0)
         episode_rewards = tf.stack(episode_rewards, axis=0)[..., None]
         
-        return episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_values, episode_rewards
+        return episode_boards, episode_pieces, episode_inputs, episode_actions, episode_valid, episode_probs, episode_values, episode_rewards
