@@ -29,7 +29,7 @@ class SeqEmbedding(layers.Layer):
     def call(self, seq):
         seq = self.seq_emb(seq) # (batch, seq, key_emb_dim)
 
-        x = self.pos_embedding[None, :tf.shape(seq)[1]]
+        x = tf.repeat(self.pos_embedding[None, :tf.shape(seq)[1]], repeats=tf.shape(seq)[0], axis=0)
     
         return self.add([seq, x])
 
