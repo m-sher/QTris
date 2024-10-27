@@ -1,13 +1,15 @@
 import tensorflow as tf
+from tensorflow import keras
 import matplotlib.pyplot as plt
 import wandb
 from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, optimizers, max_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, ref_model, optimizers, max_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
+        self.ref_model = ref_model
         self.actor_optimizer, self.critic_optimizer = optimizers
         self.gamma = gamma
         self.lam = lam
@@ -77,7 +79,7 @@ class Trainer():
         print('\rDone filling replay buffer', end='\n', flush=True)
 
     @tf.function
-    def _actor_loss_fn(self, new_probs, old_probs, advantages):
+    def _ppo_loss_fn(self, new_probs, old_probs, advantages):
 
         epsilon = 0.2
         
@@ -118,21 +120,29 @@ class Trainer():
             with tf.GradientTape() as actor_tape:
                 # batch, max_len, num_actions
                 logits, _ = self.model.process_keys((board_rep, input_batch), training=True)
-                action_probs = tf.nn.log_softmax(logits, axis=-1)
-    
+                ref_logits, _ = self.ref_model.process_keys((board_rep, input_batch), training=False)
+                
+                log_probs = tf.nn.log_softmax(logits, axis=-1)
+                ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
+
+                kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
+                
                 # batch, num_actions
-                log_probs = tf.gather(action_probs,
-                                      valid_batch,
-                                      batch_dims=1)
+                last_probs = tf.gather(log_probs,
+                                       valid_batch,
+                                       batch_dims=1)
     
                 action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
-                new_probs = tf.reduce_sum(log_probs * action_mask, axis=-1)
+                new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)
                 
-                actor_loss = self._actor_loss_fn(new_probs, old_probs, advantages)
+                ppo_loss = self._ppo_loss_fn(new_probs, old_probs, advantages)
+
+                actor_loss = ppo_loss + kl_penalty
+            
             actor_grads = actor_tape.gradient(actor_loss, self.actor_vars)
             self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_vars))
 
-            return actor_loss, critic_loss
+            return actor_loss, kl_penalty, critic_loss
         return critic_loss
     
     def train(self, gens, train_steps=100, training_actor=False):
@@ -187,9 +197,10 @@ class Trainer():
                                               old_probs, advantage_batch, return_batch, training_actor)
 
             if training_actor:
-                actor_loss, critic_loss = losses
-                print(f'\rActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                actor_loss, kl_penalty, critic_loss = losses
+                print(f'\rActor Loss: {actor_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
                 wandb.log({'actor_loss': actor_loss,
+                           'kl_penalty': kl_penalty,
                            'critic_loss': critic_loss,
                            'reward': sum_reward,
                            'reward_per_piece': avg_reward})
