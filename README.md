@@ -1,13 +1,13 @@
 Priority:
 <font color='red'>
 - High priority
-<\font>
+</font>
 <font color='orange'>
 - Medium priority
-<\font>
+</font>
 <font color='yellow'>
 - Low priority
-<\font>
+</font>
 
 Todo:
 - Write this ReadMe
