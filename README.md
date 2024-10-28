@@ -1,13 +1,7 @@
 Priority:
-<font color='red'>
-- High priority
-</font>
-<font color='orange'>
-- Medium priority
-</font>
-<font color='yellow'>
-- Low priority
-</font>
+<code style="color : Red">-High priority</code>
+<code style="color : Orange">-Medium priority</code>
+<code style="color : Yellow">-Low priority</code>
 
 Todo:
 - Write this ReadMe
