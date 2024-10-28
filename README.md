@@ -1,9 +1,7 @@
 Priority:
-- $$\color{red}\text{High priority}$$
-- $$\color{orange}\text{Medium priority}$$
-- $$\color{yellow}\text{Low priority}$$
-$$\color{orange}\text{-}$$ Test
-
+$$\color{red}\bullet$$ High priority
+$$\color{orange}\bullet$$ Medium priority
+$$\color{yellow}\bullet$$ Low priority
 Todo:
 - $$\color{yellow}\text{Write this ReadMe}$$
 - $$\color{orange}\text{Make entire model trainable with one optimizer}$$
