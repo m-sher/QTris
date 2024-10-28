@@ -87,13 +87,15 @@ class Trainer():
         
         ratio = tf.exp(new_probs - old_probs)
         clipped_ratio = tf.clip_by_value(ratio, 1 - epsilon, 1 + epsilon)
+
+        unclipped_proportion = tf.reduce_mean(tf.cast(ratio == clipped_ratio, tf.float32))
         
         clipped = clipped_ratio * advantages
         unclipped = ratio * advantages
     
         ppo_loss = -tf.reduce_mean(tf.minimum(clipped, unclipped))
         
-        return ppo_loss
+        return ppo_loss, unclipped_proportion
 
     @tf.function
     def _critic_loss_fn(self, returns, values):
@@ -135,14 +137,14 @@ class Trainer():
                 action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
                 new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)
                 
-                ppo_loss = self._ppo_loss_fn(new_probs, old_probs, advantages)
+                ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
                 actor_loss = ppo_loss + kl_penalty
             
             actor_grads = actor_tape.gradient(actor_loss, self.actor_vars)
             self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_vars))
 
-            return actor_loss, kl_penalty, critic_loss
+            return actor_loss, kl_penalty, unclipped_proportion, critic_loss
         return critic_loss
     
     def train(self, gens, train_steps=100, training_actor=False):
@@ -197,10 +199,11 @@ class Trainer():
                                               old_probs, advantage_batch, return_batch, training_actor)
 
             if training_actor:
-                actor_loss, kl_penalty, critic_loss = losses
+                actor_loss, kl_penalty, unclipped_proportion, critic_loss = losses
                 print(f'\rActor Loss: {actor_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
                 wandb.log({'actor_loss': actor_loss,
                            'kl_penalty': kl_penalty,
+                           'unclipped_proportion': unclipped_proportion,
                            'critic_loss': critic_loss,
                            'reward': sum_reward,
                            'reward_per_piece': avg_reward})
