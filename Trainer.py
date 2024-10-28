@@ -45,7 +45,7 @@ class Trainer():
 
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
-            delta = rewards[t] + gamma * tf.cast(t != last_ind, tf.float32) * (values[t + 1] - values[t])
+            delta = rewards[t] + gamma * (values[t + 1] - values[t]) if t != last_ind else 0.0
             gae = delta + gamma * lam * gae
             advantages = advantages.write(t, gae)
 
