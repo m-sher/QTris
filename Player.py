@@ -78,7 +78,7 @@ class Player():
 
             key_chars[-1] = 'H'
             board, piece, reward, terminated = self.game.step(key_chars)
-            episode_rewards[-1] = reward / 4.0 + 0.1
+            episode_rewards[-1] = reward / 4.0 + 0.01
             
             if renderer:
                 fig, img = renderer
