@@ -45,13 +45,13 @@ class Trainer():
 
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
-            delta = rewards[t] + gamma * (values[t + 1] - values[t]) if t != last_ind else 0.0
+            delta = rewards[t] + gamma * (values[t + 1] - values[t]) if t != last_ind else tf.constant([0.0])
             gae = delta + gamma * lam * gae
             advantages = advantages.write(t, gae)
 
         advantages = advantages.stack()
         
-        returns = values[:-1] + advantages
+        returns = values + advantages
         
         return advantages, returns
     
