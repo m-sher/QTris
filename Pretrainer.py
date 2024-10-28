@@ -91,7 +91,7 @@ class Pretrainer():
                 episode_pieces.append(piece_seq)
                 episode_boards.append(board)
                 episode_actions.append(action)
-                episode_attacks.append((attack / 4.0) - 1.0)
+                episode_attacks.append(attack / 4.0 + 0.01)
         
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
