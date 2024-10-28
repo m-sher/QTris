@@ -55,7 +55,7 @@ class Player():
                 logits, _ = agent.process_keys((board_rep, inp_seq), training=False)
                 values, _ = agent.process_vals((board_rep, inp_seq), training=False)
                 
-                if greedy or tf.random.uniform(()) > 0.5:
+                if greedy or tf.random.uniform(()) > 0.1:
                     key = tf.argmax(logits[:, -1:], axis=-1, output_type=tf.int32) # (1, 1)
                 else:
                     key = tf.random.categorical(logits[:, -1], num_samples=1, dtype=tf.int32) # (1, 1)
