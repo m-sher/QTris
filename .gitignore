@@ -2,3 +2,5 @@
 /__pycache__
 /agent_weights
 /wandb
+/agent_weights_large
+/agent_weights_small
