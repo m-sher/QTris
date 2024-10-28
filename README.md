@@ -1,12 +1,7 @@
 Priority:
-
-$$
-\begin{itemize}
-\item {\color{red}\text{High priority}}
-\item {\color{orange}\text{Medium priority}}
-\item \color{yellow}\text{Low priority}
-\end{itemize}
-$$
+- $$\color{red}\text{High priority}$$
+- $$\color{orange}\text{Medium priority}$$
+- $$\color{yellow}\text{Low priority}$$
 
 Todo:
 - Write this ReadMe
