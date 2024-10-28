@@ -1,7 +1,7 @@
 Priority:
-- $${\color{red}\text{High priority}$$
-- $${\color{orange}\text{Medium priority}$$
-- $${\color{yellow}\text{Low priority}$$
+- $${\color{red}\text{High priority}}$$
+- $${\color{orange}\text{Medium priority}}$$
+- $${\color{yellow}\text{Low priority}}$$
 
 Todo:
 - Write this ReadMe
