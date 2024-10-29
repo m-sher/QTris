@@ -105,12 +105,14 @@ class Trainer():
     
     @tf.function
     def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, valid_batch, old_probs, advantages, returns, training_actor):
+
+        board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
         
         with tf.GradientTape() as critic_tape:
-            board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
-            
+            # batch, max_len, 1
             values, _ = self.model.process_vals((board_rep, input_batch), training=True)
 
+            # batch, 1
             values = tf.gather(values,
                                valid_batch,
                                batch_dims=1)
