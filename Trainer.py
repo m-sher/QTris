@@ -210,10 +210,10 @@ class Trainer():
                            'unclipped_proportion': unclipped_proportion,
                            'critic_loss': critic_loss,
                            'reward': sum_reward,
-                           'reward_per_piece': avg_reward})
+                           'reward_per_key': avg_reward})
             else:
                 critic_loss = losses
                 print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
                 wandb.log({'critic_loss': critic_loss,
                            'reward': sum_reward,
-                           'reward_per_piece': avg_reward})
+                           'reward_per_key': avg_reward})
