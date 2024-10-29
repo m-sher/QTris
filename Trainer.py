@@ -134,9 +134,12 @@ class Trainer():
                 last_probs = tf.gather(log_probs,
                                        valid_batch,
                                        batch_dims=1)
-    
+
+                # batch, num_actions
                 action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
-                new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)
+                
+                # batch, 1
+                new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)[..., None]
                 
                 ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
