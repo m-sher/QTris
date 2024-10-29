@@ -144,11 +144,15 @@ class Trainer():
     def train(self, gens, train_steps=100):
         
         for gen in range(gens):
+            # Update reference model
+            self.ref_model.set_weights(self.model.get_weights())
+            
             # Run episode
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
             episode_boards, episode_pieces, episode_inputs, episode_actions, episode_valid, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
-            
+
+            # Add data to replay buffer
             for frame in zip(episode_boards, episode_pieces, episode_inputs,
                              episode_actions, episode_valid, episode_probs,
                              episode_advantages, episode_returns):
@@ -161,7 +165,8 @@ class Trainer():
                                               prob[None, ...],
                                               adv[None, ...],
                                               ret[None, ...]))
-        
+
+            # Print metrics
             avg_reward = tf.reduce_mean(episode_rewards)
             sum_reward = tf.reduce_sum(episode_rewards)
             
