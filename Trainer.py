@@ -6,11 +6,11 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, ref_model, optimizers, max_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, ref_model, optimizer, max_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
         self.ref_model = ref_model
-        self.actor_optimizer, self.critic_optimizer = optimizers
+        self.optimizer = optimizer
         self.gamma = gamma
         self.lam = lam
         self.player = Player(max_len=max_len)
@@ -104,69 +104,44 @@ class Trainer():
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, valid_batch, old_probs, advantages, returns, training_actor):
+    def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, valid_batch, old_probs, advantages, returns):
 
-        board_rep, _ = self.model.process_board((board_batch, piece_batch), training=False)
-        
-        with tf.GradientTape() as critic_tape:
-            # batch, max_len, 1
-            values, _ = self.model.process_vals((board_rep, input_batch), training=True)
+        with tf.GradientTape() as tape:
+            logits, values = self.model((board_batch, piece_batch, input_batch), training=True)
+            ref_logits, _ = self.ref_model((board_batch, piece_batch, input_batch), training=False)
 
+            log_probs = tf.nn.log_softmax(logits, axis=-1)
+            ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
+
+            # batch, num_actions
+            last_probs = tf.gather(log_probs,
+                                   valid_batch,
+                                   batch_dims=1)
+
+            # batch, num_actions
+            action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
+            
             # batch, 1
+            new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)[..., None]
+
+            ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
+            
+            kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
+        
             values = tf.gather(values,
                                valid_batch,
                                batch_dims=1)
             
             critic_loss = self._critic_loss_fn(returns, values)
-        critic_grads = critic_tape.gradient(critic_loss, self.critic_vars)
-        self.critic_optimizer.apply_gradients(zip(critic_grads, self.critic_vars))
-    
-        if training_actor:
-            with tf.GradientTape() as actor_tape:
-                # batch, max_len, num_actions
-                logits, _ = self.model.process_keys((board_rep, input_batch), training=True)
-                ref_logits, _ = self.ref_model.process_keys((board_rep, input_batch), training=False)
-                
-                log_probs = tf.nn.log_softmax(logits, axis=-1)
-                ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
 
-                kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
-                
-                # batch, num_actions
-                last_probs = tf.gather(log_probs,
-                                       valid_batch,
-                                       batch_dims=1)
-
-                # batch, num_actions
-                action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
-                
-                # batch, 1
-                new_probs = tf.reduce_sum(last_probs * action_mask, axis=-1)[..., None]
-                
-                ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
-
-                actor_loss = ppo_loss + kl_penalty
+            total_loss = ppo_loss + kl_penalty + critic_loss
             
-            actor_grads = actor_tape.gradient(actor_loss, self.actor_vars)
-            self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_vars))
+        grads = tape.gradient(total_loss, self.model.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
 
-            return actor_loss, kl_penalty, unclipped_proportion, critic_loss
-        return critic_loss
+        return ppo_loss, kl_penalty, unclipped_proportion, critic_loss
     
-    def train(self, gens, train_steps=100, training_actor=False):
-        self.critic_vars = []
-        self.actor_vars = []
-        for layer in self.model.layers:
-            if 'critic' in layer.name:
-                layer.trainable = True
-                for var in layer.trainable_variables:
-                    self.critic_vars.append(var)
-            elif training_actor and 'actor' in layer.name:
-                layer.trainable = True
-                for var in layer.trainable_variables:
-                    self.actor_vars.append(var)
-            else:
-                layer.trainable = False
+    def train(self, gens, train_steps=100):
         
         for gen in range(gens):
             # Run episode
@@ -202,20 +177,13 @@ class Trainer():
                      action_batch, valid_batch, old_probs,
                      advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
                 losses = self._ppo_train_step(board_batch, piece_batch, input_batch, action_batch, valid_batch,
-                                              old_probs, advantage_batch, return_batch, training_actor)
+                                              old_probs, advantage_batch, return_batch)
 
-            if training_actor:
-                actor_loss, kl_penalty, unclipped_proportion, critic_loss = losses
-                print(f'\rActor Loss: {actor_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
-                wandb.log({'actor_loss': actor_loss,
-                           'kl_penalty': kl_penalty,
-                           'unclipped_proportion': unclipped_proportion,
-                           'critic_loss': critic_loss,
-                           'reward': sum_reward,
-                           'reward_per_key': avg_reward})
-            else:
-                critic_loss = losses
-                print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
-                wandb.log({'critic_loss': critic_loss,
-                           'reward': sum_reward,
-                           'reward_per_key': avg_reward})
+            ppo_loss, kl_penalty, unclipped_proportion, critic_loss = losses
+            print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+            wandb.log({'ppo_loss': ppo_loss,
+                       'kl_penalty': kl_penalty,
+                       'unclipped_proportion': unclipped_proportion,
+                       'critic_loss': critic_loss,
+                       'reward': sum_reward,
+                       'reward_per_key': avg_reward})
