@@ -143,7 +143,7 @@ class Trainer():
                 
                 ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
-                actor_loss = ppo_loss + 2.0 * kl_penalty
+                actor_loss = ppo_loss + kl_penalty
             
             actor_grads = actor_tape.gradient(actor_loss, self.actor_vars)
             self.actor_optimizer.apply_gradients(zip(actor_grads, self.actor_vars))
