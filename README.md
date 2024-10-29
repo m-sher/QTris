@@ -8,9 +8,11 @@ $$\color{yellow}\text{●}$$ Low priority
 
 Todo:
 
+$$\color{orange}\text{●}$$ Fix value function learning
+
 $$\color{yellow}\text{●}$$ Write this ReadMe
 
-$$\color{orange}\text{●}$$ Use larger model
+$$\color{yellow}\text{●}$$ Use larger model
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
