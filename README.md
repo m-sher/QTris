@@ -12,11 +12,11 @@ $$\color{yellow}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Larger model
 
-$$\color{red}\text{●}$$ Use reference model for old probabilities
-
 $$\color{yellow}\text{●}$$ Update reference model after n generations
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
+
+$$\color{red}\text{●}$$ ~~Use reference model for old probabilities~~
 
 $$\color{orange}\text{●}$$ ~~Fix value function learning~~
 
