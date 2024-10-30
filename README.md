@@ -12,11 +12,11 @@ $$\color{yellow}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Larger model
 
-$$\color{orange}\text{●}$$ Combine keystrokes into sequences, but maintain separate probabilities
+$$\color{red}\text{●}$$ Use reference model for old probabilities
+
+$$\color{yellow}\text{●}$$ Update reference model after n generations
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
-
-$$\color{yellow}\text{●}$$ ~~Update reference model after each epoch~~
 
 $$\color{orange}\text{●}$$ ~~Fix value function learning~~
 
