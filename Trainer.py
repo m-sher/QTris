@@ -23,6 +23,7 @@ class Trainer():
                      tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
                      tf.TensorSpec(shape=(max_len,), dtype=tf.int32, name='Input'),
                      tf.TensorSpec(shape=(), dtype=tf.int32, name='Action'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Probs'),
                      tf.TensorSpec(shape=(), dtype=tf.int32, name='Valid'),
                      tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantage'),
                      tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Return'))
@@ -60,21 +61,25 @@ class Trainer():
                 break
         
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_valid, episode_values, episode_rewards = episode_data
+            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_valid, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
-            
+
+            # Add data to replay buffer
             for frame in zip(episode_boards, episode_pieces, episode_inputs,
-                             episode_actions, episode_valid, episode_advantages, episode_returns):
-                board, pieces, inputs, action, valid, adv, ret = frame
+                             episode_actions, episode_probs, episode_valid,
+                             episode_advantages, episode_returns):
+                board, pieces, inputs, action, probs, valid, adv, ret = frame
                 self.replay_buffer.add_batch((board[None, ...],
                                               pieces[None, ...],
                                               inputs[None, ...],
                                               action[None, ...],
+                                              probs[None, ...],
                                               valid[None, ...],
                                               adv[None, ...],
                                               ret[None, ...]))
+                
             print(f'\rCurrent Episode: {i}', end='', flush=True)
-        print('\rDone filling replay buffer', end='\n', flush=True)
+        print('\rDone filling replay buffer', end='', flush=True)
 
     @tf.function
     def _ppo_loss_fn(self, new_probs, old_probs, advantages):
@@ -101,7 +106,7 @@ class Trainer():
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, valid_batch, advantages, returns):
+    def _ppo_train_step(self, board_batch, piece_batch, input_batch, action_batch, old_probs, valid_batch, advantages, returns):
 
         with tf.GradientTape() as tape:
             logits, values = self.model((board_batch, piece_batch, input_batch), training=True)
@@ -115,16 +120,11 @@ class Trainer():
                                   valid_batch,
                                   batch_dims=1)
             
-            old_probs = tf.gather(ref_log_probs,
-                                  valid_batch,
-                                  batch_dims=1)
-            
             # batch, num_actions
             action_mask = tf.one_hot(action_batch, depth=tf.shape(log_probs)[-1])
             
             # batch, 1
             new_probs = tf.reduce_sum(new_probs * action_mask, axis=-1)[..., None]
-            old_probs = tf.reduce_sum(old_probs * action_mask, axis=-1)[..., None]
 
             ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
             
@@ -136,7 +136,7 @@ class Trainer():
             
             critic_loss = self._critic_loss_fn(returns, values)
 
-            total_loss = ppo_loss + 0.1 * kl_penalty + critic_loss
+            total_loss = ppo_loss + kl_penalty + critic_loss
             
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
@@ -146,22 +146,22 @@ class Trainer():
     def train(self, gens, train_steps=100):
         
         for gen in range(gens):
-            # Update reference model
-            self.ref_model.set_weights(self.model.get_weights())
             
             # Run episode
             episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
-            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_valid, episode_values, episode_rewards = episode_data
+            episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_valid, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
             # Add data to replay buffer
             for frame in zip(episode_boards, episode_pieces, episode_inputs,
-                             episode_actions, episode_valid, episode_advantages, episode_returns):
-                board, pieces, inputs, action, valid, adv, ret = frame
+                             episode_actions, episode_probs, episode_valid,
+                             episode_advantages, episode_returns):
+                board, pieces, inputs, action, probs, valid, adv, ret = frame
                 self.replay_buffer.add_batch((board[None, ...],
                                               pieces[None, ...],
                                               inputs[None, ...],
                                               action[None, ...],
+                                              probs[None, ...],
                                               valid[None, ...],
                                               adv[None, ...],
                                               ret[None, ...]))
@@ -179,9 +179,11 @@ class Trainer():
             ).prefetch(tf.data.AUTOTUNE)
             
             for i, ((board_batch, piece_batch, input_batch,
-                     action_batch, valid_batch, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
+                     action_batch, prob_batch, valid_batch,
+                     advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
+                
                 losses = self._ppo_train_step(board_batch, piece_batch, input_batch, action_batch, 
-                                              valid_batch, advantage_batch, return_batch)
+                                              prob_batch, valid_batch, advantage_batch, return_batch)
 
             ppo_loss, kl_penalty, unclipped_proportion, critic_loss = losses
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
