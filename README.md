@@ -12,7 +12,7 @@ $$\color{yellow}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Larger model
 
-$$\color{yellow}\text{●}$$ Smaller/Larger KL penalty
+$$\color{orange}\text{●}$$ Combine keystrokes into sequences, but maintain separate probabilities
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
