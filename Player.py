@@ -36,6 +36,7 @@ class Player():
         episode_pieces = []
         episode_inputs = []
         episode_actions = []
+        episode_probs = []
         episode_valid = []
         episode_values = []
         episode_rewards = []
@@ -63,6 +64,7 @@ class Player():
                 episode_pieces.append(piece_obs)
                 episode_inputs.append(self._pad(inp_seq[0], self.max_len))
                 episode_actions.append(key[0, 0])
+                episode_probs.append(tf.nn.log_softmax(logits, axis=-1)[0, -1, key[0, 0]])
                 episode_valid.append(i)
                 episode_values.append(values[0, -1])
                 episode_rewards.append(0.0)
@@ -91,8 +93,9 @@ class Player():
         episode_pieces = tf.stack(episode_pieces, axis=0)
         episode_inputs = tf.stack(episode_inputs, axis=0)
         episode_actions = tf.stack(episode_actions, axis=0)
+        episode_probs = tf.stack(episode_probs, axis=0)[..., None]
         episode_valid = tf.stack(episode_valid, axis=0)
         episode_values = tf.stack(episode_values, axis=0)
         episode_rewards = tf.stack(episode_rewards, axis=0)[..., None]
         
-        return episode_boards, episode_pieces, episode_inputs, episode_actions, episode_valid, episode_values, episode_rewards
+        return episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_valid, episode_values, episode_rewards
