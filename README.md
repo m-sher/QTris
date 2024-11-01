@@ -23,3 +23,5 @@ $$\color{orange}\text{●}$$ ~~Make entire model trainable with one optimizer~~
 $$\color{orange}\text{●}$$ ~~Adjust reward scaling such that attacks are favored more heavily~~
 
 $$\color{red}\text{●}$$ ~~Fix last value for GAE calculation~~
+
+$$\color{red}\text{●}$$ ~~Treat key sequences as actions but maintain separate probabilities~~
