@@ -6,13 +6,14 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, ref_model, optimizer, max_len, gamma, lam, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, model, ref_model, optimizer, max_len, gamma, lam, temperature=1.0, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
         self.model = model
         self.ref_model = ref_model
         self.optimizer = optimizer
         self.gamma = gamma
         self.lam = lam
+        self.temp = temperature
         self.player = Player(max_len=max_len)
         self.max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
@@ -58,7 +59,7 @@ class Trainer():
             if self.replay_buffer.num_frames() >= self.replay_buffer.capacity:
                 break
         
-            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
+            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, temperature=self.temp, renderer=self.renderer)
             episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
@@ -152,7 +153,7 @@ class Trainer():
         for gen in range(gens):
             
             # Run episode
-            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, renderer=self.renderer)
+            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, temperature=self.temp, renderer=self.renderer)
             episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
