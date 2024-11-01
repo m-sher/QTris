@@ -10,6 +10,8 @@ Todo:
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
 
+$$\color{yellow}\text{●}$$ Log attention scores to WandB
+
 $$\color{yellow}\text{●}$$ Larger model
 
 $$\color{yellow}\text{●}$$ Reevaluate use of reference model
