@@ -18,6 +18,8 @@ $$\color{yellow}\text{●}$$ Reevaluate use of reference model
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
+$$\color{orange}\text{●}$$ ~~Save optimizer parameters~~
+
 $$\color{red}\text{●}$$ ~~Add temperature in place of epsilon-greedy/stochastic-sampling~~
 
 $$\color{red}\text{●}$$ ~~Treat key sequences as actions but maintain separate probabilities~~
