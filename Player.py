@@ -31,7 +31,7 @@ class Player():
             padded = tf.concat([item, tf.zeros((length - num_valid), dtype=item.dtype) + pad_value], axis=0)
         return padded
     
-    def run_episode(self, agent, max_steps=50, greedy=False, renderer=None):
+    def run_episode(self, agent, max_steps=50, greedy=False, temperature=1.0, renderer=None):
         episode_boards = []
         episode_pieces = []
         episode_inputs = []
@@ -56,7 +56,7 @@ class Player():
                 if greedy:
                     key = tf.argmax(logits[:, -1:], axis=-1, output_type=tf.int32) # (1, 1)
                 else:
-                    key = tf.random.categorical(logits[:, -1], num_samples=1, dtype=tf.int32) # (1, 1)
+                    key = tf.random.categorical(logits[:, -1] / temperature, num_samples=1, dtype=tf.int32) # (1, 1)
                 
                 inp_seq = tf.concat([inp_seq, key], axis=-1)
                 key = tf.squeeze(key).numpy()
