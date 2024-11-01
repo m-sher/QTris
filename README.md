@@ -12,7 +12,7 @@ $$\color{yellow}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Larger model
 
-$$\color{yellow}\text{●}$$ Update reference model after n generations
+$$\color{yellow}\text{●}$$ Reevaluate use of reference model
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
