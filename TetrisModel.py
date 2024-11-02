@@ -59,8 +59,8 @@ class CrossAttention(layers.Layer):
     @tf.function
     def call(self, x, y, training=False, **kwargs):
         attn, attention_scores = self.mha(
-                 query=x, value=y,
-                 return_attention_scores=True)
+            query=x, value=y,
+            return_attention_scores=True)
         
         x = self.add([x, attn])
         return self.layernorm(x, training=training), attention_scores
