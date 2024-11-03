@@ -139,7 +139,7 @@ class Trainer():
             
             kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
 
-            actor_loss = ppo_loss # + kl_penalty
+            actor_loss = ppo_loss + 0.01 * kl_penalty
             critic_loss = self._critic_loss_fn(valid_mask, returns, values)
             loss = actor_loss + critic_loss
         
