@@ -8,17 +8,17 @@ $$\color{yellow}\text{●}$$ Low priority
 
 Todo:
 
-$$\color{yellow}\text{●}$$ Consider standardizing/scaling returns to ease value function learning
-
 $$\color{yellow}\text{●}$$ Log attention scores to WandB
 
-$$\color{yellow}\text{●}$$ Larger model
-
-$$\color{yellow}\text{●}$$ Reevaluate use of reference model
+$$\color{yellow}\text{●}$$ Make the model larger
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
+
+$$\color{yellow}\text{●}$$ ~~Reevaluate use of reference model~~
+
+$$\color{yellow}\text{●}$$ ~~Consider standardizing/scaling returns to ease value function learning (rejected)~~
 
 $$\color{orange}\text{●}$$ ~~Save optimizer parameters~~
 
