@@ -128,7 +128,7 @@ class DecoderLayer(layers.Layer):
 #         return in_seq, attn_scores
 
 class TetrisModel(keras.Model):
-    def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length):
+    def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length, out_dim):
         super().__init__()
 
         self.depth = depth
@@ -154,17 +154,13 @@ class TetrisModel(keras.Model):
             mask_zero=True
         )
 
-        self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'pdec_{i}')
+        self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'piece_dec_{i}')
                                      for i in range(num_layers)]
         
-        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'actor_dec_{i}')
-                                   for i in range(num_layers)]
-
-        self.val_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'critic_dec_{i}')
+        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'key_dec_{i}')
                                    for i in range(num_layers)]
         
-        self.actor_top = layers.Dense(key_dim, name='actor_top')
-        self.critic_top = layers.Dense(1, name='critic_top')
+        self.model_top = layers.Dense(out_dim, name='model_top')
     
     @tf.function
     def process_board(self, inputs, training=False):
@@ -190,23 +186,9 @@ class TetrisModel(keras.Model):
             key_dec, last_attn = dec_layer([piece_dec, key_dec], training=training)
             key_scores.append(last_attn)
 
-        logits = self.actor_top(key_dec, training=training)
+        key_out = self.model_top(key_dec, training=training)
         
-        return logits, key_scores
-
-    @tf.function
-    def process_vals(self, inputs, training=False):
-        piece_dec, inp_seq = inputs
-
-        val_scores = []
-        val_dec = self.key_embedding(inp_seq)
-        for dec_layer in self.val_decoder_layers:
-            val_dec, last_attn = dec_layer([piece_dec, val_dec], training=training)
-            val_scores.append(last_attn)
-
-        values = self.critic_top(val_dec, training=training)
-        
-        return values, val_scores
+        return key_out, key_scores
     
     @tf.function
     def call(self, inputs, training=False, return_scores=False):
@@ -214,11 +196,9 @@ class TetrisModel(keras.Model):
         
         piece_dec, piece_scores = self.process_board((board, piece), training=training)
         
-        logits, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
-        
-        values, val_scores = self.process_vals((piece_dec, inp_seq), training=training)
+        key_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
 
         if return_scores:
-            return logits, values, piece_scores, key_scores, val_scores
+            return key_out, piece_scores, key_scores, val_scores
         else:
-            return logits, values
+            return key_out
