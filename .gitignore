@@ -4,3 +4,4 @@
 /wandb
 /agent_weights_large
 /agent_weights_small
+/critic_weights_small
