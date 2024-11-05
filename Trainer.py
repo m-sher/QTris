@@ -6,11 +6,12 @@ from Player import Player
 from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
-    def __init__(self, model, ref_model, optimizer, max_len, gamma, lam, temperature=1.0, max_episode_steps=2000, buffer_cap=10000):
+    def __init__(self, agent, critic, ref_model, max_len, gamma, lam, temperature=1.0, max_episode_steps=2000, buffer_cap=10000):
         self.eps = 1e-10
-        self.model = model
+        self.mse = keras.losses.MeanSquaredError(reduction='none')
+        self.agent = agent
+        self.critic = critic
         self.ref_model = ref_model
-        self.optimizer = optimizer
         self.gamma = gamma
         self.lam = lam
         self.temp = temperature
@@ -59,7 +60,8 @@ class Trainer():
             if self.replay_buffer.num_frames() >= self.replay_buffer.capacity:
                 break
         
-            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, temperature=self.temp, renderer=self.renderer)
+            episode_data = self.player.run_episode(self.agent, self.critic, max_steps=self.max_episode_steps,
+                                                   greedy=False, temperature=self.temp, renderer=self.renderer)
             episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
@@ -109,51 +111,61 @@ class Trainer():
         # returns -> batch, 1
         # values -> batch, max_len, 1
 
-        masked_diff = (returns[:, None, :] - values) * valid_mask
-        critic_loss = tf.reduce_sum(masked_diff ** 2) / tf.reduce_sum(valid_mask)
+        raw_loss = self.mse(returns[:, None, :], values)
+        critic_loss = tf.reduce_sum(raw_loss * valid_mask) / tf.reduce_sum(valid_mask)
         return critic_loss
     
     @tf.function
-    def _ppo_train_step(self, board_batch, piece_batch, input_batch, old_probs, advantages, returns):
-
-        with tf.GradientTape() as tape:
-            inputs = input_batch[:, :-1]
-            actions = input_batch[:, 1:]
-            
-            logits, values = self.model((board_batch, piece_batch, inputs), training=True)
-            ref_logits, _ = self.ref_model((board_batch, piece_batch, inputs), training=False)
-
-            # batch, max_len, key_dim
-            log_probs = tf.nn.log_softmax(logits, axis=-1)
-            ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
-
-            # batch, max_len, 1
-            new_probs = tf.gather(log_probs,
-                                  actions,
-                                  batch_dims=2)[..., None]
-
-            # batch, max_len, 1
-            valid_mask = tf.cast(actions != 0, tf.float32)[..., None]
-            
-            ppo_loss, unclipped_proportion = self._ppo_loss_fn(valid_mask, new_probs, old_probs, advantages)
-            
-            kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
-
-            actor_loss = ppo_loss + 0.01 * kl_penalty
-            critic_loss = self._critic_loss_fn(valid_mask, returns, values)
-            loss = actor_loss + critic_loss
+    def _train_step(self, board_batch, piece_batch, input_batch, old_probs, advantages, returns, training_actor):
         
-        grads = tape.gradient(loss, self.model.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.model.trainable_variables))
+        inputs = input_batch[:, :-1]
+        actions = input_batch[:, 1:]
+
+        # batch, max_len, 1
+        valid_mask = tf.cast(actions != 0, tf.float32)
         
-        return ppo_loss, kl_penalty, unclipped_proportion, critic_loss
+        with tf.GradientTape() as critic_tape:
+            values = self.critic((board_batch, piece_batch, inputs), training=True)
     
-    def train(self, gens, train_steps=100):
+            critic_loss = self._critic_loss_fn(valid_mask, returns, values)
+
+        critic_grads = critic_tape.gradient(critic_loss, self.critic.trainable_variables)
+        self.critic.optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
+
+        if training_actor:
+            with tf.GradientTape() as agent_tape:
+                logits = self.agent((board_batch, piece_batch, inputs), training=True)
+                ref_logits = self.ref_model((board_batch, piece_batch, inputs), training=False)
+    
+                # batch, max_len, key_dim
+                log_probs = tf.nn.log_softmax(logits, axis=-1)
+                ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
+    
+                # batch, max_len, 1
+                new_probs = tf.gather(log_probs,
+                                      actions,
+                                      batch_dims=2)[..., None]
+                
+                ppo_loss, unclipped_proportion = self._ppo_loss_fn(valid_mask, new_probs, old_probs, advantages)
+                
+                kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
+    
+                agent_loss = ppo_loss + 0.1 * kl_penalty
+
+            agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
+            self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
+
+            return ppo_loss, kl_penalty, unclipped_proportion, critic_loss
+        
+        return critic_loss
+    
+    def train(self, gens, train_steps=100, training_actor=False):
         
         for gen in range(gens):
             
             # Run episode
-            episode_data = self.player.run_episode(self.model, max_steps=self.max_episode_steps, greedy=False, temperature=self.temp, renderer=self.renderer)
+            episode_data = self.player.run_episode(self.agent, self.critic, max_steps=self.max_episode_steps,
+                                                   greedy=False, temperature=self.temp, renderer=self.renderer)
             episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
@@ -183,14 +195,21 @@ class Trainer():
             for i, ((board_batch, piece_batch, input_batch,
                      prob_batch, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
                 
-                losses = self._ppo_train_step(board_batch, piece_batch, input_batch, 
-                                              prob_batch, advantage_batch, return_batch)
+                losses = self._train_step(board_batch, piece_batch, input_batch, 
+                                          prob_batch, advantage_batch, return_batch, training_actor)
 
-            ppo_loss, kl_penalty, unclipped_proportion, critic_loss = losses
-            print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
-            wandb.log({'ppo_loss': ppo_loss,
-                       'kl_penalty': kl_penalty,
-                       'unclipped_proportion': unclipped_proportion,
-                       'critic_loss': critic_loss,
-                       'reward': sum_reward,
-                       'reward_per_piece': avg_reward})
+            if training_actor:
+                ppo_loss, kl_penalty, unclipped_proportion, critic_loss = losses
+                print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                wandb.log({'ppo_loss': ppo_loss,
+                           'kl_penalty': kl_penalty,
+                           'unclipped_proportion': unclipped_proportion,
+                           'critic_loss': critic_loss,
+                           'reward': sum_reward,
+                           'reward_per_piece': avg_reward})
+            else:
+                critic_loss = losses
+                print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                wandb.log({'critic_loss': critic_loss,
+                           'reward': sum_reward,
+                           'reward_per_piece': avg_reward})

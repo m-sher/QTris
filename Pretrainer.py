@@ -148,7 +148,7 @@ class Pretrainer():
 
     @tf.function
     def _masked_value_loss(self, true, pred, mask):
-        raw_loss = self.mse(true, pred)
+        raw_loss = self.mse(true[..., None, None], pred)
         
         loss = tf.reduce_sum(raw_loss * mask) / tf.reduce_sum(mask)
         return loss
@@ -164,31 +164,38 @@ class Pretrainer():
         return acc
 
     @tf.function
-    def _train_step(self, model, board, piece, inp, tar, att):
+    def _train_step(self, actor, critic, board, piece, inp, tar, att):
         mask = tf.cast(tar != 0, tf.float32)
-        with tf.GradientTape() as tape:
-            logits, values = model((board, piece, inp), training=True)
+        
+        with tf.GradientTape() as actor_tape:
+            logits = actor((board, piece, inp), training=True)
             actor_loss = self._masked_logit_loss(tar, logits, mask)
-            critic_loss = self._masked_value_loss(att, values, mask)
-            loss = actor_loss + critic_loss
-        grads = tape.gradient(loss, model.trainable_variables)
-        model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        actor_grads = actor_tape.gradient(actor_loss, actor.trainable_variables)
+        actor.optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
         
         acc = self._masked_logit_acc(tar, logits, mask)
-        return loss, acc
 
-    def train(self, model, gt_dset, epochs):
-        losses, accs = [], []
+        with tf.GradientTape() as critic_tape:
+            values = critic((board, piece, inp), training=True)
+            critic_loss = self._masked_value_loss(att, values, mask)
+        critic_grads = critic_tape.gradient(critic_loss, critic.trainable_variables)
+        critic.optimizer.apply_gradients(zip(critic_grads, critic.trainable_variables))
+        
+        return actor_loss, critic_loss, acc
+
+    def train(self, actor, critic, gt_dset, epochs):
+        actor_losses, critic_losses, accs = [], [], []
         for epoch in range(epochs):
             print()
             last_time = time.time()
             for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset):
-                loss, acc = self._train_step(model, board, piece, inp, tar, att)
+                actor_loss, critic_loss, acc = self._train_step(actor, critic, board, piece, inp, tar, att)
                 if i % 10 == 0:
                     cur_time = time.time()
-                    print(f'\r{i}\t|\tLoss: {loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
+                    print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
                     last_time = cur_time
-                    losses.append(loss)
+                    actor_losses.append(actor_loss)
+                    critic_losses.append(critic_loss)
                     accs.append(acc)
-        return losses, accs
+        return actor_losses, critic_losses, accs
 
