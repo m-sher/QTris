@@ -82,13 +82,16 @@ class Trainer():
     @tf.function
     def _ppo_loss_fn(self, valid_mask, new_probs, old_probs, advantages):
 
-        # valid_mask -> batch, max_len, 1
+        # valid_mask -> batch, max_len
         # new_probs -> batch, max_len, 1
         # old_probs -> batch, max_len, 1
         # advantages -> batch, 1
         
         epsilon = 0.2
 
+        # batch, max_len, 1
+        valid_mask = valid_mask[..., None]
+        
         # batch, 1, 1
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))[:, None, :]
         
