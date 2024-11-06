@@ -137,9 +137,11 @@ class Trainer():
 
         if training_actor:
             with tf.GradientTape() as agent_tape:
-                logits = self.agent((board_batch, piece_batch, inputs), training=True)
-                ref_logits = self.ref_model((board_batch, piece_batch, inputs), training=False)
-    
+                logits, piece_scores, key_scores = self.agent((board_batch, piece_batch, inputs), training=True, return_scores=True)
+                ref_logits, ref_piece_scores, ref_key_scores = self.ref_model((board_batch, piece_batch, inputs), training=False, return_scores=True)
+                scores = {'current': [piece_scores, key_scores],
+                          'reference': [ref_piece_scores, ref_key_scores]}
+                
                 # batch, max_len, key_dim
                 log_probs = tf.nn.log_softmax(logits, axis=-1)
                 ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
@@ -158,7 +160,7 @@ class Trainer():
             agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
             self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
 
-            return ppo_loss, kl_penalty, unclipped_proportion, critic_loss
+            return ppo_loss, kl_penalty, critic_loss, unclipped_proportion, scores
         
         return critic_loss
     
@@ -198,21 +200,33 @@ class Trainer():
             for i, ((board_batch, piece_batch, input_batch,
                      prob_batch, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
                 
-                losses = self._train_step(board_batch, piece_batch, input_batch, 
-                                          prob_batch, advantage_batch, return_batch, training_actor)
+                step_out = self._train_step(board_batch, piece_batch, input_batch, 
+                                            prob_batch, advantage_batch, return_batch, training_actor)
 
+            
             if training_actor:
-                ppo_loss, kl_penalty, unclipped_proportion, critic_loss = losses
+                ppo_loss, kl_penalty, critic_loss, unclipped_proportion, scores = step_out
                 print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+
+                c_scores = tf.reshape(tf.reduce_mean(scores['current'][0], axis=[0, 2, 3])[0], (14, 5, 1))
+                norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
+                
+                r_scores = tf.reshape(tf.reduce_mean(scores['reference'][0], axis=[0, 2, 3])[0], (14, 5, 1))
+                norm_r_scores = (r_scores - tf.reduce_min(r_scores)) / (tf.reduce_max(r_scores) - tf.reduce_min(r_scores))
+                
                 wandb.log({'ppo_loss': ppo_loss,
                            'kl_penalty': kl_penalty,
                            'unclipped_proportion': unclipped_proportion,
                            'critic_loss': critic_loss,
                            'reward': sum_reward,
-                           'reward_per_piece': avg_reward})
+                           'reward_per_piece': avg_reward,
+                           'board': wandb.Image(board_batch[0]),
+                           'current_scores': wandb.Image(norm_c_scores),
+                           'reference_scores': wandb.Image(norm_r_scores)})
             else:
-                critic_loss = losses
+                critic_loss = step_out
                 print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                
                 wandb.log({'critic_loss': critic_loss,
                            'reward': sum_reward,
                            'reward_per_piece': avg_reward})
