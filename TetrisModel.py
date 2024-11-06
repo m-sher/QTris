@@ -199,6 +199,6 @@ class TetrisModel(keras.Model):
         key_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
 
         if return_scores:
-            return key_out, piece_scores, key_scores, val_scores
+            return key_out, piece_scores, key_scores
         else:
             return key_out
