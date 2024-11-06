@@ -8,8 +8,6 @@ $$\color{yellow}\text{●}$$ Low priority
 
 Todo:
 
-$$\color{yellow}\text{●}$$ Log attention scores to WandB
-
 $$\color{yellow}\text{●}$$ Make the model larger
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
@@ -17,6 +15,8 @@ $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
+
+$$\color{yellow}\text{●}$$ ~~Log attention scores to WandB~~
 
 $$\color{yellow}\text{●}$$ ~~Reevaluate use of reference model~~
 
