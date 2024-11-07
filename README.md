@@ -8,6 +8,8 @@ $$\color{yellow}\text{●}$$ Low priority
 
 Todo:
 
+$$\color{orange}\text{●}$$ Create demo/explanation videos w/ manim
+
 $$\color{yellow}\text{●}$$ Make the model larger
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
