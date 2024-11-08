@@ -14,6 +14,8 @@ $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{yellow}\text{●}$$ Make the model larger
 
+	$$\color{yellow}\text{●}$$ Rescale input to [-1, 1]
+
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
