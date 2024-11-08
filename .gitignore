@@ -6,3 +6,7 @@
 /agent_weights_small
 /critic_weights_small
 /media
+tki.npy
+conv1.npy
+conv2.npy
+conv3.npy
