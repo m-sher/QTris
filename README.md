@@ -14,7 +14,7 @@ $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{yellow}\text{●}$$ Make the model larger
 
-\t$$\color{yellow}\text{●}$$ Rescale input to [-1, 1]
+$$\t\color{yellow}\text{●}$$ Rescale input to [-1, 1]
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
