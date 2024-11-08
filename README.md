@@ -6,9 +6,11 @@ $$\color{orange}\text{●}$$ Medium priority
 
 $$\color{yellow}\text{●}$$ Low priority
 
+$$\color{green}\text{●}$$ In progress
+
 Todo:
 
-$$\color{orange}\text{●}$$ Create demo/explanation videos w/ manim
+$$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{yellow}\text{●}$$ Make the model larger
 
