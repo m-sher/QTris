@@ -12,6 +12,8 @@ Todo:
 
 $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
+$$\color{yellow}\text{●}$$ Consider using individual values (already calculated) when computing advantages
+
 $$\color{yellow}\text{●}$$ Make the model larger
 
 $$\color{yellow}\text{●}$$ Rescale input to [-1, 1]
