@@ -139,7 +139,7 @@ class TetrisModel(keras.Model):
             layers.Conv2D(filters=depth, kernel_size=3, strides=2, activation='relu', padding='same'),
             layers.Reshape((-1, depth))
         ])
-
+        
         self.piece_embedding = SeqEmbedding(
             in_dim=piece_dim,
             depth=depth,
@@ -153,7 +153,7 @@ class TetrisModel(keras.Model):
             max_length=max_length,
             mask_zero=True
         )
-
+        
         self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'piece_dec_{i}')
                                      for i in range(num_layers)]
         
