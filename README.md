@@ -10,6 +10,8 @@ $$\color{green}\text{●}$$ In progress
 
 Todo:
 
+$$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY IT'S WORKING, JUST LET IT LEARN
+
 $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{yellow}\text{●}$$ Make the model larger
