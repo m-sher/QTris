@@ -193,7 +193,7 @@ class Trainer():
         
             # Make dataset sampling from replay buffer
             dset = self.replay_buffer.as_dataset(
-                sample_batch_size=32,
+                sample_batch_size=128,
                 num_parallel_calls=tf.data.AUTOTUNE
             ).prefetch(tf.data.AUTOTUNE)
             
