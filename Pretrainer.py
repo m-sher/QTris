@@ -125,7 +125,7 @@ class Pretrainer():
                         deterministic=False)
                    .cache()
                    .shuffle(100000)
-                   .batch(32,
+                   .batch(128,
                           num_parallel_calls=tf.data.AUTOTUNE,
                           deterministic=False,
                           drop_remainder=True)
