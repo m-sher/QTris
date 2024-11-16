@@ -14,7 +14,11 @@ $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY
 
 $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
+$$\color{yellow}\text{●}$$ Enable parallel trajectory collection
+
 $$\color{yellow}\text{●}$$ Make the model larger
+
+$$\color{yellow}\text{●}$$ Make feature extraction deeper
 
 $$\color{yellow}\text{●}$$ Rescale input to [-1, 1]
 
