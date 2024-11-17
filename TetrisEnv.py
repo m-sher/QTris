@@ -189,8 +189,8 @@ class CustomScorer(Scorer):
             else:
                 score += [0, 0, 1, 2, 4][line_clears]
 
-            if self.combo:
-                score += self.combo - 1
+            # if self.combo:
+            #     score += self.combo - 1
 
             # score *= self.level
 
