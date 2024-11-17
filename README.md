@@ -16,17 +16,19 @@ $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{yellow}\text{●}$$ Enable parallel trajectory collection
 
-$$\color{yellow}\text{●}$$ Make the model larger
+$$\color{orange}\text{●}$$ Make the model larger
 
-$$\color{yellow}\text{●}$$ Make feature extraction deeper
+$$\color{orange}\text{●}$$ Make feature extraction deeper
 
-$$\color{yellow}\text{●}$$ Rescale input to [-1, 1]
+$$\color{orange}\text{●}$$ Rescale input to [-1, 1]
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
+
+$$\color{yellow}\text{●}$$ ~~Log attention score differences~~
 
 $$\color{yellow}\text{●}$$ ~~Consider using individual values (already calculated) when computing advantages~~
 
