@@ -42,13 +42,19 @@ class Trainer():
     @tf.function(reduce_retracing=True)
     def _compute_gae(self, values, rewards, gamma, lam):
         advantages = tf.TensorArray(dtype=tf.float32, size=tf.shape(rewards)[0])
-        gae = tf.constant([0.0])
+        last_adv = tf.constant([0.0])
+        last_val = values[-1]
 
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
-            delta = rewards[t] + gamma * (values[t + 1] if t != last_ind else tf.constant([0.0])) - values[t]
-            gae = delta + gamma * lam * gae
-            advantages = advantages.write(t, gae)
+            if t == last_ind and rewards[t] == -1:
+                last_val = tf.constant([0.0])
+            
+            
+            delta = rewards[t] + gamma * last_val - values[t]
+            last_adv = delta + gamma * lam * last_adv
+            advantages = advantages.write(t, last_adv)
+            last_val = values[t]
 
         advantages = advantages.stack()
         
@@ -88,7 +94,7 @@ class Trainer():
         # old_probs -> batch, max_len, 1
         # advantages -> batch, 1
         
-        epsilon = 0.2
+        epsilon = 0.1
 
         # batch, 1, 1
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))[..., None]
@@ -150,17 +156,19 @@ class Trainer():
                 new_probs = tf.gather(log_probs,
                                       actions,
                                       batch_dims=2)[..., None]
+
+                entropy = tf.reduce_sum(log_probs * tf.exp(log_probs))
                 
                 ppo_loss, unclipped_proportion = self._ppo_loss_fn(valid_mask, new_probs, old_probs, advantages)
                 
-                kl_penalty = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
+                kl_div = keras.losses.KLDivergence()(tf.exp(ref_log_probs), tf.exp(log_probs))
     
-                agent_loss = ppo_loss + 0.05 * kl_penalty
+                agent_loss = ppo_loss + 0.01 * entropy
 
             agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
             self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
 
-            return ppo_loss, kl_penalty, critic_loss, unclipped_proportion, scores
+            return ppo_loss, entropy, kl_div, critic_loss, unclipped_proportion, scores
         
         return critic_loss
     
@@ -205,8 +213,8 @@ class Trainer():
 
             
             if training_actor:
-                ppo_loss, kl_penalty, critic_loss, unclipped_proportion, scores = step_out
-                print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Penalty: {kl_penalty:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
+                ppo_loss, entropy, kl_div, critic_loss, unclipped_proportion, scores = step_out
+                print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
                 c_scores = tf.reshape(tf.reduce_mean(scores['current'][0], axis=[0, 2, 3])[0], (14, 5, 1))
                 norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
@@ -215,14 +223,16 @@ class Trainer():
                 norm_r_scores = (r_scores - tf.reduce_min(r_scores)) / (tf.reduce_max(r_scores) - tf.reduce_min(r_scores))
                 
                 wandb.log({'ppo_loss': ppo_loss,
-                           'kl_penalty': kl_penalty,
+                           'entropy': entropy,
+                           'kl_div': kl_div,
                            'unclipped_proportion': unclipped_proportion,
                            'critic_loss': critic_loss,
                            'reward': sum_reward,
                            'reward_per_piece': avg_reward,
                            'board': wandb.Image(board_batch[0]),
                            'current_scores': wandb.Image(norm_c_scores),
-                           'reference_scores': wandb.Image(norm_r_scores)})
+                           'reference_scores': wandb.Image(norm_r_scores),
+                           'score_diff': wandb.Image(norm_c_scores - norm_r_scores)})
             else:
                 critic_loss = step_out
                 print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
