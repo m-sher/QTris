@@ -5,7 +5,7 @@ from TetrisEnv import CustomScorer
 class Player():
     def __init__(self, max_len):
         self.game = TetrisEnv(CustomScorer())
-        self.eps = 1e-10
+        self.reward_eps = 0.01
         self.max_len = max_len
         
         self.key_dict = {
@@ -77,7 +77,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append(tf.constant([reward / 4 + 0.1 * tf.cast(len(key_chars) <= 4, tf.float32) + 0.01])) # (1,)
+            episode_rewards.append(tf.constant([reward / 4 + self.reward_eps if len(key_chars) <= 4 else 0.0])) # (1,)
             
             if renderer:
                 fig, img = renderer
