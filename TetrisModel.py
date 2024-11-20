@@ -134,6 +134,9 @@ class TetrisModel(keras.Model):
         self.depth = depth
         
         self.feature_extraction = keras.Sequential([
+            layers.Rescaling(scale=2.0, offset=-1.0),
+            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
+            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
             layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
             layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
             layers.Conv2D(filters=depth, kernel_size=3, strides=2, activation='relu', padding='same'),
