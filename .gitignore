@@ -10,3 +10,6 @@ tki.npy
 conv1.npy
 conv2.npy
 conv3.npy
+/agent_checkpoint
+/critic_checkpoint
+/critic_weights_large
