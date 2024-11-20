@@ -77,7 +77,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append(tf.constant([reward / 4 + 0.01])) # (1,)
+            episode_rewards.append(tf.constant([reward / 4 + 0.1 * tf.cast(len(key_chars) <= 4, tf.float32) + 0.01])) # (1,)
             
             if renderer:
                 fig, img = renderer
