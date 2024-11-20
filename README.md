@@ -14,21 +14,23 @@ $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY
 
 $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
-$$\color{yellow}\text{●}$$ Fix logged attention score differences (difference between unnormalized scores instead of normalized)
-
-$$\color{yellow}\text{●}$$ Enable parallel trajectory collection
-
-$$\color{orange}\text{●}$$ Make the model larger
-
-$$\color{orange}\text{●}$$ Make feature extraction deeper
-
-$$\color{orange}\text{●}$$ Rescale input to [-1, 1]
+$$\color{yellow}\text{●}$$ Implement parallel trajectory collection
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
+
+$$\color{yellow}\text{●}$$ ~~Encourage shorter actions either as a scaling penalty, inversely scaling reward, or threshold-based penalty/reward~~
+
+$$\color{orange}\text{●}$$ ~~Make the model larger~~
+
+$$\color{orange}\text{●}$$ ~~Make feature extraction deeper~~
+
+$$\color{orange}\text{●}$$ ~~Rescale input to [-1, 1]~~
+
+$$\color{yellow}\text{●}$$ ~~Fix logged attention score differences (difference between unnormalized scores instead of normalized)~~
 
 $$\color{yellow}\text{●}$$ ~~Log attention score differences~~
 
