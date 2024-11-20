@@ -164,7 +164,7 @@ class Trainer():
                 raw_kl_div = keras.losses.KLDivergence(reduction='none')(tf.exp(ref_log_probs), tf.exp(log_probs))
                 kl_div = tf.reduce_sum(raw_kl_div[..., None] * valid_mask) / tf.reduce_sum(valid_mask)
     
-                agent_loss = ppo_loss + 0.01 * entropy + 0.01 * kl_div
+                agent_loss = ppo_loss + 0.01 * entropy
 
             agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
             self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
@@ -222,6 +222,9 @@ class Trainer():
                 
                 r_scores = tf.reshape(tf.reduce_mean(scores['reference'][0], axis=[0, 2, 3])[0], (14, 5, 1))
                 norm_r_scores = (r_scores - tf.reduce_min(r_scores)) / (tf.reduce_max(r_scores) - tf.reduce_min(r_scores))
+
+                score_diff = (c_scores - r_scores) ** 2
+                norm_score_diff = (score_diff - tf.reduce_min(score_diff)) / (tf.reduce_max(score_diff) - tf.reduce_min(score_diff))
                 
                 wandb.log({'ppo_loss': ppo_loss,
                            'entropy': entropy,
@@ -233,7 +236,7 @@ class Trainer():
                            'board': wandb.Image(board_batch[0]),
                            'current_scores': wandb.Image(norm_c_scores),
                            'reference_scores': wandb.Image(norm_r_scores),
-                           'score_diff': wandb.Image(norm_c_scores - norm_r_scores)})
+                           'score_diff': wandb.Image(norm_score_diff)})
             else:
                 critic_loss = step_out
                 print(f'\rCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
