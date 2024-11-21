@@ -2,9 +2,6 @@
 /__pycache__
 /agent_weights
 /wandb
-/agent_weights_large
-/agent_weights_small
-/critic_weights_small
 /media
 tki.npy
 conv1.npy
@@ -12,4 +9,3 @@ conv2.npy
 conv3.npy
 /agent_checkpoint
 /critic_checkpoint
-/critic_weights_large
