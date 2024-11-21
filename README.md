@@ -22,7 +22,7 @@ $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
 
-$$\color{yellow}\text{●}$$ ~~Encourage shorter actions either as a scaling penalty, inversely scaling reward, or threshold-based penalty/reward~~
+$$\color{yellow}\text{●}$$ Revisit encouraging short actions
 
 $$\color{orange}\text{●}$$ ~~Make the model larger~~
 
