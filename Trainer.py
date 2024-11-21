@@ -8,6 +8,7 @@ from tf_agents.replay_buffers import TFUniformReplayBuffer
 class Trainer():
     def __init__(self, agent, critic, ref_model, max_len, gamma, lam, temperature=1.0, max_episode_steps=2000, buffer_cap=10000, render=True):
         self.eps = 1e-10
+        self.ppo_epsilon = 0.2
         self.agent = agent
         self.critic = critic
         self.ref_model = ref_model
@@ -93,14 +94,12 @@ class Trainer():
         # new_probs -> batch, max_len, 1
         # old_probs -> batch, max_len, 1
         # advantages -> batch, 1
-        
-        epsilon = 0.1
 
         # batch, 1, 1
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))[..., None]
         
         ratio = tf.exp(new_probs - old_probs)
-        clipped_ratio = tf.clip_by_value(ratio, 1 - epsilon, 1 + epsilon)
+        clipped_ratio = tf.clip_by_value(ratio, 1 - self.ppo_epsilon, 1 + self.ppo_epsilon)
 
         unclipped_proportion = tf.reduce_sum(tf.cast(ratio == clipped_ratio, tf.float32) * valid_mask) / tf.reduce_sum(valid_mask)
 
@@ -164,7 +163,7 @@ class Trainer():
                 raw_kl_div = keras.losses.KLDivergence(reduction='none')(tf.exp(ref_log_probs), tf.exp(log_probs))
                 kl_div = tf.reduce_sum(raw_kl_div[..., None] * valid_mask) / tf.reduce_sum(valid_mask)
     
-                agent_loss = ppo_loss + 0.01 * entropy
+                agent_loss = ppo_loss + 0.01 * entropy + 0.01 * kl_div
 
             agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
             self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
