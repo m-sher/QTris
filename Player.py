@@ -77,7 +77,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append(tf.constant([reward / 4 + self.reward_eps if len(key_chars) <= 4 else 0.0])) # (1,)
+            episode_rewards.append(tf.constant([reward / 4 + self.reward_eps])) # (1,)
             
             if renderer:
                 fig, img = renderer
@@ -86,7 +86,7 @@ class Player():
                 fig.canvas.flush_events()
     
             if terminated:
-                episode_rewards[-1] = tf.constant([-1.0])
+                episode_rewards[-1] = tf.constant([-self.reward_eps])
                 break
         
         episode_boards = tf.stack(episode_boards, axis=0)
