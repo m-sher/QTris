@@ -22,7 +22,7 @@ $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
 
-$$\color{yellow}\text{●}$$ Revisit encouraging short actions
+$$\color{yellow}\text{●}$$ Revisit encouraging short actions - Learning rate was too high, causing instability. This is safe to reimplement
 
 $$\color{orange}\text{●}$$ ~~Make the model larger~~
 
