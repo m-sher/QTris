@@ -75,7 +75,7 @@ class TetrisEnv():
         return board, pieces
     
     def _get_board(self):
-        board = np.array(self._game.board[-28:]) != 0
+        board = (np.array(self._game.board[-28:]) != 0).astype(np.int32)
         return board
     
     def _get_pieces(self):
