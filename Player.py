@@ -30,6 +30,21 @@ class Player():
         else:
             padded = tf.concat([item, tf.zeros((length - num_valid), dtype=item.dtype) + pad_value], axis=0)
         return padded
+
+    def _get_heights(self, board):
+        row_positions = tf.range(tf.shape(board)[0], 0, -1, dtype=tf.int32)[..., None]
+        weighted_board = board * row_positions
+        heights = tf.reduce_max(weighted_board, axis=0)
+        return heights
+
+    def _get_holes(self, board, heights):
+        return tf.reduce_sum(tf.reduce_sum(board, axis=0) - heights)
+    
+    def _get_supp_reward(self, board, last_holes):
+        heights = self._get_heights(board)
+        holes = self._get_holes(board, heights)
+        hole_reward = self.reward_eps if holes <= last_holes else -self.reward_eps
+        return holes, hole_reward
     
     def run_episode(self, agent, critic, max_steps=50, greedy=False, temperature=1.0, renderer=None):
         episode_boards = []
@@ -40,6 +55,8 @@ class Player():
         episode_rewards = []
     
         board, piece, _, terminated = self.game.reset()
+        heights = self._get_heights(board)
+        last_holes = self._get_holes(board, heights)
         
         for t in range(max_steps):
             board_obs = tf.cast(board, tf.float32)[..., None]
@@ -68,7 +85,9 @@ class Player():
 
             key_chars[-1] = 'H'
             board, piece, reward, terminated = self.game.step(key_chars)
-
+            last_holes, hole_reward = self._get_supp_reward(board, last_holes)
+            scaled_attack = reward / 4.0
+            
             episode_boards.append(board_obs)
             episode_pieces.append(piece_obs)
             episode_inputs.append(self._pad(inp_seq[0], self.max_len+1)) # (max_len+1,)
@@ -77,7 +96,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append(tf.constant([reward / 4 + self.reward_eps])) # (1,)
+            episode_rewards.append(tf.constant([scaled_attack + hole_reward + self.reward_eps])) # (1,)
             
             if renderer:
                 fig, img = renderer
