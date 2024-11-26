@@ -163,7 +163,7 @@ class Trainer():
                 raw_kl_div = keras.losses.KLDivergence(reduction='none')(tf.exp(ref_log_probs), tf.exp(log_probs))
                 kl_div = tf.reduce_sum(raw_kl_div[..., None] * valid_mask) / tf.reduce_sum(valid_mask)
     
-                agent_loss = ppo_loss + 0.01 * entropy + 0.01 * kl_div
+                agent_loss = ppo_loss + 0.01 * entropy # + 0.01 * kl_div
 
             agent_grads = agent_tape.gradient(agent_loss, self.agent.trainable_variables)
             self.agent.optimizer.apply_gradients(zip(agent_grads, self.agent.trainable_variables))
