@@ -186,13 +186,11 @@ class Trainer():
         
         return critic_loss
 
-    def _decay_weights(self, board, pieces, inputs, probs, adv, ret, ep_num):
+    def _decay_weights(self, sample):
+        board, pieces, inputs, probs, adv, ret, ep_num = sample
         weight = tf.exp(-(self.current_episode - ep_num) / 2)
         return board, pieces, inputs, probs, adv, ret, weight
 
-    def _filter_by_weight(self, board, pieces, inputs, probs, adv, ret, weight):
-        return weight > 0.1
-    
     def train(self, gens, train_steps=100, training_actor=False):
         
         for gen in range(gens):
@@ -227,14 +225,13 @@ class Trainer():
             dset = (self.replay_buffer.as_dataset(
                         sample_batch_size=128,
                         num_parallel_calls=tf.data.AUTOTUNE)
-                    .map(self._decay_weights,
+                    .map(lambda sample, _: self._decay_weights(sample),
                          num_parallel_calls=tf.data.AUTOTUNE,
                          deterministic=False)
-                    .filter(self._filter_by_weight)
                     .prefetch(tf.data.AUTOTUNE))
             
-            for i, ((board_batch, piece_batch, input_batch,
-                     prob_batch, advantage_batch, return_batch, weight_batch), _) in enumerate(dset.take(train_steps)):
+            for i, (board_batch, piece_batch, input_batch,
+                    prob_batch, advantage_batch, return_batch, weight_batch) in enumerate(dset.take(train_steps)):
                 
                 step_out = self._train_step(board_batch, piece_batch, input_batch,
                                             prob_batch, advantage_batch, return_batch,
