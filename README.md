@@ -24,9 +24,9 @@ $$\color{yellow}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Allow longer replay buffer usage by implementing decaying sample weights (Reverted to revisit later)
 
-$$\color{yellow}\text{●}$$ ~~Adjust reward design to directly penalize holes~~
+$$\color{yellow}\text{●}$$ Revisit encouraging short actions - Learning rate was too high, causing instability. This is safe to reimplement
 
-$$\color{yellow}\text{●}$$ ~~Revisit encouraging short actions - Learning rate was too high, causing instability. This is safe to reimplement~~
+$$\color{yellow}\text{●}$$ ~~Adjust reward design to directly penalize holes~~
 
 $$\color{orange}\text{●}$$ ~~Make the model larger~~
 
