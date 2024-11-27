@@ -17,6 +17,7 @@ class Trainer():
         self.temp = temperature
         self.player = Player(max_len=max_len)
         self.max_episode_steps = max_episode_steps
+        self.current_episode = 0.0
         self.wandb_run = wandb.init(
             project='Tetris'
         )
@@ -26,7 +27,8 @@ class Trainer():
                      tf.TensorSpec(shape=(max_len+1,), dtype=tf.int32, name='Input'),
                      tf.TensorSpec(shape=(max_len, 1,), dtype=tf.float32, name='Probs'),
                      tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantage'),
-                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Return'))
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Return'),
+                     tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Episode'))
 
         self.replay_buffer = TFUniformReplayBuffer(
             data_spec,
@@ -82,18 +84,20 @@ class Trainer():
                                               inputs[None, ...],
                                               probs[None, ...],
                                               adv[None, ...],
-                                              ret[None, ...]))
+                                              ret[None, ...],
+                                              tf.constant([self.current_episode])[None, ...]))
                 
             print(f'\rCurrent Episode: {i}', end='', flush=True)
         print('\rDone filling replay buffer', end='', flush=True)
 
     @tf.function
-    def _ppo_loss_fn(self, valid_mask, new_probs, old_probs, advantages):
+    def _ppo_loss_fn(self, valid_mask, new_probs, old_probs, advantages, sample_weights):
 
         # valid_mask -> batch, max_len, 1
         # new_probs -> batch, max_len, 1
         # old_probs -> batch, max_len, 1
         # advantages -> batch, 1
+        # sample_weights -> batch, 1
 
         # batch, 1, 1
         advantages = ((advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + self.eps))[..., None]
@@ -106,23 +110,33 @@ class Trainer():
         # batch, max_len, 1
         clipped = clipped_ratio * advantages
         unclipped = ratio * advantages
-    
-        ppo_loss = -tf.reduce_sum(tf.minimum(clipped, unclipped) * valid_mask) / tf.reduce_sum(valid_mask)
+
+        # batch, 1
+        ppo_loss = -tf.reduce_sum(tf.minimum(clipped, unclipped) * valid_mask, axis=1) / tf.reduce_sum(valid_mask, axis=1)
+        
+        ppo_loss = tf.reduce_sum(ppo_loss * sample_weights)
         
         return ppo_loss, unclipped_proportion
 
     @tf.function
-    def _critic_loss_fn(self, valid_mask, returns, values):
+    def _critic_loss_fn(self, valid_mask, returns, values, sample_weights):
         # valid_mask -> batch, max_len, 1
         # returns -> batch, 1
         # values -> batch, max_len, 1
+        # sample_weights -> batch, 1
 
+        # batch, max_len, 1
         raw_loss = (returns[..., None] - values) ** 2
-        critic_loss = tf.reduce_sum(raw_loss * valid_mask) / tf.reduce_sum(valid_mask)
+
+        # batch, 1
+        critic_loss = tf.reduce_sum(raw_loss * valid_mask, axis=1) / tf.reduce_sum(valid_mask, axis=1)
+
+        critic_loss = tf.reduce_sum(critic_loss * sample_weights)
+        
         return critic_loss
     
     @tf.function
-    def _train_step(self, board_batch, piece_batch, input_batch, old_probs, advantages, returns, training_actor):
+    def _train_step(self, board_batch, piece_batch, input_batch, old_probs, advantages, returns, sample_weights, training_actor):
 
         # batch, max_len
         inputs = input_batch[:, :-1]
@@ -134,7 +148,7 @@ class Trainer():
         with tf.GradientTape() as critic_tape:
             values = self.critic((board_batch, piece_batch, inputs), training=True)
     
-            critic_loss = self._critic_loss_fn(valid_mask, returns, values)
+            critic_loss = self._critic_loss_fn(valid_mask, returns, values, sample_weights)
 
         critic_grads = critic_tape.gradient(critic_loss, self.critic.trainable_variables)
         self.critic.optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
@@ -158,7 +172,7 @@ class Trainer():
 
                 entropy = tf.reduce_sum(log_probs * tf.exp(log_probs) * valid_mask) / tf.reduce_sum(valid_mask)
                 
-                ppo_loss, unclipped_proportion = self._ppo_loss_fn(valid_mask, new_probs, old_probs, advantages)
+                ppo_loss, unclipped_proportion = self._ppo_loss_fn(valid_mask, new_probs, old_probs, advantages, sample_weights)
 
                 raw_kl_div = keras.losses.KLDivergence(reduction='none')(tf.exp(ref_log_probs), tf.exp(log_probs))
                 kl_div = tf.reduce_sum(raw_kl_div[..., None] * valid_mask) / tf.reduce_sum(valid_mask)
@@ -171,6 +185,13 @@ class Trainer():
             return ppo_loss, entropy, kl_div, critic_loss, unclipped_proportion, scores
         
         return critic_loss
+
+    def _decay_weights(self, board, pieces, inputs, probs, adv, ret, ep_num):
+        weight = tf.exp(-(self.current_episode - ep_num) / 2)
+        return board, pieces, inputs, probs, adv, ret, weight
+
+    def _filter_by_weight(self, board, pieces, inputs, probs, adv, ret, weight):
+        return weight > 0.1
     
     def train(self, gens, train_steps=100, training_actor=False):
         
@@ -191,25 +212,33 @@ class Trainer():
                                               inputs[None, ...],
                                               probs[None, ...],
                                               adv[None, ...],
-                                              ret[None, ...]))
+                                              ret[None, ...],
+                                              tf.constant([self.current_episode])[None, ...]))
 
+            self.current_episode += 1
+            
             # Print metrics
             avg_reward = tf.reduce_mean(episode_rewards)
             sum_reward = tf.reduce_sum(episode_rewards)
             
             print(f'\rCurrent Gen: {gen + 1}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
-        
+            
             # Make dataset sampling from replay buffer
-            dset = self.replay_buffer.as_dataset(
-                sample_batch_size=128,
-                num_parallel_calls=tf.data.AUTOTUNE
-            ).prefetch(tf.data.AUTOTUNE)
+            dset = (self.replay_buffer.as_dataset(
+                        sample_batch_size=128,
+                        num_parallel_calls=tf.data.AUTOTUNE)
+                    .map(self._decay_weights,
+                         num_parallel_calls=tf.data.AUTOTUNE,
+                         deterministic=False)
+                    .filter(self._filter_by_weight)
+                    .prefetch(tf.data.AUTOTUNE))
             
             for i, ((board_batch, piece_batch, input_batch,
-                     prob_batch, advantage_batch, return_batch), _) in enumerate(dset.take(train_steps)):
+                     prob_batch, advantage_batch, return_batch, weight_batch), _) in enumerate(dset.take(train_steps)):
                 
                 step_out = self._train_step(board_batch, piece_batch, input_batch,
-                                            prob_batch, advantage_batch, return_batch, training_actor)
+                                            prob_batch, advantage_batch, return_batch,
+                                            weight_batch, training_actor)
 
             
             if training_actor:
