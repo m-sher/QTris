@@ -6,6 +6,7 @@ class Player():
     def __init__(self, max_len):
         self.game = TetrisEnv(CustomScorer())
         self.reward_eps = 0.01
+        self.hole_reward = 0.1
         self.max_len = max_len
         
         self.key_dict = {
@@ -43,7 +44,7 @@ class Player():
     def _get_supp_reward(self, board, last_holes):
         heights = self._get_heights(board)
         holes = self._get_holes(board, heights)
-        hole_reward = self.reward_eps if holes <= last_holes else -self.reward_eps
+        hole_reward = self.hole_reward if holes <= last_holes else 0.0
         return holes, hole_reward
     
     def run_episode(self, agent, critic, max_steps=50, greedy=False, temperature=1.0, renderer=None):
