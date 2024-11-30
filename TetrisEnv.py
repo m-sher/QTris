@@ -194,8 +194,8 @@ class CustomScorer(Scorer):
 
             # score *= self.level
 
-            if self.back_to_back > 1:
-                score += self.back_to_back - 1
+            # if self.back_to_back > 1:
+            #     score += self.back_to_back - 1
 
             self.score += score
             self.line_clears += line_clears
