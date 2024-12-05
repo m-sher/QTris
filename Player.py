@@ -39,7 +39,7 @@ class Player():
         return heights
 
     def _get_holes(self, board, heights):
-        return tf.reduce_sum(tf.reduce_sum(board, axis=0) - heights)
+        return tf.reduce_sum(heights - tf.reduce_sum(board, axis=0))
     
     def _get_supp_reward(self, board, last_holes):
         heights = self._get_heights(board)
