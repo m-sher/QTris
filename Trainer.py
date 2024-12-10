@@ -21,19 +21,6 @@ class Trainer():
             project='Tetris'
         )
         
-        # data_spec = (tf.TensorSpec(shape=(28, 10, 1), dtype=tf.float32, name='Boards'),
-        #              tf.TensorSpec(shape=(7,), dtype=tf.int32, name='Pieces'),
-        #              tf.TensorSpec(shape=(max_len+1,), dtype=tf.int32, name='Input'),
-        #              tf.TensorSpec(shape=(max_len, 1,), dtype=tf.float32, name='Probs'),
-        #              tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Advantage'),
-        #              tf.TensorSpec(shape=(1,), dtype=tf.float32, name='Return'))
-
-        # self.replay_buffer = TFUniformReplayBuffer(
-        #     data_spec,
-        #     batch_size=1,
-        #     max_length=buffer_cap
-        # )
-        
         if render:
             fig, ax = plt.subplots()
             img = ax.imshow(tf.zeros((28, 10)), vmin=0, vmax=1)
@@ -64,30 +51,6 @@ class Trainer():
         
         return advantages, returns
     
-    # def fill_replay_buffer(self, max_episodes=50):
-    #     for i in range(max_episodes):
-    #         if self.replay_buffer.num_frames() >= self.replay_buffer.capacity:
-    #             break
-        
-    #         episode_data = self.player.run_episode(self.agent, self.critic, max_steps=self.max_episode_steps,
-    #                                                greedy=False, temperature=self.temp, renderer=self.renderer)
-    #         episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
-    #         episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
-
-    #         # Add data to replay buffer
-    #         for frame in zip(episode_boards, episode_pieces, episode_inputs,
-    #                          episode_probs, episode_advantages, episode_returns):
-    #             board, pieces, inputs, probs, adv, ret = frame
-    #             self.replay_buffer.add_batch((board[None, ...],
-    #                                           pieces[None, ...],
-    #                                           inputs[None, ...],
-    #                                           probs[None, ...],
-    #                                           adv[None, ...],
-    #                                           ret[None, ...]))
-                
-    #         print(f'\rCurrent Episode: {i}', end='', flush=True)
-    #     print('\rDone filling replay buffer', end='', flush=True)
-
     @tf.function
     def _ppo_loss_fn(self, valid_mask, new_probs, old_probs, advantages):
 
@@ -186,28 +149,11 @@ class Trainer():
             episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
             episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
 
-            # Add data to replay buffer
-            # for frame in zip(episode_boards, episode_pieces, episode_inputs,
-            #                  episode_probs, episode_advantages, episode_returns):
-            #     board, pieces, inputs, probs, adv, ret = frame
-            #     self.replay_buffer.add_batch((board[None, ...],
-            #                                   pieces[None, ...],
-            #                                   inputs[None, ...],
-            #                                   probs[None, ...],
-            #                                   adv[None, ...],
-            #                                   ret[None, ...]))
-
             # Print metrics
             avg_reward = tf.reduce_mean(episode_rewards)
             sum_reward = tf.reduce_sum(episode_rewards)
             
             print(f'\rCurrent Gen: {gen + 1}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
-            
-            # Make dataset sampling from replay buffer
-            # dset = (self.replay_buffer.as_dataset(
-            #             sample_batch_size=128,
-            #             num_parallel_calls=tf.data.AUTOTUNE)
-            #         .prefetch(tf.data.AUTOTUNE))
 
             dset = (tf.data.Dataset.from_tensor_slices((episode_boards, episode_pieces, episode_inputs, episode_probs, episode_advantages, episode_returns))
                     .shuffle(self.max_episode_steps)
