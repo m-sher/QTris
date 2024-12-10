@@ -3,7 +3,6 @@ from tensorflow import keras
 import matplotlib.pyplot as plt
 import wandb
 from Player import Player
-from tf_agents.replay_buffers import TFUniformReplayBuffer
 
 class Trainer():
     def __init__(self, agent, critic, ref_model, max_len, gamma, lam, temperature=1.0, max_episode_steps=2000, render=True):
