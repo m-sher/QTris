@@ -5,8 +5,8 @@ from TetrisEnv import CustomScorer
 class Player():
     def __init__(self, max_len):
         self.game = TetrisEnv(CustomScorer())
-        self.reward_eps = 0.01
-        self.hole_reward = 0.1
+        self.reward_eps = tf.constant(0.01)
+        self.hole_reward = tf.constant(0.1)
         self.max_len = max_len
         
         self.key_dict = {
@@ -44,7 +44,7 @@ class Player():
     def _get_supp_reward(self, board, last_holes):
         heights = self._get_heights(board)
         holes = self._get_holes(board, heights)
-        hole_reward = self.hole_reward if holes <= last_holes else 0.0
+        hole_reward = self.hole_reward if last_holes == holes else self.hole_reward * tf.cast(last_holes - holes, tf.float32)
         return holes, hole_reward
     
     def run_episode(self, agent, critic, max_steps=50, greedy=False, temperature=1.0, renderer=None):
@@ -97,7 +97,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append(tf.constant([scaled_attack + hole_reward + self.reward_eps])) # (1,)
+            episode_rewards.append((scaled_attack + hole_reward + self.reward_eps)[None]) # (1,)
             
             if renderer:
                 fig, img = renderer
