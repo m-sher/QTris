@@ -1,5 +1,4 @@
-![](https://github.com/m-sher/QTris/blob/main/Demo_Board.gif)
-![](https://github.com/m-sher/QTris/blob/main/Demo_Queue.gif)
+![](https://github.com/m-sher/QTris/blob/main/Demo.gif)
 
 Priority:
 
@@ -27,9 +26,9 @@ $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue
 
 $$\color{yellow}\text{●}$$ Write this ReadMe
 
-$$\color{yellow}\text{●}$$ Consider reducing gamma - Failures later in episodes are affecting early placements too heavily
-
 $$\color{yellow}\text{●}$$ Revisit encouraging short actions
+
+$$\color{yellow}\text{●}$$ ~~Consider reducing gamma - Failures later in episodes are affecting early placements too heavily~~
 
 $$\color{yellow}\text{●}$$ ~~Adjust reward design to directly penalize holes~~
 
