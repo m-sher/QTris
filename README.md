@@ -1,3 +1,5 @@
+
+
 Priority:
 
 $$\color{red}\text{●}$$ High priority
@@ -13,6 +15,8 @@ Todo:
 $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY IT'S WORKING, JUST LET IT LEARN
 
 $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
+
+$$\color{orange}\text{●}$$ Move demo gif creation to its own file to not clutter the notebook
 
 $$\color{yellow}\text{●}$$ Implement parallel trajectory collection
 
