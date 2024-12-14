@@ -1,6 +1,9 @@
 import tensorflow as tf
 from tensorflow import keras
 import matplotlib.pyplot as plt
+import numpy as np
+from PIL import Image
+import imageio
 import wandb
 from Player import Player
 
@@ -200,3 +203,25 @@ class Trainer():
                 wandb.log({'critic_loss': critic_loss,
                            'reward': sum_reward,
                            'reward_per_piece': avg_reward})
+    
+    def save_demo(self, filename, max_steps):
+
+        # Open piece display array
+        with open('PieceDisplay.npy', 'rb') as f:
+            piece_array = np.load(f)
+
+        # Run episode greedily
+        episode_data = self.player.run_episode(self.agent, self.critic, max_steps=max_steps,
+                                               greedy=True, temperature=self.temp, renderer=self.renderer)
+        episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
+
+        # Generate frames from episode_date
+        frames = []
+        for board, pieces in zip(episode_boards, episode_pieces):
+            board_frame = Image.fromarray((board[..., 0] * 255).numpy().astype(np.uint8)).resize((100, 280), Image.Resampling.NEAREST)
+            piece_frame = Image.fromarray(np.concatenate([(piece_array[piece] * 255).astype(np.uint8)
+                                                          for piece in pieces], axis=0)).resize((50, 280), Image.Resampling.NEAREST)
+            frames.append(Image.fromarray(np.concatenate([np.array(board_frame), np.array(piece_frame)], axis=1)))
+
+        # Write frames to file
+        imageio.mimsave(filename, frames, duration=0.5)
