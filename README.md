@@ -32,6 +32,8 @@ $$\color{green}\text{●}$$ Write this ReadMe
 
 $$\color{yellow}\text{●}$$ Revisit encouraging short actions
 
+### Completed Items: ###
+
 $$\color{yellow}\text{●}$$ ~~Consider reducing gamma - Failures later in episodes are affecting early placements too heavily~~
 
 $$\color{yellow}\text{●}$$ ~~Adjust reward design to directly penalize holes~~
