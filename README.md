@@ -1,4 +1,5 @@
 ![](https://github.com/m-sher/QTris/blob/main/Demo_Board.gif)
+![](https://github.com/m-sher/QTris/blob/main/Demo_Queue.gif)
 
 Priority:
 
