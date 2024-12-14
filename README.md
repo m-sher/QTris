@@ -26,8 +26,6 @@ $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{green}\text{●}$$ Write this ReadMe
 
-$$\color{orange}\text{●}$$ Move demo gif creation to its own file to not clutter the notebook
-
 $$\color{yellow}\text{●}$$ Implement parallel trajectory collection
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
@@ -37,6 +35,8 @@ $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue
 $$\color{yellow}\text{●}$$ Revisit encouraging short actions
 
 ### Completed Items: ###
+
+$$\color{orange}\text{●}$$ ~~Move demo gif creation to its own file to not clutter the notebook~~
 
 $$\color{yellow}\text{●}$$ ~~Consider reducing gamma - Failures later in episodes are affecting early placements too heavily~~
 
