@@ -2,9 +2,9 @@ The gif below is a 1000 piece demo of the model playing. The set of pieces on th
 
 ![](https://github.com/m-sher/QTris/blob/main/Demo.gif)
 
-# Todo: #
+# Todo Section: #
 
-## Priority: ##
+### Priority Colors: ###
 
 $$\color{red}\text{●}$$ High priority
 
@@ -13,6 +13,8 @@ $$\color{orange}\text{●}$$ Medium priority
 $$\color{yellow}\text{●}$$ Low priority
 
 $$\color{green}\text{●}$$ In progress
+
+### Todo Items: ###
 
 $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY IT'S WORKING, JUST LET IT LEARN
 
