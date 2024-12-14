@@ -106,27 +106,6 @@ class DecoderLayer(layers.Layer):
         
         return out_seq, attn_scores
 
-# class EncoderLayer(layers.Layer):
-#     def __init__(self, units, num_heads=1, dropout_rate=0.1, name='Encoder'):
-#         super().__init__(name=name)
-
-#         self.self_attention = SelfAttention(causal=False,
-#                                             num_heads=num_heads,
-#                                             key_dim=units,
-#                                             dropout=dropout_rate)
-
-#         self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
-
-#     @tf.function
-#     def call(self, inputs, training=False):
-#         in_seq = inputs
-
-#         in_seq, attn_scores = self.self_attention(in_seq, training=training)
-        
-#         in_seq = self.ff(in_seq, training)
-
-#         return in_seq, attn_scores
-
 class TetrisModel(keras.Model):
     def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length, out_dim):
         super().__init__()
