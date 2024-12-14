@@ -1,3 +1,5 @@
+The gif below is a short, 100 piece demo of the model playing. The set of pieces on the right represent, in order, the active piece, the currently held piece, and the next five pieces.
+
 ![](https://github.com/m-sher/QTris/blob/main/Demo.gif)
 
 Priority:
