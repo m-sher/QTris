@@ -26,7 +26,7 @@ $$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
 
 $$\color{green}\text{●}$$ Write this ReadMe
 
-$$\color{yellow}\text{●}$$ Implement parallel trajectory collection
+$$\color{orange}\text{●}$$ Implement parallel trajectory collection
 
 $$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
