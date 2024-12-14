@@ -7,6 +7,7 @@ class Player():
         self.game = TetrisEnv(CustomScorer())
         self.reward_eps = tf.constant(0.01)
         self.hole_reward = tf.constant(0.1)
+        self.bumpy_reward = tf.constant(0.02)
         self.max_len = max_len
         
         self.key_dict = {
@@ -40,12 +41,17 @@ class Player():
 
     def _get_holes(self, board, heights):
         return tf.reduce_sum(heights - tf.reduce_sum(board, axis=0))
+
+    def _get_bumpiness(self, heights):
+        return tf.reduce_sum(tf.experimental.numpy.diff(heights) ** 2)
     
-    def _get_supp_reward(self, board, last_holes):
+    def _get_supp_reward(self, board, last_holes, last_bumpiness):
         heights = self._get_heights(board)
         holes = self._get_holes(board, heights)
+        bumpiness = self._get_bumpiness(heights)
         hole_reward = self.hole_reward if last_holes == holes else self.hole_reward * tf.cast(last_holes - holes, tf.float32)
-        return holes, hole_reward
+        bumpy_reward = self.bumpy_reward if last_bumpiness == bumpiness else self.bumpy_reward * tf.cast(last_bumpiness - bumpiness, tf.float32)
+        return holes, bumpiness, hole_reward, bumpy_reward
     
     def run_episode(self, agent, critic, max_steps=50, greedy=False, temperature=1.0, renderer=None):
         episode_boards = []
@@ -58,6 +64,7 @@ class Player():
         board, piece, _, terminated = self.game.reset()
         heights = self._get_heights(board)
         last_holes = self._get_holes(board, heights)
+        last_bumpiness = self._get_bumpiness(heights)
         
         for t in range(max_steps):
             board_obs = tf.cast(board, tf.float32)[..., None]
@@ -86,7 +93,7 @@ class Player():
 
             key_chars[-1] = 'H'
             board, piece, reward, terminated = self.game.step(key_chars)
-            last_holes, hole_reward = self._get_supp_reward(board, last_holes)
+            last_holes, last_bumpiness, hole_reward, bumpy_reward = self._get_supp_reward(board, last_holes, last_bumpiness)
             scaled_attack = reward / 4.0
             
             episode_boards.append(board_obs)
@@ -97,7 +104,7 @@ class Player():
                                      batch_dims=2) # (1, len)
             episode_probs.append(self._pad(chosen_probs[0], self.max_len)[..., None]) # (max_len, 1)
             episode_values.append(values[0, -1]) # (1,)
-            episode_rewards.append((scaled_attack + hole_reward + self.reward_eps)[None]) # (1,)
+            episode_rewards.append((hole_reward + bumpy_reward + scaled_attack + self.reward_eps)[None]) # (1,)
             
             if renderer:
                 fig, img = renderer
