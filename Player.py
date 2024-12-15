@@ -92,9 +92,9 @@ class Player():
                     break
 
             key_chars[-1] = 'H'
-            board, piece, reward, terminated = self.game.step(key_chars)
+            board, piece, attack, terminated = self.game.step(key_chars)
             last_holes, last_bumpiness, hole_reward, bumpy_reward = self._get_supp_reward(board, last_holes, last_bumpiness)
-            scaled_attack = reward / 4.0
+            scaled_attack = (attack ** 2) / 8.0
             
             episode_boards.append(board_obs)
             episode_pieces.append(piece_obs)
