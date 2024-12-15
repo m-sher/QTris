@@ -1,7 +1,6 @@
-
 | Description | Demo |
 | ----------- | ----------- |
-| The gif below is a 1000 piece demo of the model playing. The set of pieces on the right represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice a few T-spins and quads. It's also interesting to note that the model tends to save T pieces and I pieces for longer than it saves others. | ![](https://github.com/m-sher/QTris/blob/main/Demo.gif) |
+| ![](https://github.com/m-sher/QTris/blob/main/Demo.gif) | The gif below is a 1000 piece demo of the model playing. The set of pieces on the right represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice a few T-spins and quads. It's also interesting to note that the model tends to save T pieces and I pieces for longer than it saves others. |
 
 # Todo Section: #
 
