@@ -113,7 +113,7 @@ class Player():
                 fig.canvas.flush_events()
     
             if terminated:
-                episode_rewards[-1] = tf.constant([-1.0])
+                episode_rewards[-1] = tf.constant([-5.0])
                 break
         
         episode_boards = tf.stack(episode_boards, axis=0)
