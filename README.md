@@ -24,7 +24,7 @@ $$\color{green}\text{●}$$ Write this ReadMe
 
 $$\color{orange}\text{●}$$ Implement parallel trajectory collection
 
-$$\color{yellow}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
+$$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
 
