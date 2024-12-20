@@ -24,11 +24,13 @@ $$\color{green}\text{●}$$ Write this ReadMe
 
 $$\color{orange}\text{●}$$ Implement parallel trajectory collection
 
+$$\color{orange}\text{●}$$ Revisit encouraging short actions - possibly by re-separating key sequences
+
+$$\color{orange}\text{●}$$ Remove reference model to speed up training, but log model output for per-step kl-div
+
 $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
-
-$$\color{yellow}\text{●}$$ Revisit encouraging short actions
 
 ### Completed Items: ###
 
