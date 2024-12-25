@@ -212,7 +212,7 @@ class Trainer():
         # Run episode greedily
         episode_data = self.player.run_episode(self.agent, self.critic, max_steps=max_steps,
                                                greedy=True, temperature=self.temp, renderer=self.renderer)
-        episode_boards, episode_pieces, episode_inputs, episode_probs, episode_values, episode_rewards = episode_data
+        episode_boards, episode_pieces, episode_inputs, episode_actions, episode_probs, episode_values, episode_rewards = episode_data
 
         # Generate frames from episode_date
         frames = []
