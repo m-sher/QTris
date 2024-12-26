@@ -128,7 +128,7 @@ class Trainer():
         
         return critic_loss
 
-    def train(self, gens, train_steps=100, training_actor=False):
+    def train(self, gens, training_actor=False):
         
         for gen in range(gens):
             
@@ -161,7 +161,6 @@ class Trainer():
             dset = (tf.data.Dataset.from_tensor_slices((all_episode_boards, all_episode_pieces, all_episode_inputs, all_episode_actions,
                                                         all_episode_probs, all_episode_advantages, all_episode_returns))
                     .shuffle(self.max_episode_steps)
-                    .repeat()
                     .batch(128,
                            num_parallel_calls=tf.data.AUTOTUNE,
                            deterministic=False,
@@ -169,7 +168,7 @@ class Trainer():
                     .prefetch(tf.data.AUTOTUNE))
             
             for i, (board_batch, piece_batch, input_batch, action_batch,
-                    prob_batch, advantage_batch, return_batch) in enumerate(dset.take(train_steps)):
+                    prob_batch, advantage_batch, return_batch) in enumerate(dset):
                 
                 step_out = self._train_step(board_batch, piece_batch, input_batch, action_batch,
                                             prob_batch, advantage_batch, return_batch, training_actor)
