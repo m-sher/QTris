@@ -10,6 +10,7 @@ class Trainer():
         self.actor = actor
         self.critic = critic
         self.ref_model = ref_model
+        self.num_players = num_players
         self.gamma = gamma
         self.lam = lam
         self.temp = temperature
@@ -55,7 +56,7 @@ class Trainer():
         ratio = tf.exp(new_probs - old_probs)
         clipped_ratio = tf.clip_by_value(ratio, 1 - self.ppo_epsilon, 1 + self.ppo_epsilon)
 
-        unclipped_proportion = tf.reduce_mean(tf.cast(ratio == clipped_ratio, tf.float32))
+        clipped_frac = tf.reduce_mean(tf.cast(tf.abs(ratio - 1.0) > self.ppo_epsilon, tf.float32))
 
         # batch, max_len, 1
         clipped = clipped_ratio * advantages
@@ -63,7 +64,7 @@ class Trainer():
 
         ppo_loss = -tf.reduce_mean(tf.minimum(clipped, unclipped))
         
-        return ppo_loss, unclipped_proportion
+        return ppo_loss, clipped_frac
 
     @tf.function
     def _critic_loss_fn(self, valid_mask, returns, values):
@@ -87,8 +88,9 @@ class Trainer():
             critic_loss = self._critic_loss_fn(valid_mask, returns, values)
 
         critic_grads = critic_tape.gradient(critic_loss, self.critic.trainable_variables)
+        self.critic.optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
         
-        return critic_grads, critic_loss
+        return critic_loss
     
     @tf.function
     def _actor_step(self, board_batch, piece_batch, input_batch, action_batch, old_probs, advantages, valid_mask):
@@ -123,18 +125,18 @@ class Trainer():
                                   action_batch,
                                   batch_dims=1)[..., None]
             
-            ppo_loss, unclipped_proportion = self._ppo_loss_fn(new_probs, old_probs, advantages)
+            ppo_loss, clipped_frac = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
             kl_div = keras.losses.KLDivergence()(tf.exp(ref_action_probs), tf.exp(action_probs))
 
-            actor_loss = ppo_loss + 0.01 * entropy
+            actor_loss = ppo_loss + 0.001 * entropy
 
         actor_grads = actor_tape.gradient(actor_loss, self.actor.trainable_variables)
+        self.actor.optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
     
-        return ppo_loss, entropy, kl_div, unclipped_proportion, scores, actor_grads
+        return ppo_loss, entropy, kl_div, clipped_frac, scores
 
     def _update_step(self, dset):
-        total_actor_grads = [tf.zeros_like(var) for var in self.actor.trainable_variables]
         
         for i, (board_batch, piece_batch, input_batch, action_batch,
                 prob_batch, advantage_batch, return_batch) in enumerate(dset):
@@ -143,21 +145,15 @@ class Trainer():
             
             critic_step_out = self._critic_step(board_batch, piece_batch, input_batch,
                                                 return_batch, valid_mask)
-            critic_grads, critic_loss = critic_step_out
+            critic_loss = critic_step_out
             
             actor_step_out = self._actor_step(board_batch, piece_batch, input_batch, action_batch,
                                               prob_batch, advantage_batch, valid_mask)
-            ppo_loss, entropy, kl_div, unclipped_proportion, scores, actor_grads = actor_step_out
-            
-            total_actor_grads = [total_actor_grad + actor_grad for total_actor_grad, actor_grad
-                                 in zip(total_actor_grads, actor_grads)]
-        
-        self.critic.optimizer.apply_gradients(zip(critic_grads, self.critic.trainable_variables))
-        self.actor.optimizer.apply_gradients(zip(total_actor_grads, self.actor.trainable_variables))
-        
-        return critic_loss, ppo_loss, entropy, kl_div, scores, unclipped_proportion, board_batch[0]
+            ppo_loss, entropy, kl_div, clipped_frac, scores = actor_step_out
+                  
+        return critic_loss, ppo_loss, entropy, kl_div, scores, clipped_frac, board_batch[0]
 
-    def train(self, gens):
+    def train(self, gens, update_steps=4):
         
         for gen in range(gens):
             
@@ -189,15 +185,17 @@ class Trainer():
 
             dset = (tf.data.Dataset.from_tensor_slices((all_episode_boards, all_episode_pieces, all_episode_inputs, all_episode_actions,
                                                         all_episode_probs, all_episode_advantages, all_episode_returns))
-                    .shuffle(self.max_episode_steps)
-                    .batch(128,
+                    .shuffle(self.max_episode_steps * self.num_players)
+                    .batch(512,
                            num_parallel_calls=tf.data.AUTOTUNE,
                            deterministic=False,
                            drop_remainder=True)
                     .prefetch(tf.data.AUTOTUNE))
             
-            step_out = self._update_step(dset)
-            critic_loss, ppo_loss, entropy, kl_div, scores, unclipped_proportion, board_example = step_out
+            for _ in range(update_steps):
+                step_out = self._update_step(dset)
+            
+            critic_loss, ppo_loss, entropy, kl_div, scores, clipped_frac, board_example = step_out
                 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
@@ -213,7 +211,7 @@ class Trainer():
             wandb.log({'ppo_loss': ppo_loss,
                        'entropy': entropy,
                        'kl_div': kl_div,
-                       'unclipped_proportion': unclipped_proportion,
+                       'clipped_frac': clipped_frac,
                        'critic_loss': critic_loss,
                        'reward': sum_reward,
                        'reward_per_piece': avg_reward,
