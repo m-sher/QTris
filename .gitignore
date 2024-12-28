@@ -10,3 +10,4 @@ conv3.npy
 /agent_checkpoint
 /critic_checkpoint
 /good_checkpoints
+/actor_checkpoint
