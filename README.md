@@ -26,7 +26,7 @@ $$\color{orange}\text{●}$$ Remove reference model to speed up training, but lo
 
 $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
-$$\color{yellow}\text{●}$$ Setup 1v1 environment w/ garbage queue 
+$$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
 ### Completed Items: ###
 
