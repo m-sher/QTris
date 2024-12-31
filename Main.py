@@ -64,10 +64,10 @@ ref_model.summary(), tf.shape(logits), tf.shape(piece_scores), tf.shape(key_scor
 
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('good_checkpoints/agent_checkpoint/ckpt-9')
+actor_checkpoint.restore('actor_checkpoint/finetuned/ckpt-1')
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('good_checkpoints/critic_checkpoint/ckpt-9')
+critic_checkpoint.restore('critic_checkpoint/finetuned/ckpt-1')
 
 ref_model.set_weights(actor.get_weights())
 
