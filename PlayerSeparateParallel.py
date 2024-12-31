@@ -89,13 +89,12 @@ class Player():
         if living:
             key_chars[-1] = 'H'
             board, piece, attack, terminated = game.step(key_chars)
+            last_holes, last_bumpiness, hole_reward, bumpy_reward = self._get_supp_reward(board, last_holes, last_bumpiness)
+            scaled_attack = (attack ** 2) / 8.0
+            episode_rewards[-1] = np.array([hole_reward + bumpy_reward + scaled_attack + self.reward_eps], dtype=np.float32)
         else:
             board, piece, attack, terminated = game.current_time_step()
 
-        last_holes, last_bumpiness, hole_reward, bumpy_reward = self._get_supp_reward(board, last_holes, last_bumpiness)
-        scaled_attack = (attack ** 2) / 8.0
-        episode_rewards[-1] = np.array([hole_reward + bumpy_reward + scaled_attack + self.reward_eps], dtype=np.float32)
-        
         return board, piece, terminated, last_holes, last_bumpiness, episode_rewards
     
     def _parallel_step(self, living_players, all_key_chars, all_last_holes, all_last_bumpiness, all_episode_rewards):
@@ -113,7 +112,7 @@ class Player():
             results = [future.result() for future in futures]
         return results
 
-    def run_episode(self, agent, critic, max_steps=50, greedy=False, temperature=1.0):
+    def run_episode(self, actor, critic, max_steps=50, greedy=False, temperature=1.0):
 
         living_players = list(range(self.num_players))
         
@@ -129,14 +128,14 @@ class Player():
             inp_seq = tf.cast([[11] for _ in range(self.num_players)], tf.int32)
             all_key_chars = [[] for _ in range(self.num_players)]
             
-            agent_board_rep, _ = agent.process_board((board_obs, piece_obs), training=False)
+            actor_board_rep, _ = actor.process_board((board_obs, piece_obs), training=False)
             critic_board_rep, _ = critic.process_board((board_obs, piece_obs), training=False)
 
             processing_players = [player for player in living_players]
 
             for i in range(self.max_len):
                 
-                logits, _ = agent.process_keys((agent_board_rep, inp_seq), training=False)
+                logits, _ = actor.process_keys((actor_board_rep, inp_seq), training=False)
                 values, _ = critic.process_keys((critic_board_rep, inp_seq), training=False)
                 
                 if greedy:
@@ -182,7 +181,7 @@ class Player():
     
             for player in living_players[:]:
                 if all_terminated[player]:
-                    all_episode_rewards[player][-1] = np.array([-1.0], dtype=np.float32)
+                    all_episode_rewards[player][-1] = np.array([-10.0], dtype=np.float32)
                     living_players.remove(player)
             
             if len(living_players) == 0:
