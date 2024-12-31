@@ -28,9 +28,11 @@ class Trainer():
 
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
-            if t == last_ind and rewards[t] == -1:
-                last_val = tf.constant([0.0])
-            
+            if t == last_ind:
+                if rewards[t] == -10:
+                    last_val = tf.constant([0.0])
+                else:
+                    last_val = tf.reduce_mean(values)[None]
             
             delta = rewards[t] + gamma * last_val - values[t]
             last_adv = delta + gamma * lam * last_adv
@@ -181,7 +183,7 @@ class Trainer():
             avg_reward = tf.reduce_mean([tf.reduce_mean(episode_rewards) for episode_rewards in all_episode_rewards])
             sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
             
-            print(f'\rCurrent Gen: {gen + 1}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
+            print(f'\rCurrent Gen: {gen + 1:4d}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
 
             dset = (tf.data.Dataset.from_tensor_slices((all_episode_boards, all_episode_pieces, all_episode_inputs, all_episode_actions,
                                                         all_episode_probs, all_episode_advantages, all_episode_returns))
