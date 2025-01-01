@@ -4,12 +4,11 @@ import wandb
 from PlayerSeparateParallel import Player
 
 class Trainer():
-    def __init__(self, actor, critic, ref_model, max_len, num_players, gamma, lam, temperature=1.0, max_episode_steps=2000):
+    def __init__(self, actor, critic, max_len, num_players, gamma, lam, temperature=1.0, max_episode_steps=2000):
         self.eps = 1e-10
         self.ppo_epsilon = 0.2
         self.actor = actor
         self.critic = critic
-        self.ref_model = ref_model
         self.num_players = num_players
         self.gamma = gamma
         self.lam = lam
@@ -95,18 +94,15 @@ class Trainer():
         return critic_loss
     
     @tf.function
-    def _actor_step(self, board_batch, piece_batch, input_batch, action_batch, old_probs, advantages, valid_mask):
+    def _actor_step(self, board_batch, piece_batch, input_batch, action_batch, prob_batch, advantages, valid_mask):
         
         with tf.GradientTape() as actor_tape:
             logits, piece_scores, key_scores = self.actor((board_batch, piece_batch, input_batch), training=True, return_scores=True)
-            ref_logits, ref_piece_scores, ref_key_scores = self.ref_model((board_batch, piece_batch, input_batch), training=False, return_scores=True)
             
-            scores = {'current': [piece_scores, key_scores],
-                      'reference': [ref_piece_scores, ref_key_scores]}
+            scores = (piece_scores, key_scores)
             
             # batch, max_len, key_dim
             log_probs = tf.nn.log_softmax(logits, axis=-1)
-            ref_log_probs = tf.nn.log_softmax(ref_logits, axis=-1)
 
             # batch,
             action_ind = tf.cast(tf.reduce_sum(valid_mask, axis=[1, 2]) - 1, tf.int32)
@@ -116,10 +112,6 @@ class Trainer():
                                      action_ind,
                                      batch_dims=1)
             
-            ref_action_probs = tf.gather(ref_log_probs,
-                                         action_ind,
-                                         batch_dims=1)
-            
             entropy = tf.reduce_mean(action_probs * tf.exp(action_probs))
             
             # batch, 1
@@ -127,9 +119,13 @@ class Trainer():
                                   action_batch,
                                   batch_dims=1)[..., None]
             
+            old_probs = tf.gather(prob_batch,
+                                  action_batch,
+                                  batch_dims=1)[..., None]
+            
             ppo_loss, clipped_frac = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
-            kl_div = keras.losses.KLDivergence()(tf.exp(ref_action_probs), tf.exp(action_probs))
+            kl_div = keras.losses.KLDivergence()(tf.exp(prob_batch), tf.exp(action_probs))
 
             actor_loss = ppo_loss + 0.01 * entropy
 
@@ -173,8 +169,8 @@ class Trainer():
 
             avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -10, tf.float32))
                                          for episode_rewards in all_episode_rewards])
-            avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_actions == 8, tf.float32))
-                                         for episode_actions in all_episode_actions])
+            avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
+                                         for episode_rewards in all_episode_rewards])
 
             all_episode_boards = tf.concat(all_episode_boards, axis=0)
             all_episode_pieces = tf.concat(all_episode_pieces, axis=0)
@@ -185,7 +181,8 @@ class Trainer():
             all_episode_returns = tf.concat(all_episode_returns, axis=0)
             
             # Print metrics
-            avg_reward = tf.reduce_mean([tf.reduce_mean(episode_rewards) for episode_rewards in all_episode_rewards])
+            avg_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) / tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
+                                         for episode_rewards in all_episode_rewards])
             sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
             
             print(f'\rCurrent Gen: {gen + 1:4d}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
@@ -206,14 +203,8 @@ class Trainer():
                 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
-            c_scores = tf.reshape(tf.reduce_mean(scores['current'][0], axis=[0, 2, 3])[0], (14, 5, 1))
+            c_scores = tf.reshape(tf.reduce_mean(scores[0], axis=[0, 2, 3])[0], (14, 5, 1))
             norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
-            
-            r_scores = tf.reshape(tf.reduce_mean(scores['reference'][0], axis=[0, 2, 3])[0], (14, 5, 1))
-            norm_r_scores = (r_scores - tf.reduce_min(r_scores)) / (tf.reduce_max(r_scores) - tf.reduce_min(r_scores))
-
-            score_diff = (c_scores - r_scores) ** 2
-            norm_score_diff = (score_diff - tf.reduce_min(score_diff)) / (tf.reduce_max(score_diff) - tf.reduce_min(score_diff))
             
             wandb.log({'ppo_loss': ppo_loss,
                        'entropy': entropy,
@@ -225,9 +216,7 @@ class Trainer():
                        'avg_deaths': avg_deaths,
                        'avg_pieces_placed': avg_pieces,
                        'board': wandb.Image(board_example),
-                       'current_scores': wandb.Image(norm_c_scores),
-                       'reference_scores': wandb.Image(norm_r_scores),
-                       'score_diff': wandb.Image(norm_score_diff)})
+                       'current_scores': wandb.Image(norm_c_scores)})
 
     # FIX THIS 
     # def save_demo(self, filename, max_steps):
