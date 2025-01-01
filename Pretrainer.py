@@ -4,9 +4,10 @@ import time
 import glob
 
 class Pretrainer():
-    def __init__(self, gamma):
+    def __init__(self, gamma, max_len=10):
 
         self.gamma = gamma
+        self._max_len = max_len
         self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
         self.mse = keras.losses.MeanSquaredError(reduction='none')
         
@@ -53,7 +54,6 @@ class Pretrainer():
         self._dset_boards = []
         self._dset_actions = []
         self._dset_attacks = []
-        self._max_len = 0
         
         for player_data in players_data:
             episode_pieces = []
@@ -72,7 +72,6 @@ class Pretrainer():
                 
                 if len(action) > 0 and attack >= 0:
                     action = [11] * (action[0] != 11) + action
-                    self._max_len = max(self._max_len, len(action))
                 else:
                     episode_attacks = self._get_discounted_returns(episode_attacks, self.gamma)
             
@@ -108,15 +107,14 @@ class Pretrainer():
             padded = tf.concat([item, tf.zeros((length - num_valid), dtype=item.dtype) + pad_value], axis=0)
         return padded
 
+    def _filter_fn(self, piece, board, action, att):
+        return tf.shape(action)[0] <= self.max_len+1
+
     def _pad_and_split(self, piece, board, action, att):
-        padded_action = self._pad(action, self._max_len)
-        inp = tf.ensure_shape(padded_action[:-1], (self._max_len-1,))
-        tar = tf.ensure_shape(padded_action[1:], (self._max_len-1,))
+        padded_action = self._pad(action, self._max_len+1)
+        inp = tf.ensure_shape(padded_action[:-1], (self._max_len,))
+        tar = tf.ensure_shape(padded_action[1:], (self._max_len,))
         return (board, piece, inp), (tar, att)
-    
-    def _filter_fn(self, inps, outs):
-        board, piece, inp = inps
-        return tf.shape(inp)[0] <= 10
 
     def _cache_dset(self):
         gt_dset = (tf.data.Dataset.from_generator(self._dset_generator,
@@ -124,10 +122,10 @@ class Pretrainer():
                                                                     tf.TensorSpec(shape=(28, 10), dtype=tf.float32),
                                                                     tf.TensorSpec(shape=(None,), dtype=tf.int32),
                                                                     tf.TensorSpec(shape=(), dtype=tf.float32)))
+                   .filter(self._filter_fn)
                    .map(self._pad_and_split,
                         num_parallel_calls=tf.data.AUTOTUNE,
                         deterministic=False)
-                   .filter(self._filter_fn)
                    .cache()
                    .shuffle(100000)
                    .batch(128,
