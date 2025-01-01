@@ -131,7 +131,7 @@ class Trainer():
 
             kl_div = keras.losses.KLDivergence()(tf.exp(ref_action_probs), tf.exp(action_probs))
 
-            actor_loss = ppo_loss + 0.001 * entropy
+            actor_loss = ppo_loss + 0.01 * entropy
 
         actor_grads = actor_tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor.optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
@@ -170,6 +170,11 @@ class Trainer():
                 episode_advantages, episode_returns = self._compute_gae(episode_values, episode_rewards, self.gamma, self.lam)
                 all_episode_advantages.append(episode_advantages)
                 all_episode_returns.append(episode_returns)
+
+            avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -10, tf.float32))
+                                         for episode_rewards in all_episode_rewards])
+            avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_actions == 8, tf.float32))
+                                         for episode_actions in all_episode_actions])
 
             all_episode_boards = tf.concat(all_episode_boards, axis=0)
             all_episode_pieces = tf.concat(all_episode_pieces, axis=0)
@@ -217,6 +222,8 @@ class Trainer():
                        'critic_loss': critic_loss,
                        'reward': sum_reward,
                        'reward_per_piece': avg_reward,
+                       'avg_deaths': avg_deaths,
+                       'avg_pieces_placed': avg_pieces,
                        'board': wandb.Image(board_example),
                        'current_scores': wandb.Image(norm_c_scores),
                        'reference_scores': wandb.Image(norm_r_scores),
