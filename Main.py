@@ -5,14 +5,14 @@ from tensorflow import keras
 
 piece_dim = 8
 key_dim = 12
-depth = 32
+depth = 16
 gamma = 0.99
 lam = 0.95
 temperature = 1.0
 num_players = 16
 display_rows = 4
 
-max_len = 10
+max_len = 21
 
 actor = TetrisModel(piece_dim=piece_dim,
                     key_dim=key_dim,
@@ -48,38 +48,20 @@ values, piece_scores, key_scores = critic((tf.random.uniform((32, 28, 10, 1)),
                                            tf.random.uniform((32, max_len), minval=0, maxval=key_dim, dtype=tf.int32)), return_scores=True)
 critic.summary(), tf.shape(values), tf.shape(piece_scores), tf.shape(key_scores)
 
-
-ref_model = TetrisModel(piece_dim=piece_dim,
-                        key_dim=key_dim,
-                        depth=depth,
-                        num_heads=4,
-                        num_layers=4,
-                        max_length=max_len,
-                        out_dim=key_dim)
-
-logits, piece_scores, key_scores = ref_model((tf.random.uniform((32, 28, 10, 1)),
-                                              tf.random.uniform((32, 7), minval=0, maxval=8, dtype=tf.int32),
-                                              tf.random.uniform((32, max_len), minval=0, maxval=key_dim, dtype=tf.int32)), return_scores=True)
-ref_model.summary(), tf.shape(logits), tf.shape(piece_scores), tf.shape(key_scores)
-
-
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('actor_checkpoint/finetuned/ckpt-5')
+actor_checkpoint.restore('actor_checkpoint/pretrained/small/ckpt-1')
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('critic_checkpoint/finetuned/ckpt-5')
-
-ref_model.set_weights(actor.get_weights())
+critic_checkpoint.restore('critic_checkpoint/pretrained/small/ckpt-1')
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_checkpoint/finetuned', max_to_keep=5)
+actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_checkpoint/finetuned/small', max_to_keep=5)
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'critic_checkpoint/finetuned', max_to_keep=5)
+critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'critic_checkpoint/finetuned/small', max_to_keep=5)
 
 trainer = Trainer(actor=actor,
                   critic=critic,
-                  ref_model=ref_model,
                   max_len=max_len,
                   num_players=8,
                   gamma=gamma,
