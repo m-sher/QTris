@@ -57,8 +57,8 @@ class Player():
         heights = self._get_heights(board)
         holes = self._get_holes(board, heights)
         bumpiness = self._get_bumpiness(heights)
-        hole_reward = self.hole_reward if last_holes == holes else self.hole_reward * (last_holes - holes)
-        bumpy_reward = self.bumpy_reward if last_bumpiness == bumpiness else self.bumpy_reward * (last_bumpiness - bumpiness)
+        hole_reward = self.hole_reward if last_holes >= holes else 0.0
+        bumpy_reward = self.bumpy_reward if last_bumpiness >= bumpiness else 0.0
         return holes, bumpiness, hole_reward, bumpy_reward
     
     def _single_start(self, game):
@@ -149,7 +149,7 @@ class Player():
                     all_episode_pieces[player].append(all_piece[player])
                     all_episode_inputs[player].append(self._pad(inp_seq[player].numpy(), self.max_len))
                     all_episode_actions[player].append(np.squeeze(keys[player]))
-                    all_episode_probs[player].append(tf.nn.log_softmax(logits[player, -1], axis=-1).numpy()[np.squeeze(keys[player]), None])
+                    all_episode_probs[player].append(tf.nn.log_softmax(logits[player, -1], axis=-1).numpy())
                     all_episode_values[player].append(values[player, -1].numpy())
                     all_episode_rewards[player].append(np.array([0.0], dtype=np.float32))
 
