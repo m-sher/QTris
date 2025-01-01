@@ -123,6 +123,8 @@ class Trainer():
                                   action_batch,
                                   batch_dims=1)[..., None]
             
+            avg_probs = tf.reduce_mean(old_probs)
+            
             ppo_loss, clipped_frac = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
             kl_div = keras.losses.KLDivergence()(tf.exp(prob_batch), tf.exp(action_probs))
@@ -132,7 +134,7 @@ class Trainer():
         actor_grads = actor_tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor.optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
     
-        return ppo_loss, entropy, kl_div, clipped_frac, scores
+        return ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores
 
     def _update_step(self, dset):
         
@@ -147,9 +149,9 @@ class Trainer():
             
             actor_step_out = self._actor_step(board_batch, piece_batch, input_batch, action_batch,
                                               prob_batch, advantage_batch, valid_mask)
-            ppo_loss, entropy, kl_div, clipped_frac, scores = actor_step_out
+            ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores = actor_step_out
                   
-        return critic_loss, ppo_loss, entropy, kl_div, scores, clipped_frac, board_batch[0]
+        return critic_loss, ppo_loss, entropy, avg_probs, kl_div, scores, clipped_frac, board_batch[0]
 
     def train(self, gens, update_steps=4):
         
@@ -167,6 +169,11 @@ class Trainer():
                 all_episode_advantages.append(episode_advantages)
                 all_episode_returns.append(episode_returns)
 
+            # Compute metrics
+            avg_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) / tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
+                                         for episode_rewards in all_episode_rewards])
+            sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
+
             avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -10, tf.float32))
                                          for episode_rewards in all_episode_rewards])
             avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
@@ -179,11 +186,6 @@ class Trainer():
             all_episode_probs = tf.concat(all_episode_probs, axis=0)
             all_episode_advantages = tf.concat(all_episode_advantages, axis=0)
             all_episode_returns = tf.concat(all_episode_returns, axis=0)
-            
-            # Print metrics
-            avg_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) / tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
-                                         for episode_rewards in all_episode_rewards])
-            sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
             
             print(f'\rCurrent Gen: {gen + 1:4d}\t|\tAvg Reward: {avg_reward:1.1f}\t|\tTotal Reward: {sum_reward:1.1f}\t|', end='', flush=True)
 
@@ -199,7 +201,7 @@ class Trainer():
             for _ in range(update_steps):
                 step_out = self._update_step(dset)
             
-            critic_loss, ppo_loss, entropy, kl_div, scores, clipped_frac, board_example = step_out
+            critic_loss, ppo_loss, entropy, avg_probs, kl_div, scores, clipped_frac, board_example = step_out
                 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
@@ -208,6 +210,7 @@ class Trainer():
             
             wandb.log({'ppo_loss': ppo_loss,
                        'entropy': entropy,
+                       'avg_probs': avg_probs,
                        'kl_div': kl_div,
                        'clipped_frac': clipped_frac,
                        'critic_loss': critic_loss,
