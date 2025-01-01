@@ -28,6 +28,8 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
+$$\color{yellow}\text{●}$$ Log more information to WandB - ~~episode lengths, number of deaths~~, average action prob
+
 ### Completed Items: ###
 
 $$\color{orange}\text{●}$$ ~~Implement parallel trajectory collection~~
