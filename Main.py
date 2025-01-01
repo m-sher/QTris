@@ -22,7 +22,7 @@ actor = TetrisModel(piece_dim=piece_dim,
                     max_length=max_len,
                     out_dim=key_dim)
 
-actor_optimizer = keras.optimizers.Adam(1e-4, clipnorm=0.5)
+actor_optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
 actor.compile(optimizer=actor_optimizer)
 
 logits, piece_scores, key_scores = actor((tf.random.uniform((32, 28, 10, 1)),
@@ -40,7 +40,7 @@ critic = TetrisModel(piece_dim=piece_dim,
                      max_length=max_len,
                      out_dim=1)
 
-critic_optimizer = keras.optimizers.Adam(1e-4, clipnorm=0.5)
+critic_optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
 critic.compile(optimizer=critic_optimizer)
 
 values, piece_scores, key_scores = critic((tf.random.uniform((32, 28, 10, 1)),
@@ -64,10 +64,10 @@ ref_model.summary(), tf.shape(logits), tf.shape(piece_scores), tf.shape(key_scor
 
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('actor_checkpoint/finetuned/ckpt-1')
+actor_checkpoint.restore('actor_checkpoint/finetuned/ckpt-5')
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('critic_checkpoint/finetuned/ckpt-1')
+critic_checkpoint.restore('critic_checkpoint/finetuned/ckpt-5')
 
 ref_model.set_weights(actor.get_weights())
 
@@ -81,7 +81,7 @@ trainer = Trainer(actor=actor,
                   critic=critic,
                   ref_model=ref_model,
                   max_len=max_len,
-                  num_players=4,
+                  num_players=8,
                   gamma=gamma,
                   lam=lam,
                   temperature=1.0,
