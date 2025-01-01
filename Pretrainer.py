@@ -91,7 +91,7 @@ class Pretrainer():
                 episode_pieces.append(piece_seq)
                 episode_boards.append(board)
                 episode_actions.append(action)
-                episode_attacks.append(attack / 4 + 0.01)
+                episode_attacks.append(attack / 8 + 0.01)
         
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
@@ -113,6 +113,10 @@ class Pretrainer():
         inp = tf.ensure_shape(padded_action[:-1], (self._max_len-1,))
         tar = tf.ensure_shape(padded_action[1:], (self._max_len-1,))
         return (board, piece, inp), (tar, att)
+    
+    def _filter_fn(self, inps, outs):
+        board, piece, inp = inps
+        return tf.shape(inp)[0] <= 10
 
     def _cache_dset(self):
         gt_dset = (tf.data.Dataset.from_generator(self._dset_generator,
@@ -123,6 +127,7 @@ class Pretrainer():
                    .map(self._pad_and_split,
                         num_parallel_calls=tf.data.AUTOTUNE,
                         deterministic=False)
+                   .filter(self._filter_fn)
                    .cache()
                    .shuffle(100000)
                    .batch(128,
@@ -135,7 +140,7 @@ class Pretrainer():
             if i % 100 == 0:
                 print(f'\r{i}', end='', flush=True)
 
-        print(f'\rDone Caching')
+        print('\rDone Caching')
         
         return gt_dset
 
