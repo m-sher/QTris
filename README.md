@@ -26,11 +26,11 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
-$$\color{yellow}\text{●}$$ Log more information to WandB - ~~episode lengths, number of deaths~~, average action prob
-
 $$\color{yellow}\text{●}$$ Fix pretrainer functions to make the class easier to use (why did I make them like that??)
 
 ### Completed Items: ###
+
+$$\color{yellow}\text{●}$$ ~~Log more information to WandB - episode lengths, number of deaths, average action prob~~
 
 $$\color{orange}\text{●}$$ ~~Remove reference model to speed up training, but log model output for per-step kl-div~~
 
