@@ -108,7 +108,7 @@ class Pretrainer():
         return padded
 
     def _filter_fn(self, piece, board, action, att):
-        return tf.shape(action)[0] <= self.max_len+1
+        return tf.shape(action)[0] <= self._max_len+1
 
     def _pad_and_split(self, piece, board, action, att):
         padded_action = self._pad(action, self._max_len+1)
@@ -128,7 +128,7 @@ class Pretrainer():
                         deterministic=False)
                    .cache()
                    .shuffle(100000)
-                   .batch(128,
+                   .batch(512,
                           num_parallel_calls=tf.data.AUTOTUNE,
                           deterministic=False,
                           drop_remainder=True)
@@ -167,7 +167,7 @@ class Pretrainer():
         return acc
 
     @tf.function
-    def _train_step(self, actor, critic, board, piece, inp, tar, att):
+    def _train_step(self, actor, critic, board, piece, inp, tar, att, training_critic=False):
         mask = tf.cast(tar != 0, tf.float32)
         
         with tf.GradientTape() as actor_tape:
@@ -178,27 +178,48 @@ class Pretrainer():
         
         acc = self._masked_logit_acc(tar, logits, mask)
 
-        with tf.GradientTape() as critic_tape:
-            values = critic((board, piece, inp), training=True)
-            critic_loss = self._masked_value_loss(att, values, mask)
-        critic_grads = critic_tape.gradient(critic_loss, critic.trainable_variables)
-        critic.optimizer.apply_gradients(zip(critic_grads, critic.trainable_variables))
-        
-        return actor_loss, critic_loss, acc
+        if training_critic:    
+            with tf.GradientTape() as critic_tape:
+                values = critic((board, piece, inp), training=True)
+                critic_loss = self._masked_value_loss(att, values, mask)
+            critic_grads = critic_tape.gradient(critic_loss, critic.trainable_variables)
+            critic.optimizer.apply_gradients(zip(critic_grads, critic.trainable_variables))
+            
+            return actor_loss, critic_loss, acc
 
-    def train(self, actor, critic, gt_dset, epochs):
-        actor_losses, critic_losses, accs = [], [], []
-        for epoch in range(epochs):
-            print()
-            last_time = time.time()
-            for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset):
-                actor_loss, critic_loss, acc = self._train_step(actor, critic, board, piece, inp, tar, att)
-                if i % 10 == 0:
-                    cur_time = time.time()
-                    print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
-                    last_time = cur_time
-                    actor_losses.append(actor_loss)
-                    critic_losses.append(critic_loss)
-                    accs.append(acc)
-        return actor_losses, critic_losses, accs
+        return actor_loss, acc
 
+    def train(self, actor, critic, gt_dset, epochs, steps_per_epoch, training_critic=False):
+        if training_critic:
+            actor_losses, critic_losses, accs = [], [], []
+            for epoch in range(epochs):
+                print()
+                last_time = time.time()
+                for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset.take(steps_per_epoch)):
+                    step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
+                    actor_loss, critic_loss, acc = step_out
+                    
+                    if i % 10 == 0:
+                        cur_time = time.time()
+                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
+                        last_time = cur_time
+                        actor_losses.append(actor_loss)
+                        critic_losses.append(critic_loss)
+                        accs.append(acc)
+            return actor_losses, critic_losses, accs
+        else:
+            actor_losses, accs = [], []
+            for epoch in range(epochs):
+                print()
+                last_time = time.time()
+                for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset.take(steps_per_epoch)):
+                    step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
+                    actor_loss, acc = step_out
+                    
+                    if i % 10 == 0:
+                        cur_time = time.time()
+                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
+                        last_time = cur_time
+                        actor_losses.append(actor_loss)
+                        accs.append(acc)
+            return actor_losses, accs
