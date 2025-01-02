@@ -12,7 +12,7 @@ temperature = 1.0
 num_players = 16
 display_rows = 4
 
-max_len = 21
+max_len = 10
 
 actor = TetrisModel(piece_dim=piece_dim,
                     key_dim=key_dim,
