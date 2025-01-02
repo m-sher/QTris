@@ -28,7 +28,7 @@ class Trainer():
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
             if t == last_ind:
-                if rewards[t] == -10:
+                if rewards[t] == -1.0:
                     last_val = tf.constant([0.0])
                 else:
                     last_val = tf.reduce_mean(values)[None]
@@ -174,7 +174,7 @@ class Trainer():
                                          for episode_rewards in all_episode_rewards])
             sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
 
-            avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -10, tf.float32))
+            avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -1, tf.float32))
                                          for episode_rewards in all_episode_rewards])
             avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
                                          for episode_rewards in all_episode_rewards])
