@@ -181,7 +181,7 @@ class Player():
     
             for player in living_players[:]:
                 if all_terminated[player]:
-                    all_episode_rewards[player][-1] = np.array([-10.0], dtype=np.float32)
+                    all_episode_rewards[player][-1] = np.array([-1.0], dtype=np.float32)
                     living_players.remove(player)
             
             if len(living_players) == 0:
