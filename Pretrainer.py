@@ -1,6 +1,5 @@
 import tensorflow as tf
 from tensorflow import keras
-import time
 import glob
 
 class Pretrainer():
@@ -27,13 +26,12 @@ class Pretrainer():
         }
 
     def _load_data(self):
-        players_data = [[], []]
+        self.players_data = [[], []]
         for file in glob.glob('C:\\Users\\micha\\Downloads\\MisaMino-Tetrio-copy\\MisaMino-Tetrio-master\\tetris_ai\\logs\\game_att*.txt'):
             with open(file) as f:
                 contents = f.readlines()
                 for line in contents:
-                    players_data[int(line[0])].append(line[2:])
-        return players_data
+                    self.players_data[int(line[0])].append(line[2:])
 
     def _get_discounted_returns(self, rewards, gamma):
         returns = []
@@ -49,13 +47,15 @@ class Pretrainer():
         # returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-10)
         return returns # .tolist()
 
-    def _load_dset(self, players_data):
+    def _load_dset(self):
+        self._load_data()
+        
         self._dset_pieces = []
         self._dset_boards = []
         self._dset_actions = []
         self._dset_attacks = []
         
-        for player_data in players_data:
+        for player_data in self.players_data:
             episode_pieces = []
             episode_boards = []
             episode_actions = []
@@ -95,6 +95,25 @@ class Pretrainer():
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
 
+        self.gt_dset = (tf.data.Dataset.from_generator(self._dset_generator,
+                                                       output_signature=(tf.TensorSpec(shape=(7,), dtype=tf.float32),
+                                                                         tf.TensorSpec(shape=(28, 10), dtype=tf.float32),
+                                                                         tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                                                                         tf.TensorSpec(shape=(), dtype=tf.float32)))
+                        .filter(self._filter_fn)
+                        .map(self._pad_and_split,
+                             num_parallel_calls=tf.data.AUTOTUNE,
+                             deterministic=False)
+                        .cache()
+                        .shuffle(100000)
+                        .batch(512,
+                               num_parallel_calls=tf.data.AUTOTUNE,
+                               deterministic=False,
+                               drop_remainder=True)
+                        .prefetch(tf.data.AUTOTUNE))
+        
+        print('Loaded Dataset')
+
     def _dset_generator(self):
         for sample in zip(self._dset_pieces, self._dset_boards, self._dset_actions, self._dset_attacks):
             yield sample
@@ -115,32 +134,6 @@ class Pretrainer():
         inp = tf.ensure_shape(padded_action[:-1], (self._max_len,))
         tar = tf.ensure_shape(padded_action[1:], (self._max_len,))
         return (board, piece, inp), (tar, att)
-
-    def _cache_dset(self):
-        gt_dset = (tf.data.Dataset.from_generator(self._dset_generator,
-                                                  output_signature=(tf.TensorSpec(shape=(7,), dtype=tf.float32),
-                                                                    tf.TensorSpec(shape=(28, 10), dtype=tf.float32),
-                                                                    tf.TensorSpec(shape=(None,), dtype=tf.int32),
-                                                                    tf.TensorSpec(shape=(), dtype=tf.float32)))
-                   .filter(self._filter_fn)
-                   .map(self._pad_and_split,
-                        num_parallel_calls=tf.data.AUTOTUNE,
-                        deterministic=False)
-                   .cache()
-                   .shuffle(100000)
-                   .batch(512,
-                          num_parallel_calls=tf.data.AUTOTUNE,
-                          deterministic=False,
-                          drop_remainder=True)
-                   .prefetch(tf.data.AUTOTUNE))
-
-        for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset):
-            if i % 100 == 0:
-                print(f'\r{i}', end='', flush=True)
-
-        print('\rDone Caching')
-        
-        return gt_dset
 
     @tf.function
     def _masked_logit_loss(self, true, pred, mask):
@@ -189,37 +182,20 @@ class Pretrainer():
 
         return actor_loss, acc
 
-    def train(self, actor, critic, gt_dset, epochs, steps_per_epoch, training_critic=False):
+    def train(self, actor, critic, epochs, steps_per_epoch, training_critic=False):
         if training_critic:
-            actor_losses, critic_losses, accs = [], [], []
             for epoch in range(epochs):
-                print()
-                last_time = time.time()
-                for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset.take(steps_per_epoch)):
+                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset.take(steps_per_epoch)):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, critic_loss, acc = step_out
                     
-                    if i % 10 == 0:
-                        cur_time = time.time()
-                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
-                        last_time = cur_time
-                        actor_losses.append(actor_loss)
-                        critic_losses.append(critic_loss)
-                        accs.append(acc)
-            return actor_losses, critic_losses, accs
+                print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
+            return actor_loss, critic_loss, acc
         else:
-            actor_losses, accs = [], []
             for epoch in range(epochs):
-                print()
-                last_time = time.time()
-                for i, ((board, piece, inp), (tar, att)) in enumerate(gt_dset.take(steps_per_epoch)):
+                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset.take(steps_per_epoch)):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, acc = step_out
-                    
-                    if i % 10 == 0:
-                        cur_time = time.time()
-                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\tStep Time: {(cur_time - last_time) * 100:3.0f}ms\t|\t', end='', flush=True)
-                        last_time = cur_time
-                        actor_losses.append(actor_loss)
-                        accs.append(acc)
-            return actor_losses, accs
+                
+                    print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
+            return actor_loss, acc
