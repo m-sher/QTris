@@ -2,18 +2,22 @@ import tensorflow as tf
 from tensorflow import keras
 import wandb
 from PlayerSeparateParallel import Player
+from Pretrainer import Pretrainer
+
 
 class Trainer():
-    def __init__(self, actor, critic, max_len, num_players, gamma, lam, temperature=1.0, max_episode_steps=2000):
+    def __init__(self, actor, critic, disc, max_len, num_players, gamma, lam, temperature=1.0, max_episode_steps=1000):
         self.eps = 1e-10
         self.ppo_epsilon = 0.2
         self.actor = actor
         self.critic = critic
+        self.disc = disc
         self.num_players = num_players
         self.gamma = gamma
         self.lam = lam
         self.temp = temperature
         self.player = Player(max_len=max_len, num_players=num_players)
+        self.gt_dset = Pretrainer(gamma=gamma, max_len=max_len)
         self.max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
             project='Tetris'
@@ -136,22 +140,48 @@ class Trainer():
     
         return ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores
 
-    def _update_step(self, dset):
+    @tf.function
+    def _disc_step(self, novice_board_batch, novice_piece_batch, expert_board_batch, expert_piece_batch):
+        with tf.GradientTape() as disc_tape:
+            novice_disc_out = self.disc((novice_board_batch, novice_piece_batch), training=True)
+            expert_disc_out = self.disc((expert_board_batch, expert_piece_batch), training=True)
+            
+            novice_loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)(tf.zeros(tf.shape(novice_disc_out)[0]), novice_disc_out)
+            expert_loss = keras.losses.SparseCategoricalCrossentropy(from_logits=True)(tf.zeros(tf.shape(expert_disc_out)[0]), expert_disc_out)
+            
+            disc_loss = novice_loss + expert_loss
         
-        for i, (board_batch, piece_batch, input_batch, action_batch,
-                prob_batch, advantage_batch, return_batch) in enumerate(dset):
+        disc_grads = disc_tape.gradient(disc_loss, self.disc.trainable_variables)
+        self.disc.optimizer.apply_gradients(zip(disc_grads, self.disc.trainable_variables))
+        
+        return novice_loss, expert_loss, disc_loss
+
+    def _update_step(self, novice_dset, expert_dset):
+        
+        dset = tf.data.Dataset.zip(novice_dset, expert_dset)
+        
+        for i, (novice_batch, expert_batch) in enumerate(dset):
+            
+            (novice_board_batch, novice_piece_batch, input_batch, action_batch,
+             prob_batch, advantage_batch, return_batch) = novice_batch
+            ((expert_board_batch, expert_piece_batch, _), _) = expert_batch
             
             valid_mask = tf.cast(input_batch != 0, tf.float32)[..., None]
             
-            critic_step_out = self._critic_step(board_batch, piece_batch, input_batch,
+            critic_step_out = self._critic_step(novice_board_batch, novice_piece_batch, input_batch,
                                                 return_batch, valid_mask)
             critic_loss = critic_step_out
             
-            actor_step_out = self._actor_step(board_batch, piece_batch, input_batch, action_batch,
+            actor_step_out = self._actor_step(novice_board_batch, novice_piece_batch, input_batch, action_batch,
                                               prob_batch, advantage_batch, valid_mask)
             ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores = actor_step_out
                   
-        return critic_loss, ppo_loss, entropy, avg_probs, kl_div, scores, clipped_frac, board_batch[0]
+            disc_step_out = self._disc_step(novice_board_batch, novice_piece_batch, expert_board_batch, expert_piece_batch)
+            
+            novice_loss, expert_loss, disc_loss = disc_step_out
+            
+        return (critic_loss, ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores,
+                novice_loss, expert_loss, disc_loss, novice_board_batch[0])
 
     def train(self, gens, update_steps=4):
         
@@ -201,7 +231,8 @@ class Trainer():
             for _ in range(update_steps):
                 step_out = self._update_step(dset)
             
-            critic_loss, ppo_loss, entropy, avg_probs, kl_div, scores, clipped_frac, board_example = step_out
+            (critic_loss, ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores,
+             novice_loss, expert_loss, disc_loss, board_example) = step_out
                 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
@@ -218,6 +249,9 @@ class Trainer():
                        'reward_per_piece': avg_reward,
                        'avg_deaths': avg_deaths,
                        'avg_pieces_placed': avg_pieces,
+                       'novice_loss': novice_loss,
+                       'expert_loss': expert_loss,
+                       'disc_loss': disc_loss,
                        'board': wandb.Image(board_example),
                        'current_scores': wandb.Image(norm_c_scores)})
 
