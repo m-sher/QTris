@@ -25,6 +25,8 @@ class Pretrainer():
             '11': 10,
         }
 
+        return self._load_dset()
+
     def _load_data(self):
         self.players_data = [[], []]
         for file in glob.glob('C:\\Users\\micha\\Downloads\\MisaMino-Tetrio-copy\\MisaMino-Tetrio-master\\tetris_ai\\logs\\game_att*.txt'):
@@ -104,7 +106,6 @@ class Pretrainer():
                         .map(self._pad_and_split,
                              num_parallel_calls=tf.data.AUTOTUNE,
                              deterministic=False)
-                        .cache()
                         .shuffle(100000)
                         .batch(512,
                                num_parallel_calls=tf.data.AUTOTUNE,
@@ -112,7 +113,7 @@ class Pretrainer():
                                drop_remainder=True)
                         .prefetch(tf.data.AUTOTUNE))
         
-        print('Loaded Dataset')
+        return self.gt_dset
 
     def _dset_generator(self):
         for sample in zip(self._dset_pieces, self._dset_boards, self._dset_actions, self._dset_attacks):
