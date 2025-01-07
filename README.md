@@ -26,6 +26,8 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
+$$\color{yellow}\text{●}$$ Fix method for saving demo gif in Trainer
+
 ### Completed Items: ###
 
 $$\color{yellow}\text{●}$$ ~~Fix pretrainer functions to make the class easier to use (why did I make them like that??)~~
