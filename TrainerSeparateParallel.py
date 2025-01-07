@@ -17,7 +17,7 @@ class Trainer():
         self.lam = lam
         self.temp = temperature
         self.player = Player(max_len=max_len, num_players=num_players)
-        self.gt_dset = Pretrainer(gamma=gamma, max_len=max_len)
+        self.gt_dset = Pretrainer(gamma=gamma, max_len=max_len).gt_dset
         self.max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
             project='Tetris'
@@ -188,7 +188,7 @@ class Trainer():
         for gen in range(gens):
             
             # Run episode
-            episode_data = self.player.run_episode(self.actor, self.critic, max_steps=self.max_episode_steps,
+            episode_data = self.player.run_episode(self.actor, self.critic, self.disc, max_steps=self.max_episode_steps,
                                                    greedy=False, temperature=self.temp)
             (all_episode_boards, all_episode_pieces, all_episode_inputs,
              all_episode_actions, all_episode_probs, all_episode_values, all_episode_rewards) = episode_data

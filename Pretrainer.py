@@ -25,7 +25,7 @@ class Pretrainer():
             '11': 10,
         }
 
-        return self._load_dset()
+        self._load_dset()
 
     def _load_data(self):
         self.players_data = [[], []]
@@ -112,8 +112,6 @@ class Pretrainer():
                                deterministic=False,
                                drop_remainder=True)
                         .prefetch(tf.data.AUTOTUNE))
-        
-        return self.gt_dset
 
     def _dset_generator(self):
         for sample in zip(self._dset_pieces, self._dset_boards, self._dset_actions, self._dset_attacks):

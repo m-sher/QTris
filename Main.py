@@ -9,7 +9,7 @@ depth = 16
 gamma = 0.99
 lam = 0.95
 temperature = 1.0
-num_players = 16
+num_players = 8
 display_rows = 4
 
 max_len = 10
@@ -69,11 +69,11 @@ disc.summary(), tf.shape(disc_logits), tf.shape(piece_scores)
 
 
 
-# actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-# actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-19')
+actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
+actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-31')
 
-# critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-# critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-19')
+critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
+critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-31')
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
 actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_checkpoint/finetuned/small', max_to_keep=5)
