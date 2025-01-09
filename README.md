@@ -26,6 +26,8 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
+$$\color{orange}\text{●}$$ Split pretrainer dataset files into smaller chunks so shuffling can be done at the reading step
+
 $$\color{yellow}\text{●}$$ Fix method for saving demo gif in Trainer
 
 ### Completed Items: ###
