@@ -1,7 +1,6 @@
 import tetris
 from tetris import BaseGame
 from tetris.impl.scorer import Scorer
-from tetris.board import Board
 from tetris.types import MoveDelta
 from tetris.types import MoveKind
 from tetris.types import PieceType
