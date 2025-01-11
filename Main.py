@@ -51,29 +51,11 @@ values, piece_scores, key_scores = critic((tf.random.uniform((32, 28, 10, 1)),
 critic.summary(), tf.shape(values), tf.shape(piece_scores), tf.shape(key_scores)
 
 
-
-disc = TetrisModel(piece_dim=piece_dim,
-                   key_dim=None,
-                   depth=depth,
-                   num_heads=4,
-                   num_layers=4,
-                   max_length=None,
-                   out_dim=2)
-
-disc_optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
-disc.compile(optimizer=disc_optimizer)
-
-disc_logits, piece_scores = disc((tf.random.uniform((32, 28, 10, 1)),
-                                  tf.random.uniform((32, 7), minval=0, maxval=8, dtype=tf.int32)), return_scores=True)
-disc.summary(), tf.shape(disc_logits), tf.shape(piece_scores)
-
-
-
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-31')
+actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-20')
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-31')
+critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-20')
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
 actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_checkpoint/finetuned/small', max_to_keep=5)
@@ -81,14 +63,10 @@ actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_c
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
 critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'critic_checkpoint/finetuned/small', max_to_keep=5)
 
-disc_checkpoint = tf.train.Checkpoint(model=disc, optim=disc.optimizer)
-disc_checkpoint_manager = tf.train.CheckpointManager(disc_checkpoint, 'disc_checkpoint/finetuned/small', max_to_keep=5)
-
 
 
 trainer = Trainer(actor=actor,
                   critic=critic,
-                  disc=disc,
                   max_len=max_len,
                   num_players=8,
                   gamma=gamma,
