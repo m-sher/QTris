@@ -132,22 +132,15 @@ class TetrisModel(keras.Model):
         self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'piece_dec_{i}')
                                      for i in range(num_layers)]
         
-        if key_dim:
-            self.key_embedding = SeqEmbedding(
-                in_dim=key_dim,
-                depth=depth,
-                max_length=max_length,
-                mask_zero=True
-            )
-            self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'key_dec_{i}')
-                                       for i in range(num_layers)]
-            self.model_top = layers.Dense(out_dim, name='model_top')
-        else:
-            self.key_decoder_layers = None
-            self.model_top = keras.Sequential([layers.Flatten(),
-                                               layers.Dropout(0.2),
-                                               layers.Dense(depth * 2, activation='relu'),
-                                               layers.Dense(out_dim)], name='model_top')
+        self.key_embedding = SeqEmbedding(
+            in_dim=key_dim,
+            depth=depth,
+            max_length=max_length,
+            mask_zero=True
+        )
+        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'key_dec_{i}')
+                                   for i in range(num_layers)]
+        self.model_top = layers.Dense(out_dim, name='model_top')
     
     @tf.function
     def process_board(self, inputs, training=False):
@@ -173,22 +166,20 @@ class TetrisModel(keras.Model):
             key_dec, last_attn = dec_layer([piece_dec, key_dec], training=training)
             key_scores.append(last_attn)
         
-        return key_dec, key_scores
+        key_out = self.model_top(key_dec)
+        
+        return key_out, key_scores
     
     @tf.function
     def call(self, inputs, training=False, return_scores=False):
         
-        layer_out, piece_scores = self.process_board((inputs[0], inputs[1]), training=training)
+        board, piece, inp_seq = inputs
         
-        if self.key_decoder_layers:
-            layer_out, key_scores = self.process_keys((layer_out, inputs[2]), training=training)
-        
-        model_out = self.model_top(layer_out, training=training)
+        piece_dec, piece_scores = self.process_board((board, piece), training=training)
+    
+        model_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
 
         if return_scores:
-            if self.key_decoder_layers:
-                return model_out, piece_scores, key_scores
-            else:
-                return model_out, piece_scores
+            return model_out, piece_scores, key_scores
         else:
             return model_out
