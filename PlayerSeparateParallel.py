@@ -6,13 +6,14 @@ from TetrisEnv import CustomScorer
 import pygame
 
 class Player():
-    def __init__(self, max_len, num_players):
-        self.games = [TetrisEnv(CustomScorer()) for _ in range(num_players)]
-        self.num_players = num_players
-        self.reward_eps = 0.01
-        self.hole_reward = 0.1
-        self.bumpy_reward = 0.02
-        self.max_len = max_len
+    def __init__(self, max_len, num_players, max_holes):
+        self._games = [TetrisEnv(CustomScorer()) for _ in range(num_players)]
+        self._num_players = num_players
+        self._max_holes = max_holes
+        self._reward_eps = 0.01
+        self._hole_reward = 0.1
+        self._bumpy_reward = 0.02
+        self._max_len = max_len
         
         self.key_dict = {
             0: 'N',
@@ -57,8 +58,8 @@ class Player():
         heights = self._get_heights(board)
         holes = self._get_holes(board, heights)
         bumpiness = self._get_bumpiness(heights)
-        hole_reward = self.hole_reward if last_holes >= holes else 0.0
-        bumpy_reward = self.bumpy_reward if last_bumpiness >= bumpiness else 0.0
+        hole_reward = self._hole_reward if last_holes >= holes else 0.0
+        bumpy_reward = self._bumpy_reward if last_bumpiness >= bumpiness else 0.0
         return holes, bumpiness, hole_reward, bumpy_reward
     
     def _single_start(self, game):
@@ -81,7 +82,7 @@ class Player():
     
     def _parallel_start(self):
         with ThreadPoolExecutor() as executor:
-            results = executor.map(self._single_start, self.games)
+            results = executor.map(self._single_start, self._games)
 
         return list(results)
 
@@ -91,31 +92,30 @@ class Player():
             board, piece, attack, terminated = game.step(key_chars)
             last_holes, last_bumpiness, hole_reward, bumpy_reward = self._get_supp_reward(board, last_holes, last_bumpiness)
             scaled_attack = (attack ** 2) / 8.0
-            env_rewards = np.array([hole_reward + bumpy_reward + scaled_attack + self.reward_eps], dtype=np.float32)
+            env_rewards = np.array([hole_reward + bumpy_reward + scaled_attack + self._reward_eps], dtype=np.float32)
         else:
             board, piece, attack, terminated = game.current_time_step()
             env_rewards = None
 
         return board, piece, terminated, last_holes, last_bumpiness, env_rewards
     
-    def _parallel_step(self, living_players, all_key_chars, all_last_holes, all_last_bumpiness, all_episode_rewards):
+    def _parallel_step(self, living_players, all_key_chars, all_last_holes, all_last_bumpiness):
         with ThreadPoolExecutor() as executor:
             futures = []
-            for player, (game, key_chars, last_holes, last_bumpiness, episode_rewards) in enumerate(zip(self.games,
-                                                                                                        all_key_chars,
-                                                                                                        all_last_holes,
-                                                                                                        all_last_bumpiness,
-                                                                                                        all_episode_rewards)):
+            for player, (game, key_chars, last_holes, last_bumpiness) in enumerate(zip(self._games,
+                                                                                       all_key_chars,
+                                                                                       all_last_holes,
+                                                                                       all_last_bumpiness)):
 
                 futures.append(executor.submit(self._single_step, player in living_players, game,
-                                               key_chars, last_holes, last_bumpiness, episode_rewards))
+                                               key_chars, last_holes, last_bumpiness))
                 
             results = [future.result() for future in futures]
         return results
 
-    def run_episode(self, actor, critic, disc, max_steps=50, greedy=False, temperature=1.0):
+    def run_episode(self, actor, critic, max_steps=50, greedy=False, temperature=1.0):
 
-        living_players = list(range(self.num_players))
+        living_players = list(range(self._num_players))
         
         all_episode_data, all_board, all_piece, all_terminated, all_last_holes, all_last_bumpiness = zip(*self._parallel_start())
 
@@ -127,15 +127,15 @@ class Player():
 
         for t in range(max_steps):
             
-            inp_seq = tf.cast([[11] for _ in range(self.num_players)], tf.int32)
-            all_key_chars = [[] for _ in range(self.num_players)]
+            inp_seq = tf.cast([[11] for _ in range(self._num_players)], tf.int32)
+            all_key_chars = [[] for _ in range(self._num_players)]
             
             actor_board_rep, _ = actor.process_board((board_obs, piece_obs), training=False)
             critic_board_rep, _ = critic.process_board((board_obs, piece_obs), training=False)
 
             processing_players = [player for player in living_players]
 
-            for i in range(self.max_len):
+            for i in range(self._max_len):
                 
                 logits, _ = actor.process_keys((actor_board_rep, inp_seq), training=False)
                 values, _ = critic.process_keys((critic_board_rep, inp_seq), training=False)
@@ -149,7 +149,7 @@ class Player():
                     
                     all_episode_boards[player].append(all_board[player])
                     all_episode_pieces[player].append(all_piece[player])
-                    all_episode_inputs[player].append(self._pad(inp_seq[player].numpy(), self.max_len))
+                    all_episode_inputs[player].append(self._pad(inp_seq[player].numpy(), self._max_len))
                     all_episode_actions[player].append(np.squeeze(keys[player]))
                     all_episode_probs[player].append(tf.nn.log_softmax(logits[player, -1], axis=-1).numpy())
                     all_episode_values[player].append(values[player, -1].numpy())
@@ -165,15 +165,12 @@ class Player():
                 if len(processing_players) == 0:
                     break
 
-            step_out = self._parallel_step(living_players, all_key_chars, all_last_holes, all_last_bumpiness, all_episode_rewards)
+            step_out = self._parallel_step(living_players, all_key_chars, all_last_holes, all_last_bumpiness)
             all_board, all_piece, all_terminated, all_last_holes, all_last_bumpiness, env_rewards = list(map(list, zip(*step_out)))
 
             board_obs = tf.cast(tf.stack(all_board, axis=0), tf.float32)[..., None]
             piece_obs = tf.cast(tf.stack(all_piece, axis=0), tf.int32)
 
-            disc_out = disc((board_obs, piece_obs), training=False)
-            exp_reward = tf.nn.softmax(disc_out, axis=-1)[..., 1]
-            
             self.clock.tick(30)
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -188,16 +185,16 @@ class Player():
                 pygame.display.update(update_rect)
     
             for player in living_players[:]:
-                if all_terminated[player]:
+                if all_terminated[player] or all_last_holes[player] > self._max_holes:
                     all_episode_rewards[player][-1] = np.array([-1.0], dtype=np.float32)
                     living_players.remove(player)
                 else:
-                    all_episode_rewards[player][-1] = env_rewards[player] + exp_reward[player]
+                    all_episode_rewards[player][-1] = env_rewards[player]
             
             if len(living_players) == 0:
                 break
         
-        for player in range(self.num_players):
+        for player in range(self._num_players):
             all_episode_boards[player] = tf.stack(all_episode_boards[player])
             all_episode_pieces[player] = tf.stack(all_episode_pieces[player])
             all_episode_inputs[player] = tf.stack(all_episode_inputs[player])
