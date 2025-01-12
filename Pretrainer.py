@@ -106,6 +106,7 @@ class Pretrainer():
                         .map(self._pad_and_split,
                              num_parallel_calls=tf.data.AUTOTUNE,
                              deterministic=False)
+                        .cache()
                         .shuffle(100000)
                         .batch(512,
                                num_parallel_calls=tf.data.AUTOTUNE,
