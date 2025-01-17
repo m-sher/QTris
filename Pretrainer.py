@@ -106,9 +106,8 @@ class Pretrainer():
                         .map(self._pad_and_split,
                              num_parallel_calls=tf.data.AUTOTUNE,
                              deterministic=False)
-                        .cache()
                         .shuffle(100000)
-                        .batch(512,
+                        .batch(128,
                                num_parallel_calls=tf.data.AUTOTUNE,
                                deterministic=False,
                                drop_remainder=True)
@@ -182,20 +181,22 @@ class Pretrainer():
 
         return actor_loss, acc
 
-    def train(self, actor, critic, epochs, steps_per_epoch, training_critic=False):
+    def train(self, actor, critic, epochs, training_critic=False):
         if training_critic:
             for epoch in range(epochs):
-                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset.take(steps_per_epoch)):
+                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, critic_loss, acc = step_out
                     
-                print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
+                    if i % 100 == 0:
+                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
             return actor_loss, critic_loss, acc
         else:
             for epoch in range(epochs):
-                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset.take(steps_per_epoch)):
+                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, acc = step_out
                 
-                    print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
+                    if i % 100 == 0:
+                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
             return actor_loss, acc
