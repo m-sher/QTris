@@ -6,13 +6,14 @@ from TetrisEnv import CustomScorer
 import pygame
 
 class Player():
-    def __init__(self, max_len, num_players, max_holes):
+    def __init__(self, max_len, num_players, players_to_render, max_holes, reward_eps=0.01):
         self._games = [TetrisEnv(CustomScorer()) for _ in range(num_players)]
         self._num_players = num_players
+        self._players_to_render = players_to_render
         self._max_holes = max_holes
-        self._reward_eps = 0.01
+        self._reward_eps = reward_eps
         self._hole_reward = 0.1
-        self._bumpy_reward = 0.02
+        self._bumpy_reward = 0.05
         self._max_len = max_len
         
         self.key_dict = {
@@ -31,7 +32,7 @@ class Player():
         }
 
         pygame.init()
-        self.screen = pygame.display.set_mode((250*num_players, 700))
+        self.screen = pygame.display.set_mode((250*players_to_render, 700))
         self.clock = pygame.time.Clock()
 
     def _pad(self, item, length, pad_value=0):
@@ -130,8 +131,8 @@ class Player():
             inp_seq = tf.cast([[11] for _ in range(self._num_players)], tf.int32)
             all_key_chars = [[] for _ in range(self._num_players)]
             
-            actor_board_rep, _ = actor.process_board((board_obs, piece_obs), training=False)
-            critic_board_rep, _ = critic.process_board((board_obs, piece_obs), training=False)
+            actor_board_rep, _ = actor.process_obs((board_obs, piece_obs), training=False)
+            critic_board_rep, _ = critic.process_obs((board_obs, piece_obs), training=False)
 
             processing_players = [player for player in living_players]
 
@@ -153,7 +154,7 @@ class Player():
                     all_episode_actions[player].append(np.squeeze(keys[player]))
                     all_episode_probs[player].append(tf.nn.log_softmax(logits[player, -1], axis=-1).numpy())
                     all_episode_values[player].append(values[player, -1].numpy())
-                    all_episode_rewards[player].append(np.array([0.0], dtype=np.float32))
+                    all_episode_rewards[player].append(np.array([-self._reward_eps], dtype=np.float32))
 
                     key = tf.squeeze(keys[player]).numpy()
                     all_key_chars[player].append(self.key_dict[key])
@@ -177,7 +178,7 @@ class Player():
                     pygame.quit()
             self.screen.fill((0, 0, 0))
             
-            for i, board in enumerate(all_board):
+            for i, board in zip(range(self._players_to_render), all_board):
                 board_surface = pygame.Surface((10, 28))
                 pygame.surfarray.blit_array(board_surface, board.T * 255)
                 board_surface = pygame.transform.scale(board_surface, (250, 700))
