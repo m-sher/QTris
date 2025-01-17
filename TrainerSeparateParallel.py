@@ -131,7 +131,7 @@ class Trainer():
 
             kl_div = keras.losses.KLDivergence()(tf.exp(prob_batch), tf.exp(action_probs))
 
-            actor_loss = ppo_loss + 0.01 * entropy
+            actor_loss = ppo_loss + 0.1 * entropy
 
         actor_grads = actor_tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor.optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
