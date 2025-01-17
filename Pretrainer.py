@@ -106,8 +106,9 @@ class Pretrainer():
                         .map(self._pad_and_split,
                              num_parallel_calls=tf.data.AUTOTUNE,
                              deterministic=False)
+                        .cache()
                         .shuffle(100000)
-                        .batch(128,
+                        .batch(512,
                                num_parallel_calls=tf.data.AUTOTUNE,
                                deterministic=False,
                                drop_remainder=True)
@@ -133,6 +134,11 @@ class Pretrainer():
         inp = tf.ensure_shape(padded_action[:-1], (self._max_len,))
         tar = tf.ensure_shape(padded_action[1:], (self._max_len,))
         return (board, piece, inp), (tar, att)
+
+    def cache_dset(self):
+        for i, batch in enumerate(self.gt_dset):
+            if i % 100 == 0:
+                print(f'\rCaching {i}', end='', flush=True)
 
     @tf.function
     def _masked_logit_loss(self, true, pred, mask):
