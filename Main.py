@@ -5,7 +5,9 @@ from tensorflow import keras
 
 piece_dim = 8
 key_dim = 12
-depth = 16
+depth = 32
+num_heads = 4
+num_layers = 2
 gamma = 0.99
 lam = 0.95
 temperature = 1.0
@@ -19,8 +21,8 @@ max_len = 10
 actor = TetrisModel(piece_dim=piece_dim,
                     key_dim=key_dim,
                     depth=depth,
-                    num_heads=4,
-                    num_layers=4,
+                    num_heads=num_heads,
+                    num_layers=num_layers,
                     max_length=max_len,
                     out_dim=key_dim)
 
@@ -37,8 +39,8 @@ actor.summary(), tf.shape(actor_logits), tf.shape(piece_scores), tf.shape(key_sc
 critic = TetrisModel(piece_dim=piece_dim,
                      key_dim=key_dim,
                      depth=depth,
-                     num_heads=4,
-                     num_layers=4,
+                     num_heads=num_heads,
+                     num_layers=num_layers,
                      max_length=max_len,
                      out_dim=1)
 
