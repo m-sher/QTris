@@ -221,7 +221,7 @@ class Trainer():
 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
-            c_scores = tf.reshape(tf.reduce_mean(scores[0], axis=[0, 2, 3])[0], (26, 8, 1))
+            c_scores = tf.reshape(tf.reduce_mean(scores[0], axis=[0, 2, 3])[0], (14, 5, 1))
             norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
             
             wandb.log({'ppo_loss': ppo_loss,
