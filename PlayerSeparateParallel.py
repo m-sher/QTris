@@ -114,6 +114,52 @@ class Player():
             results = [future.result() for future in futures]
         return results
 
+    def _single_log(self, episode_data, player, processing_players, log_data, key_chars):
+        (episode_boards, episode_pieces, episode_inputs,
+         episode_actions, episode_probs, episode_values, episode_rewards) = episode_data
+        
+        board, piece, inp, key, prob, value = log_data
+        
+        episode_boards.append(board)
+        episode_pieces.append(piece)
+        episode_inputs.append(self._pad(inp, self._max_len))
+        episode_actions.append(key)
+        episode_probs.append(prob)
+        episode_values.append(value)
+        episode_rewards.append(np.array([-self._reward_eps], dtype=np.float32))
+        
+        key_chars.append(self.key_dict[key])
+        
+        if key == 8:
+            processing_players.remove(player)
+
+    def _parallel_log(self, all_episode_data, processing_players, all_log_data, all_key_chars):
+        (all_episode_boards, all_episode_pieces, all_episode_inputs,
+         all_episode_actions, all_episode_probs, all_episode_values, all_episode_rewards) = all_episode_data
+        
+        all_board, all_piece, all_inputs, all_keys, all_probs, all_values = all_log_data
+        
+        with ThreadPoolExecutor() as executor:
+            futures = []
+            for player in processing_players[:]:
+                episode_data = [all_episode_boards[player],
+                                all_episode_pieces[player],
+                                all_episode_inputs[player],
+                                all_episode_actions[player],
+                                all_episode_probs[player],
+                                all_episode_values[player],
+                                all_episode_rewards[player]]
+                log_data = [all_board[player],
+                            all_piece[player],
+                            all_inputs[player],
+                            all_keys[player],
+                            all_probs[player],
+                            all_values[player]]
+                futures.append(executor.submit(self._single_log, episode_data, player,
+                                               processing_players, log_data, all_key_chars[player]))
+            
+            
+
     def run_episode(self, actor, critic, max_steps=50, greedy=False, temperature=1.0):
 
         living_players = list(range(self._num_players))
@@ -122,7 +168,15 @@ class Player():
 
         (all_episode_boards, all_episode_pieces, all_episode_inputs,
          all_episode_actions, all_episode_probs, all_episode_values, all_episode_rewards) = list(map(list, zip(*all_episode_data)))
-
+        
+        all_episode_data = [all_episode_boards,
+                            all_episode_pieces,
+                            all_episode_inputs,
+                            all_episode_actions,
+                            all_episode_probs,
+                            all_episode_values,
+                            all_episode_rewards]
+        
         board_obs = tf.cast(tf.stack(all_board, axis=0), tf.float32)[..., None]
         piece_obs = tf.cast(tf.stack(all_piece, axis=0), tf.int32)
 
@@ -146,21 +200,16 @@ class Player():
                 else:
                     keys = tf.random.categorical(logits[:, -1] / temperature, num_samples=1, dtype=tf.int32) # (num_players, 1)
 
-                for player in processing_players[:]:
-                    
-                    all_episode_boards[player].append(all_board[player])
-                    all_episode_pieces[player].append(all_piece[player])
-                    all_episode_inputs[player].append(self._pad(inp_seq[player].numpy(), self._max_len))
-                    all_episode_actions[player].append(np.squeeze(keys[player]))
-                    all_episode_probs[player].append(tf.nn.log_softmax(logits[player, -1], axis=-1).numpy())
-                    all_episode_values[player].append(values[player, -1].numpy())
-                    all_episode_rewards[player].append(np.array([-self._reward_eps], dtype=np.float32))
+                probs = tf.nn.log_softmax(logits[:, -1], axis=-1).numpy()
+                all_log_data = [all_board,
+                                all_piece,
+                                inp_seq.numpy(),
+                                keys[:, 0].numpy(),
+                                probs,
+                                values[:, -1].numpy()]
+                
+                self._parallel_log(all_episode_data, processing_players, all_log_data, all_key_chars)
 
-                    key = tf.squeeze(keys[player]).numpy()
-                    all_key_chars[player].append(self.key_dict[key])
-                    
-                    if key == 8:
-                        processing_players.remove(player)
                 inp_seq = tf.concat([inp_seq, keys], axis=-1)
                 
                 if len(processing_players) == 0:
