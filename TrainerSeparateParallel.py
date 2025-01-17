@@ -5,7 +5,7 @@ from PlayerSeparateParallel import Player
 
 
 class Trainer():
-    def __init__(self, actor, critic, max_len, num_players, gamma, lam, temperature=1.0, max_holes=4, max_episode_steps=1000):
+    def __init__(self, actor, critic, max_len, num_players, players_to_render, gamma, lam, temperature=1.0, max_holes=4, max_episode_steps=1000):
         self.eps = 1e-10
         self.ppo_epsilon = 0.2
         self.actor = actor
@@ -14,7 +14,12 @@ class Trainer():
         self.gamma = gamma
         self.lam = lam
         self.temp = temperature
-        self.player = Player(max_len=max_len, num_players=num_players, max_holes=max_holes)
+        self._reward_eps = 0.01
+        self.player = Player(max_len=max_len,
+                             num_players=num_players,
+                             players_to_render=players_to_render,
+                             max_holes=max_holes,
+                             reward_eps=self._reward_eps)
         self.max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
             project='Tetris'
@@ -29,11 +34,7 @@ class Trainer():
         last_ind = tf.shape(rewards)[0] - 1
         for t in tf.range(last_ind, -1, -1):
             if t == last_ind:
-                if rewards[t] == -1.0:
-                    last_val = tf.constant([0.0])
-                else:
-                    last_val = tf.reduce_mean(values)[None]
-            
+                last_val = tf.constant([0.0])
             delta = rewards[t] + gamma * last_val - values[t]
             last_adv = delta + gamma * lam * last_adv
             advantages = advantages.write(t, last_adv)
@@ -174,14 +175,21 @@ class Trainer():
                 all_episode_returns.append(episode_returns)
 
             # Compute metrics
-            avg_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) / tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
-                                         for episode_rewards in all_episode_rewards])
-            sum_reward = tf.reduce_mean([tf.reduce_sum(episode_rewards) for episode_rewards in all_episode_rewards])
-
-            avg_deaths = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards == -1, tf.float32))
-                                         for episode_rewards in all_episode_rewards])
-            avg_pieces = tf.reduce_mean([tf.reduce_sum(tf.cast(episode_rewards != 0, tf.float32))
-                                         for episode_rewards in all_episode_rewards])
+            avg_reward, sum_reward, avg_deaths, avg_pieces = [], [], [], []
+            
+            for episode_rewards in all_episode_rewards:
+                num_pieces = tf.reduce_sum(tf.cast(episode_rewards != -self._reward_eps, tf.float32))
+                total_reward = tf.reduce_sum(episode_rewards)
+                
+                avg_reward.append(total_reward / num_pieces)
+                sum_reward.append(total_reward)
+                avg_deaths.append(tf.cast(episode_rewards[-1] == -1, tf.float32))
+                avg_pieces.append(num_pieces)
+            
+            avg_reward = tf.reduce_mean(avg_reward)
+            sum_reward = tf.reduce_mean(sum_reward)
+            avg_deaths = tf.reduce_mean(avg_deaths)
+            avg_pieces = tf.reduce_mean(avg_pieces)
 
             all_episode_boards = tf.concat(all_episode_boards, axis=0)
             all_episode_pieces = tf.concat(all_episode_pieces, axis=0)
@@ -202,15 +210,18 @@ class Trainer():
                            drop_remainder=True)
                     .prefetch(tf.data.AUTOTUNE))
             
-            for _ in range(update_steps):
+            print('\rMade Dataset', end='', flush=True)
+            
+            for i in range(update_steps):
                 step_out = self._update_step(dset)
+                print(f'\rUpdate Step {i}', end='', flush=True)
             
             (critic_loss, ppo_loss, entropy, avg_probs, kl_div,
              clipped_frac, scores, board_example) = step_out
 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
-            c_scores = tf.reshape(tf.reduce_mean(scores[0], axis=[0, 2, 3])[0], (14, 5, 1))
+            c_scores = tf.reshape(tf.reduce_mean(scores[0], axis=[0, 2, 3])[0], (26, 8, 1))
             norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
             
             wandb.log({'ppo_loss': ppo_loss,
