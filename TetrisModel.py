@@ -81,6 +81,26 @@ class FeedForward(layers.Layer):
         x = x + self.seq(x, training=training)
         return self.layernorm(x, training=training)
 
+class EncoderLayer(layers.Layer):
+    def __init__(self, units, num_heads=1, dropout_rate=0.1, name='Encoder'):
+        super().__init__(name=name)
+        
+        self.self_attention = SelfAttention(causal=False,
+                                            num_heads=num_heads,
+                                            key_dim=units,
+                                            dropout=dropout_rate)
+        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
+
+    @tf.function
+    def call(self, inputs, training=False):
+        in_seq = inputs
+        
+        out_seq, _ = self.self_attention(in_seq, training=training)
+        
+        out_seq = self.ff(out_seq, training=training)
+        
+        return out_seq
+    
 class DecoderLayer(layers.Layer):
     def __init__(self, units, causal, num_heads=1, dropout_rate=0.1, name='Decoder'):
         super().__init__(name=name)
@@ -112,15 +132,19 @@ class TetrisModel(keras.Model):
 
         self.depth = depth
         
-        self.feature_extraction = keras.Sequential([
+        self.make_patches = keras.Sequential([
+            keras.Input(shape=(28, 10, 1)),
             layers.Rescaling(scale=2.0, offset=-1.0),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=1, activation='relu', padding='same'),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=2, activation='relu', padding='same'),
+            layers.Conv2D(filters=depth, kernel_size=3, strides=1, padding='valid'),
             layers.Reshape((-1, depth))
         ])
+        
+        num_patches = self.make_patches.output_shape[1]
+        self.patch_embedding = layers.Embedding(input_dim=num_patches,
+                                                output_dim=self.depth)(tf.range(num_patches)[None, ...])
+        
+        self.board_encoder_layers = [EncoderLayer(units=depth, num_heads=num_heads, dropout_rate=0.1, name=f'board_enc_{i}')
+                                     for i in range(num_layers)]
         
         self.piece_embedding = SeqEmbedding(
             in_dim=piece_dim,
@@ -143,15 +167,19 @@ class TetrisModel(keras.Model):
         self.model_top = layers.Dense(out_dim, name='model_top')
     
     @tf.function
-    def process_board(self, inputs, training=False):
+    def process_obs(self, inputs, training=False):
         board, piece = inputs
         
         piece_scores = []
-        board_features = self.feature_extraction(board)
+        board_enc = self.make_patches(board) + self.patch_embedding
+        
+        for board_enc_layer in self.board_encoder_layers:
+            board_enc = board_enc_layer(board_enc, training=training)
+        
         piece_dec = self.piece_embedding(piece)
         
         for piece_dec_layer in self.piece_decoder_layers:
-            piece_dec, last_attn = piece_dec_layer([board_features, piece_dec], training=training)
+            piece_dec, last_attn = piece_dec_layer([board_enc, piece_dec], training=training)
             piece_scores.append(last_attn)
         
         return piece_dec, piece_scores
@@ -175,7 +203,7 @@ class TetrisModel(keras.Model):
         
         board, piece, inp_seq = inputs
         
-        piece_dec, piece_scores = self.process_board((board, piece), training=training)
+        piece_dec, piece_scores = self.process_obs((board, piece), training=training)
     
         model_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
 
