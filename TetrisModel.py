@@ -135,7 +135,7 @@ class TetrisModel(keras.Model):
         self.make_patches = keras.Sequential([
             keras.Input(shape=(28, 10, 1)),
             layers.Rescaling(scale=2.0, offset=-1.0),
-            layers.Conv2D(filters=depth, kernel_size=3, strides=1, padding='valid'),
+            layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid'),
             layers.Reshape((-1, depth))
         ])
         
