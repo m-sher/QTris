@@ -28,6 +28,8 @@ $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent t
 
 $$\color{orange}\text{●}$$ Split pretrainer dataset files into smaller chunks to improve loading time
 
+$$\color{orange}\text{●}$$ Kill for too bumpy
+
 $$\color{yellow}\text{●}$$ Fix method for saving demo gif in Trainer
 
 ### Completed Items: ###
