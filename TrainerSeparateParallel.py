@@ -125,18 +125,19 @@ class Trainer():
                                   action_batch,
                                   batch_dims=1)[..., None]
             
+            entropy_coef = tf.exp(tf.reduce_mean(new_probs))
             avg_probs = tf.reduce_mean(old_probs)
             
             ppo_loss, clipped_frac = self._ppo_loss_fn(new_probs, old_probs, advantages)
 
             kl_div = keras.losses.KLDivergence()(tf.exp(prob_batch), tf.exp(action_probs))
 
-            actor_loss = ppo_loss + 0.1 * entropy
+            actor_loss = ppo_loss + entropy_coef * entropy
 
         actor_grads = actor_tape.gradient(actor_loss, self.actor.trainable_variables)
         self.actor.optimizer.apply_gradients(zip(actor_grads, self.actor.trainable_variables))
     
-        return ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores
+        return ppo_loss, entropy_coef, entropy, avg_probs, kl_div, clipped_frac, scores
 
     def _update_step(self, dset):
         
@@ -153,10 +154,10 @@ class Trainer():
             
             actor_step_out = self._actor_step(board_batch, piece_batch, input_batch, action_batch,
                                               prob_batch, advantage_batch, valid_mask)
-            ppo_loss, entropy, avg_probs, kl_div, clipped_frac, scores = actor_step_out
+            ppo_loss, entropy_coef, entropy, avg_probs, kl_div, clipped_frac, scores = actor_step_out
             
-        return (critic_loss, ppo_loss, entropy, avg_probs, kl_div,
-                clipped_frac, scores, board_batch[0])
+        return (critic_loss, ppo_loss, entropy_coef, entropy, avg_probs,
+                kl_div, clipped_frac, scores, board_batch[0])
 
     def train(self, gens, update_steps=4):
         
@@ -216,8 +217,8 @@ class Trainer():
                 step_out = self._update_step(dset)
                 print(f'\rUpdate Step {i}', end='', flush=True)
             
-            (critic_loss, ppo_loss, entropy, avg_probs, kl_div,
-             clipped_frac, scores, board_example) = step_out
+            (critic_loss, ppo_loss, entropy_coef, entropy, avg_probs,
+             kl_div, clipped_frac, scores, board_example) = step_out
 
             print(f'\rPPO Loss: {ppo_loss:1.2f}\t|\tKL Divergence: {kl_div:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\t', end='', flush=True)
 
@@ -225,6 +226,7 @@ class Trainer():
             norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
             
             wandb.log({'ppo_loss': ppo_loss,
+                       'entropy_coef': entropy_coef,
                        'entropy': entropy,
                        'avg_probs': avg_probs,
                        'kl_div': kl_div,
