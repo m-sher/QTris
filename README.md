@@ -18,21 +18,29 @@ $$\color{green}\text{●}$$ In progress
 
 $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY IT'S WORKING, JUST LET IT LEARN
 
-$$\color{green}\text{●}$$ Create demo/explanation videos w/ manim
-
 $$\color{green}\text{●}$$ Write this ReadMe
 
 $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
-$$\color{orange}\text{●}$$ Split pretrainer dataset files into smaller chunks to improve loading time
+$$\color{orange}\text{●}$$ Check if tf.data.Dataset.save maintains pipeline operations when loading
 
-$$\color{orange}\text{●}$$ Kill for too bumpy
+$$\color{orange}\text{●}$$ Add custom read function to shuffle shard reading order
 
-$$\color{yellow}\text{●}$$ Fix method for saving demo gif in Trainer
+$$\color{yellow}\text{●}$$ Kill for too bumpy (maybe)
+
+$$\color{yellow}\text{●}$$ Create demo/explanation videos w/ manim
 
 ### Completed Items: ###
+
+$$\color{yellow}\text{●}$$ ~~Fix method for saving demo gif in Trainer~~
+
+$$\color{yellow}\text{●}$$ ~~Rename trainer attributes to follow private convention~~
+
+$$\color{orange}\text{●}$$ ~~Split pretrainer dataset files into smaller chunks to improve loading time - tf.data.Dataset.save instead~~
+
+$$\color{yellow}\text{●}$$ ~~Change expert dataset structure to match novice dataset~~
 
 $$\color{yellow}\text{●}$$ ~~Fix pretrainer functions to make the class easier to use (why did I make them like that??)~~
 
