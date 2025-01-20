@@ -24,8 +24,10 @@ class Pretrainer():
             '10': 9,
             '11': 10,
         }
-
-        self._load_dset()
+        # try:
+        #     self.gt_dset = tf.data.Dataset.load('saved_expert_data')
+        # except:
+        self._load_dset()            
 
     def _load_data(self):
         self.players_data = [[], []]
@@ -46,8 +48,8 @@ class Pretrainer():
             returns.append(discounted_sum)
             
         returns = returns[::-1]
-        # returns = (returns - np.mean(returns)) / (np.std(returns) + 1e-10)
-        return returns # .tolist()
+
+        return returns
 
     def _load_dset(self):
         self._load_data()
@@ -92,7 +94,7 @@ class Pretrainer():
                 episode_pieces.append(piece_seq)
                 episode_boards.append(board)
                 episode_actions.append(action)
-                episode_attacks.append(attack / 8 + 0.01)
+                episode_attacks.append(attack**2 / 8 + 0.01)
         
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
@@ -113,6 +115,8 @@ class Pretrainer():
                                deterministic=False,
                                drop_remainder=True)
                         .prefetch(tf.data.AUTOTUNE))
+        
+        # self.gt_dset.save('saved_expert_dset')
 
     def _dset_generator(self):
         for sample in zip(self._dset_pieces, self._dset_boards, self._dset_actions, self._dset_attacks):
@@ -133,7 +137,7 @@ class Pretrainer():
         padded_action = self._pad(action, self._max_len+1)
         inp = tf.ensure_shape(padded_action[:-1], (self._max_len,))
         tar = tf.ensure_shape(padded_action[1:], (self._max_len,))
-        return (board, piece, inp), (tar, att)
+        return board, piece, inp, tar, att
 
     def cache_dset(self):
         for i, batch in enumerate(self.gt_dset):
@@ -190,7 +194,7 @@ class Pretrainer():
     def train(self, actor, critic, epochs, training_critic=False):
         if training_critic:
             for epoch in range(epochs):
-                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset):
+                for i, (board, piece, inp, tar, att) in enumerate(self.gt_dset):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, critic_loss, acc = step_out
                     
@@ -199,7 +203,7 @@ class Pretrainer():
             return actor_loss, critic_loss, acc
         else:
             for epoch in range(epochs):
-                for i, ((board, piece, inp), (tar, att)) in enumerate(self.gt_dset):
+                for i, (board, piece, inp, tar, att) in enumerate(self.gt_dset):
                     step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
                     actor_loss, acc = step_out
                 
