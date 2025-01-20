@@ -9,7 +9,7 @@ from PlayerSeparateParallel import Player
 
 
 class Trainer():
-    def __init__(self, actor, critic, max_len, num_players, players_to_render, gamma, lam, exp_coef=0.1, temperature=1.0, max_holes=4, max_episode_steps=1000):
+    def __init__(self, actor, critic, max_len, num_players, players_to_render, gamma, lam, exp_coef=0.01, temperature=1.0, max_holes=4, max_episode_steps=1000):
         self._eps = 1e-10
         self._ppo_epsilon = 0.2
         self.actor = actor
@@ -173,7 +173,7 @@ class Trainer():
 
     def _update_step(self, nov_dset):
         
-        for i, nov_batch, exp_batch in enumerate(tf.data.Dataset.zip(nov_dset, self._exp_dset)):
+        for i, (nov_batch, exp_batch) in enumerate(tf.data.Dataset.zip((nov_dset, self._exp_dset))):
             
             (nov_board_batch, nov_piece_batch, nov_input_batch, nov_action_batch,
              prob_batch, advantage_batch, return_batch) = nov_batch
@@ -191,8 +191,8 @@ class Trainer():
                                               exp_piece_batch, exp_input_batch, exp_target_batch)
             ppo_loss, entropy_coef, entropy, exp_loss, avg_probs, kl_div, clipped_frac, scores = actor_step_out
             
-        return (critic_loss, ppo_loss, entropy_coef, entropy, avg_probs,
-                kl_div, clipped_frac, scores[0], nov_board_batch[0])
+        return (critic_loss, ppo_loss, entropy_coef, entropy, exp_loss,
+                avg_probs, kl_div, clipped_frac, scores[0], nov_board_batch[0])
 
     def train(self, gens, update_steps=4):
         
@@ -264,6 +264,7 @@ class Trainer():
             wandb.log({'ppo_loss': ppo_loss,
                        'entropy_coef': entropy_coef,
                        'entropy': entropy,
+                       'exp_loss': exp_loss,
                        'avg_probs': avg_probs,
                        'kl_div': kl_div,
                        'clipped_frac': clipped_frac,
