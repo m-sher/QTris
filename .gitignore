@@ -11,3 +11,4 @@ conv3.npy
 /critic_checkpoint
 /good_checkpoints
 /actor_checkpoint
+/expert_demo_checkpoint
