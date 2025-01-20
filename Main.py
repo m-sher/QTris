@@ -54,16 +54,16 @@ critic.summary(), tf.shape(values), tf.shape(piece_scores), tf.shape(key_scores)
 
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-15')
+actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-83')
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-15')
+critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-83')
 
 actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'actor_checkpoint/finetuned/small', max_to_keep=5)
+actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'expert_demo_checkpoint/actor', max_to_keep=5)
 
 critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'critic_checkpoint/finetuned/small', max_to_keep=5)
+critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'expert_demo_checkpoint/critic', max_to_keep=5)
 
 
 
