@@ -11,7 +11,7 @@ num_layers = 2
 gamma = 0.99
 lam = 0.95
 temperature = 1.0
-num_players = 8
+num_players = 32
 display_rows = 4
 
 max_len = 10
@@ -70,7 +70,7 @@ critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'exper
 trainer = Trainer(actor=actor,
                   critic=critic,
                   max_len=max_len,
-                  num_players=32,
+                  num_players=num_players,
                   players_to_render=1,
                   gamma=gamma,
                   lam=lam,
