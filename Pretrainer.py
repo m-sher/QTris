@@ -3,31 +3,47 @@ from tensorflow import keras
 import glob
 
 class Pretrainer():
-    def __init__(self, gamma, max_len=10):
+    def __init__(self, gamma, str_to_ind):
 
         self.gamma = gamma
-        self._max_len = max_len
-        self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
-        self.mse = keras.losses.MeanSquaredError(reduction='none')
-        
+        self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+        self.mse = keras.losses.MeanSquaredError()
+        self.str_to_ind = str_to_ind
         self.move_dict = {
-            '0': 11,
-            '1': 1,
-            '2': 2,
-            '3': 3,
-            '4': 4,
-            '5': 5,
-            '6': 5,
-            '7': 6,
-            '8': 7,
-            '9': 8,
-            '10': 9,
-            '11': 10,
+            '0': 'S',
+            '1': 'l',
+            '2': 'r',
+            '3': 'L',
+            '4': 'R',
+            '5': 's',
+            '6': 's',
+            '7': 'a',
+            '8': 'c',
+            '9': 'H',
+            '10': 'h',
+            '11': '1',
         }
-        # try:
-        #     self.gt_dset = tf.data.Dataset.load('saved_expert_data')
-        # except:
-        self._load_dset()            
+
+        def custom_reader_func(datasets):
+            datasets = datasets.shuffle(10)
+            return datasets.interleave(lambda x: x,
+                                       deterministic=False,
+                                       num_parallel_calls=tf.data.AUTOTUNE)
+        
+        try:
+            self.gt_dset = tf.data.Dataset.load('saved_expert_dset', reader_func=custom_reader_func)
+        except:
+            self._load_dset()
+            self.gt_dset = tf.data.Dataset.load('saved_expert_dset', reader_func=custom_reader_func)
+            
+        self.gt_dset = (self.gt_dset
+                        .cache()
+                        .shuffle(100000)
+                        .batch(512,
+                               deterministic=False,
+                               drop_remainder=True,
+                               num_parallel_calls=tf.data.AUTOTUNE)
+                        .prefetch(tf.data.AUTOTUNE))
 
     def _load_data(self):
         self.players_data = [[], []]
@@ -74,9 +90,7 @@ class Pretrainer():
                 action = [self.move_dict[move_char] for move_char in raw_action.split(',')[:-1]]
                 attack = int(next_att) - int(total_att)
                 
-                if len(action) > 0 and attack >= 0:
-                    action = [11] * (action[0] != 11) + action
-                else:
+                if len(action) == 0 or attack < 0:
                     episode_attacks = self._get_discounted_returns(episode_attacks, self.gamma)
             
                     self._dset_pieces += episode_pieces
@@ -90,54 +104,37 @@ class Pretrainer():
                     episode_attacks = []
                     
                     continue
-            
+                
+                try:
+                    action = self.str_to_ind[''.join(action)]
+                except:
+                    action = (-1, -1, -1)
+                
                 episode_pieces.append(piece_seq)
                 episode_boards.append(board)
                 episode_actions.append(action)
-                episode_attacks.append(attack**2 / 8 + 0.01)
+                episode_attacks.append(attack / 32)
+
         
                 if i % 10000 == 0:
                     print(f'\r{(i+1)/len(player_data[:-1]):1.2f}', end='', flush=True)
 
         self.gt_dset = (tf.data.Dataset.from_generator(self._dset_generator,
-                                                       output_signature=(tf.TensorSpec(shape=(7,), dtype=tf.float32),
-                                                                         tf.TensorSpec(shape=(28, 10), dtype=tf.float32),
-                                                                         tf.TensorSpec(shape=(None,), dtype=tf.int32),
+                                                       output_signature=(tf.TensorSpec(shape=(28, 10), dtype=tf.float32),
+                                                                         tf.TensorSpec(shape=(7,), dtype=tf.float32),
+                                                                         tf.TensorSpec(shape=(3,), dtype=tf.int32),
                                                                          tf.TensorSpec(shape=(), dtype=tf.float32)))
                         .filter(self._filter_fn)
-                        .map(self._pad_and_split,
-                             num_parallel_calls=tf.data.AUTOTUNE,
-                             deterministic=False)
-                        .cache()
-                        .shuffle(100000)
-                        .batch(512,
-                               num_parallel_calls=tf.data.AUTOTUNE,
-                               deterministic=False,
-                               drop_remainder=True)
-                        .prefetch(tf.data.AUTOTUNE))
+                        .enumerate())
         
-        # self.gt_dset.save('saved_expert_dset')
+        self.gt_dset.save('saved_expert_dset', shard_func=lambda idx, sample: idx % 10)
 
     def _dset_generator(self):
-        for sample in zip(self._dset_pieces, self._dset_boards, self._dset_actions, self._dset_attacks):
+        for sample in zip(self._dset_boards, self._dset_pieces, self._dset_actions, self._dset_attacks):
             yield sample
 
-    def _pad(self, item, length, pad_value=0):
-        num_valid = tf.shape(item)[0]
-        if num_valid > length:
-            padded = item[:length]
-        else:
-            padded = tf.concat([item, tf.zeros((length - num_valid), dtype=item.dtype) + pad_value], axis=0)
-        return padded
-
     def _filter_fn(self, piece, board, action, att):
-        return tf.shape(action)[0] <= self._max_len+1
-
-    def _pad_and_split(self, piece, board, action, att):
-        padded_action = self._pad(action, self._max_len+1)
-        inp = tf.ensure_shape(padded_action[:-1], (self._max_len,))
-        tar = tf.ensure_shape(padded_action[1:], (self._max_len,))
-        return board, piece, inp, tar, att
+        return tf.reduce_all(action != -1)
 
     def cache_dset(self):
         for i, batch in enumerate(self.gt_dset):
@@ -145,68 +142,68 @@ class Pretrainer():
                 print(f'\rCaching {i}', end='', flush=True)
 
     @tf.function
-    def _masked_logit_loss(self, true, pred, mask):
-        raw_loss = self.scc(true, pred)
+    def _logit_loss(self, true, pred):
+        loss = self.scc(true, pred)
         
-        loss = tf.reduce_sum(raw_loss * mask) / tf.reduce_sum(mask)
         return loss
 
     @tf.function
-    def _masked_value_loss(self, true, pred, mask):
-        raw_loss = self.mse(true[..., None, None], pred)
+    def _value_loss(self, true, pred):
+        loss = self.mse(true, pred)
         
-        loss = tf.reduce_sum(raw_loss * mask) / tf.reduce_sum(mask)
         return loss
 
     @tf.function
-    def _masked_logit_acc(self, true, pred, mask):
-        preds = tf.argmax(pred, axis=-1, output_type=tf.int32)
-        true = tf.cast(true, tf.int32)
+    def _logit_acc(self, true, pred):
+        chosen = tf.argmax(pred, axis=-1, output_type=tf.int32)
         
-        raw_acc = tf.cast(preds == true, tf.float32)
-        
-        acc = tf.reduce_sum(raw_acc * mask) / tf.reduce_sum(mask)
+        acc = chosen == true
         return acc
 
     @tf.function
-    def _train_step(self, actor, critic, board, piece, inp, tar, att, training_critic=False):
-        mask = tf.cast(tar != 0, tf.float32)
+    def _train_step(self, model, board, piece, action, target_value):
         
-        with tf.GradientTape() as actor_tape:
-            logits = actor((board, piece, inp), training=True)
-            actor_loss = self._masked_logit_loss(tar, logits, mask)
-        actor_grads = actor_tape.gradient(actor_loss, actor.trainable_variables)
-        actor.optimizer.apply_gradients(zip(actor_grads, actor.trainable_variables))
-        
-        acc = self._masked_logit_acc(tar, logits, mask)
-
-        if training_critic:    
-            with tf.GradientTape() as critic_tape:
-                values = critic((board, piece, inp), training=True)
-                critic_loss = self._masked_value_loss(att, values, mask)
-            critic_grads = critic_tape.gradient(critic_loss, critic.trainable_variables)
-            critic.optimizer.apply_gradients(zip(critic_grads, critic.trainable_variables))
+        with tf.GradientTape() as tape:
+            _, all_log_probs, values = model(board, piece, gt_actions=action, training=True)
+            actor_loss = tf.constant(0.0, tf.float32)
+            for i, log_probs in enumerate(all_log_probs):
+                actor_loss += self._logit_loss(action[:, i], log_probs)
+            critic_loss = self._value_loss(target_value, values)
+            total_loss = actor_loss + 0.5 * critic_loss            
             
-            return actor_loss, critic_loss, acc
+        grads = tape.gradient(total_loss, model.trainable_variables)
+        model.optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        
+        accs = []
+        for i, log_probs in enumerate(all_log_probs):
+            accs.append(self._logit_acc(action[:, i], log_probs))
+        acc = tf.reduce_mean(tf.cast(tf.reduce_all(accs, axis=0), tf.float32))
+        
+        return actor_loss, critic_loss, acc
 
-        return actor_loss, acc
+    def train(self, model, epochs, ckpt_type='pretrained'):
 
-    def train(self, actor, critic, epochs, training_critic=False):
-        if training_critic:
-            for epoch in range(epochs):
-                for i, (board, piece, inp, tar, att) in enumerate(self.gt_dset):
-                    step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
-                    actor_loss, critic_loss, acc = step_out
-                    
-                    if i % 100 == 0:
-                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tCritic Loss: {critic_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
-            return actor_loss, critic_loss, acc
+        checkpoint = tf.train.Checkpoint(model=model, optimizer=model.optimizer)        
+
+        if not ckpt_type:
+            self.checkpoint_manager = tf.train.CheckpointManager(checkpoint, 'combined_checkpoints/pretrained', max_to_keep=5)
         else:
-            for epoch in range(epochs):
-                for i, (board, piece, inp, tar, att) in enumerate(self.gt_dset):
-                    step_out = self._train_step(actor, critic, board, piece, inp, tar, att, training_critic)
-                    actor_loss, acc = step_out
-                
-                    if i % 100 == 0:
-                        print(f'\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\tAccuracy: {acc:1.2f}\t|\t', end='', flush=True)
-            return actor_loss, acc
+            self.checkpoint_manager = tf.train.CheckpointManager(checkpoint, f'combined_checkpoints/{ckpt_type}', max_to_keep=5)
+            checkpoint.restore(self.checkpoint_manager.latest_checkpoint)
+            print(self.checkpoint_manager.latest_checkpoint)
+        
+        if ckpt_type == 'finetuned':
+            self.checkpoint_manager = tf.train.CheckpointManager(checkpoint, 'combined_checkpoints/pretrained', max_to_keep=5)
+
+        for epoch in range(epochs):
+            for i, (_, (board, piece, action, target_value)) in enumerate(self.gt_dset):
+                step_out = self._train_step(model, board, piece, action, target_value)
+                if i % 100 == 0:
+                    actor_loss, critic_loss, acc = step_out
+                    print(f"\r{i}\t|\tActor Loss: {actor_loss:1.2f}\t|\t" + 
+                          f"Critic Loss: {critic_loss:1.2f}\t|\t" +
+                          f"Accuracy: {acc:1.2f}\t|\t", end='', flush=True)
+        
+            self.checkpoint_manager.save()
+
+        return step_out

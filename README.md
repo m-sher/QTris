@@ -24,15 +24,17 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
-$$\color{orange}\text{●}$$ Check if tf.data.Dataset.save maintains pipeline operations when loading
-
-$$\color{orange}\text{●}$$ Add custom read function to shuffle shard reading order
-
-$$\color{yellow}\text{●}$$ Kill for too bumpy (maybe)
+$$\color{orange}\text{●}$$ Check piece/death calculations for logging
 
 $$\color{yellow}\text{●}$$ Create demo/explanation videos w/ manim
 
 ### Completed Items: ###
+
+$$\color{orange}\text{●}$$ ~~Check if tf.data.Dataset.save maintains pipeline operations when loading~~
+
+$$\color{orange}\text{●}$$ ~~Add custom read function to shuffle shard reading order~~
+
+$$\color{yellow}\text{●}$$ ~~Kill for too bumpy (maybe)~~
 
 $$\color{yellow}\text{●}$$ ~~Fix method for saving demo gif in Trainer~~
 

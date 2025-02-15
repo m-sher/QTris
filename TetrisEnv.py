@@ -47,20 +47,19 @@ class TetrisEnv():
         return self._current_time_step
 
     def step(self, action):
-        errored = False
-        for key in action:
-            try:
+        try:
+            for key in action:
                 self._press_key(key)
-                errored = False
-            except:
-                errored = True
-                break
-        reward = self._game.score - self._last_score
-        self._last_score = self._game.score
-        board, pieces = self._get_data()
-        terminated = self._game.lost or errored
-        self._current_time_step = (board, pieces, reward, terminated)
-        return self._current_time_step
+                reward = self._game.score - self._last_score
+            self._last_score = self._game.score
+            board, pieces = self._get_data()
+            terminated = self._game.lost
+            self._current_time_step = (board, pieces, reward, terminated)
+            return self._current_time_step
+        except:
+            board, pieces = self._get_data()
+            self._current_time_step = (board, pieces, 0, True)
+            return self._current_time_step
    
     def current_time_step(self):
         return self._current_time_step
