@@ -1,85 +1,68 @@
 from TetrisModel import TetrisModel
 from TrainerSeparateParallel import Trainer
+from GenerateMoves import generate_all_finesse_moves_dict
+from Pretrainer import Pretrainer
 import tensorflow as tf
 from tensorflow import keras
 
 piece_dim = 8
-key_dim = 12
 depth = 32
 num_heads = 4
-num_layers = 2
-gamma = 0.99
+num_layers = 4
+dropout_rate = 0.1
+trunk_dim = 64
+out_dims = [2, 60, 8, 1]
+
+entropy_coef = 0.03
+entropy_decay = 0.9
+value_coef = 0.1
+gamma = 0.95
 lam = 0.95
 temperature = 1.0
-num_players = 8
-display_rows = 4
+num_players = 32
 
-max_len = 10
+str_to_ind, ind_to_str = generate_all_finesse_moves_dict()
 
+# pretrainer = Pretrainer(gamma=gamma, str_to_ind=str_to_ind)
 
-
-actor = TetrisModel(piece_dim=piece_dim,
-                    key_dim=key_dim,
+model = TetrisModel(piece_dim=piece_dim,
                     depth=depth,
                     num_heads=num_heads,
                     num_layers=num_layers,
-                    max_length=max_len,
-                    out_dim=key_dim)
+                    dropout_rate=dropout_rate,
+                    trunk_dim=trunk_dim,
+                    out_dims=out_dims)
 
-actor_optimizer = keras.optimizers.Adam(3e-4, clipnorm=1)
-actor.compile(optimizer=actor_optimizer)
+optimizer = keras.optimizers.Adam(3e-4, clipnorm=1)
+model.compile(optimizer=optimizer)
 
-actor_logits, piece_scores, key_scores = actor((tf.random.uniform((32, 28, 10, 1)),
-                                                tf.random.uniform((32, 7), minval=0, maxval=8, dtype=tf.int32),
-                                                tf.random.uniform((32, max_len), minval=0, maxval=key_dim, dtype=tf.int32)), return_scores=True)
-actor.summary(), tf.shape(actor_logits), tf.shape(piece_scores), tf.shape(key_scores)
-
-
-
-critic = TetrisModel(piece_dim=piece_dim,
-                     key_dim=key_dim,
-                     depth=depth,
-                     num_heads=num_heads,
-                     num_layers=num_layers,
-                     max_length=max_len,
-                     out_dim=1)
-
-critic_optimizer = keras.optimizers.Adam(3e-4, clipnorm=1)
-critic.compile(optimizer=critic_optimizer)
-
-values, piece_scores, key_scores = critic((tf.random.uniform((32, 28, 10, 1)),
-                                           tf.random.uniform((32, 7), minval=0, maxval=8, dtype=tf.int32),
-                                           tf.random.uniform((32, max_len), minval=0, maxval=key_dim, dtype=tf.int32)), return_scores=True)
-critic.summary(), tf.shape(values), tf.shape(piece_scores), tf.shape(key_scores)
-
-
-actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint.restore('actor_checkpoint/finetuned/small/ckpt-83')
-
-critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint.restore('critic_checkpoint/finetuned/small/ckpt-83')
-
-actor_checkpoint = tf.train.Checkpoint(model=actor, optim=actor.optimizer)
-actor_checkpoint_manager = tf.train.CheckpointManager(actor_checkpoint, 'expert_demo_checkpoint/actor', max_to_keep=5)
-
-critic_checkpoint = tf.train.Checkpoint(model=critic, optim=critic.optimizer)
-critic_checkpoint_manager = tf.train.CheckpointManager(critic_checkpoint, 'expert_demo_checkpoint/critic', max_to_keep=5)
-
-
-
-trainer = Trainer(actor=actor,
-                  critic=critic,
-                  max_len=max_len,
-                  num_players=32,
-                  players_to_render=1,
-                  gamma=gamma,
-                  lam=lam,
-                  temperature=1.0,
-                  max_holes=4,
-                  max_episode_steps=1000)
+all_actions, all_log_probs, all_values, piece_scores = model(tf.random.uniform((num_players, 28, 10, 1)),
+                                                             tf.random.uniform((num_players, 7), minval=0, maxval=8, dtype=tf.int32), return_scores=True)
+model.summary()
+for head_log_probs in all_log_probs:
+    print(tf.shape(head_log_probs))
+print(tf.shape(all_actions))
+print(tf.shape(all_values))
+print(tf.shape(piece_scores))
 
 if __name__ == '__main__':
-    while True:
-        trainer.train(gens=100, update_steps=4)
-        actor_checkpoint_manager.save()
-        critic_checkpoint_manager.save()
+    # pretrainer.train(model, 100, None)
+    
+    trainer = Trainer(model=model,
+                      ind_to_str=ind_to_str,
+                      entropy_coef=entropy_coef,
+                      entropy_decay=entropy_decay,
+                      value_coef=value_coef,
+                      num_players=num_players,
+                      players_to_render=1,
+                      gamma=gamma,
+                      lam=lam,
+                      ckpt_type='finetuned',
+                      temperature=1,
+                      max_holes=10,
+                      max_height=15,
+                      max_diff=10,
+                      max_episode_steps=500)
+    
+    trainer.train(gens=10000, update_steps=4)
+    

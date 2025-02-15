@@ -1,6 +1,7 @@
 import tensorflow as tf
+import tensorflow_probability as tfp
 from tensorflow import keras
-from tensorflow.keras import layers
+from keras import layers
 
 def positional_encoding(max_length, depth):
     half_depth = depth / 2
@@ -13,25 +14,24 @@ def positional_encoding(max_length, depth):
     pos_encoding = tf.concat([tf.sin(angle_rads), tf.cos(angle_rads)], axis=-1)
     return pos_encoding
 
-class SeqEmbedding(layers.Layer):
-    def __init__(self, in_dim, depth, max_length, mask_zero):
+class PosEncoding(layers.Layer):
+    def __init__(self, depth, max_length):
         super().__init__()
+        self.depth = depth
         
-        self.pos_embedding = positional_encoding(max_length, depth)
-        
-        self.seq_emb = tf.keras.layers.Embedding(input_dim=in_dim,
-                                                 output_dim=depth,
-                                                 mask_zero=mask_zero)
+        self.pos_encoding = positional_encoding(max_length, depth)
         
         self.add = tf.keras.layers.Add()
 
     @tf.function
     def call(self, seq):
-        seq = self.seq_emb(seq) # (batch, seq, key_emb_dim)
-
-        x = tf.repeat(self.pos_embedding[None, :tf.shape(seq)[1]], repeats=tf.shape(seq)[0], axis=0)
+        # Already embedded seq
+        seq_len = tf.shape(seq)[1]
+        
+        seq *= tf.cast(self.depth, tf.float32) ** 0.5
+        seq += self.pos_encoding[None, :seq_len]
     
-        return self.add([seq, x])
+        return seq
 
 class SelfAttention(layers.Layer):
     def __init__(self, causal, **kwargs):
@@ -127,10 +127,11 @@ class DecoderLayer(layers.Layer):
         return out_seq, attn_scores
 
 class TetrisModel(keras.Model):
-    def __init__(self, piece_dim, key_dim, depth, num_heads, num_layers, max_length, out_dim):
+    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, trunk_dim, out_dims):
         super().__init__()
 
-        self.depth = depth
+        self._depth = depth
+        self._out_dims = out_dims
         
         self.make_patches = keras.Sequential([
             keras.Input(shape=(28, 10, 1)),
@@ -140,74 +141,116 @@ class TetrisModel(keras.Model):
         ])
         
         num_patches = self.make_patches.output_shape[1]
-        self.patch_embedding = layers.Embedding(input_dim=num_patches,
-                                                output_dim=self.depth)(tf.range(num_patches)[None, ...])
+        self.patch_pos_encoding = PosEncoding(
+            depth=depth,
+            max_length=num_patches
+        )
         
-        self.board_encoder_layers = [EncoderLayer(units=depth, num_heads=num_heads, dropout_rate=0.1, name=f'board_enc_{i}')
+        self.board_encoder_layers = [EncoderLayer(units=depth, num_heads=num_heads, dropout_rate=dropout_rate, name=f'board_enc_{i}')
                                      for i in range(num_layers)]
         
-        self.piece_embedding = SeqEmbedding(
-            in_dim=piece_dim,
+        self.piece_embedding = layers.Embedding(
+            input_dim=piece_dim,
+            output_dim=depth,
+        )
+        
+        self.piece_pos_encoding = PosEncoding(
             depth=depth,
             max_length=7,
-            mask_zero=False
         )
         
-        self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=0.1, name=f'piece_dec_{i}')
+        self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=dropout_rate, name=f'piece_dec_{i}')
                                      for i in range(num_layers)]
         
-        self.key_embedding = SeqEmbedding(
-            in_dim=key_dim,
-            depth=depth,
-            max_length=max_length,
-            mask_zero=True
-        )
-        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=0.1, name=f'key_dec_{i}')
-                                   for i in range(num_layers)]
-        self.model_top = layers.Dense(out_dim, name='model_top')
+        self.flatten_rep = layers.Flatten()
+        
+        self.policy_heads = []
+        self.policy_embeddings = []
+        for i, dim in enumerate(self._out_dims[:-1]):
+            head = keras.Sequential([
+                layers.Dense(trunk_dim, activation='relu'),
+                layers.Dense(dim)
+            ], name=f'policy_head_{i}')
+            self.policy_heads.append(head)
+        
+        for i, dim in enumerate(self._out_dims[:-2]):
+            embed_layer = layers.Embedding(input_dim=dim, output_dim=depth, name=f'policy_embed_{i}')
+            self.policy_embeddings.append(embed_layer)
+        
+        self.value_top = keras.Sequential([
+            layers.Dropout(dropout_rate),
+            layers.Dense(trunk_dim, activation='relu'),
+            layers.Dropout(dropout_rate),
+            layers.Dense(out_dims[-1])
+        ], name='value_top')
     
     @tf.function
     def process_obs(self, inputs, training=False):
+        
         board, piece = inputs
         
         piece_scores = []
-        board_enc = self.make_patches(board) + self.patch_embedding
+        patches = self.make_patches(board, training=training)
+        board_enc = self.patch_pos_encoding(patches)
         
         for board_enc_layer in self.board_encoder_layers:
             board_enc = board_enc_layer(board_enc, training=training)
         
-        piece_dec = self.piece_embedding(piece)
+        piece_embedding = self.piece_embedding(piece, training=training)
+        piece_dec = self.piece_pos_encoding(piece_embedding)
         
         for piece_dec_layer in self.piece_decoder_layers:
             piece_dec, last_attn = piece_dec_layer([board_enc, piece_dec], training=training)
             piece_scores.append(last_attn)
         
-        return piece_dec, piece_scores
-
-    @tf.function
-    def process_keys(self, inputs, training=False):
-        piece_dec, inp_seq = inputs
-
-        key_scores = []
-        key_dec = self.key_embedding(inp_seq)
-        for dec_layer in self.key_decoder_layers:
-            key_dec, last_attn = dec_layer([piece_dec, key_dec], training=training)
-            key_scores.append(last_attn)
+        latent_state_rep = self.flatten_rep(piece_dec)
         
-        key_out = self.model_top(key_dec)
-        
-        return key_out, key_scores
+        return latent_state_rep, piece_scores
     
     @tf.function
-    def call(self, inputs, training=False, return_scores=False):
+    def hierarchical_policy(self, latent_state_rep, greedy=False, gt_actions=None, training=False):
+        chosen_actions = []
+        all_logits = []
+        all_embeddings = []
+        current_state = latent_state_rep
         
-        board, piece, inp_seq = inputs
+        for i in range(len(self.policy_heads)):
+            # Compute logits for the current decision
+            logits = self.policy_heads[i](current_state, training=training)
+            
+            if gt_actions is not None:
+                chosen_action = tf.stop_gradient(gt_actions[:, i])
+            elif greedy:
+                chosen_action = tf.stop_gradient(tf.argmax(logits, axis=-1, output_type=tf.int32))
+            else:
+                distribution = tfp.distributions.Categorical(logits=logits)
+                chosen_action = tf.stop_gradient(distribution.sample())
+            
+            chosen_actions.append(chosen_action)
+            
+            all_logits.append(logits)
+            
+            if i < len(self.policy_embeddings):
+                all_embeddings.append(self.policy_embeddings[i](chosen_action))
+                
+                current_state = tf.concat([latent_state_rep] + all_embeddings, axis=-1)
         
-        piece_dec, piece_scores = self.process_obs((board, piece), training=training)
+        chosen_actions = tf.stack(chosen_actions, axis=-1)
+        
+        return chosen_actions, all_logits
     
-        model_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
+    @tf.function
+    def call(self, board, piece, greedy=False, gt_actions=None, training=False, return_scores=False):
+        
+        latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
+
+        all_actions, all_logits = self.hierarchical_policy(latent_state_rep=latent_state_rep,
+                                                           greedy=greedy,
+                                                           gt_actions=gt_actions,
+                                                           training=training)
+        values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
 
         if return_scores:
-            return model_out, piece_scores, key_scores
+            return all_actions, all_logits, values, piece_scores
         else:
-            return model_out
+            return all_actions, all_logits, values
