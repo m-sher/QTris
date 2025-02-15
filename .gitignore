@@ -12,3 +12,5 @@ conv3.npy
 /good_checkpoints
 /actor_checkpoint
 /expert_demo_checkpoint
+/saved_expert_dset
+/combined_checkpoints
