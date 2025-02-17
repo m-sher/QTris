@@ -1,4 +1,6 @@
 def generate_all_finesse_moves_dict():
+    # IGNORE WITH AUTOREGRESSIVE
+    
     # Define option lists (order matters)
     possible_holds = ["", "h"]
     standard_horizontal = ["", "L", "R", "Lr", "Rl", "ll", "rr", "l", "r"]
@@ -30,5 +32,25 @@ def generate_all_finesse_moves_dict():
         
     return str_to_ind, ind_to_str
 
-str_to_ind, ind_to_str = generate_all_finesse_moves_dict()
+# str_to_ind, ind_to_str = generate_all_finesse_moves_dict()
 # print(len(str_to_ind))
+
+def generate_key_dict():
+    ind_to_str = {
+        0: 'S',
+        1: 'h',
+        2: 'l',
+        3: 'r',
+        4: 'L',
+        5: 'R',
+        6: 'a',
+        7: 'c',
+        8: '1',
+        9: 's',
+        10: 'H',
+        11: 'P'
+    }
+    
+    str_to_ind = {val: key for key, val in ind_to_str.items()}
+    
+    return ind_to_str, str_to_ind
