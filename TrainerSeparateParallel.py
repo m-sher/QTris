@@ -95,9 +95,9 @@ class Trainer():
 
     @tf.function
     def _critic_loss_fn(self, returns, new_values, old_values):
-        # returns -> batch, 1
-        # new_values -> batch, 1
-        # old_values -> batch, 1
+        # returns -> batch,
+        # new_values -> batch,
+        # old_values -> batch,
         
         returns = tf.ensure_shape(returns, (None,))
         new_values = tf.ensure_shape(new_values, (None,))
@@ -120,21 +120,34 @@ class Trainer():
         (board_batch, piece_batch, action_batch,
          prob_batch, value_batch, advantage_batch, return_batch) = batch
         
+        # True for valid, false for invalid
+        mask = ~(prob_batch == -tf.constant(float('inf'), dtype=tf.float32))
+        
+        inp_seq = action_batch[:, :-1]
+        action_seq = action_batch[:, 1:]
+        
         with tf.GradientTape() as tape:
-            _, all_logits, all_values, scores = self.model(board_batch, piece_batch, training=True, return_scores=True)
+            all_logits, all_values, scores = self.model((board_batch, piece_batch, inp_seq), training=True, return_scores=True)
             
-            old_probs = prob_batch
-            new_probs = tf.zeros_like(prob_batch, tf.float32) # batch,
-            entropy = tf.zeros_like(prob_batch, tf.float32) # batch,
-            for i, head_logits in enumerate(all_logits):
-                # num_players,
-                head_dist = tfp.distributions.Categorical(logits=head_logits / self._temp)
-                
-                new_probs += head_dist.log_prob(action_batch[:, i])
-                
-                entropy += head_dist.entropy()
+            # batch, max_len, key_dim
+            masked_logits = tf.where(mask,
+                                     all_logits,
+                                     -tf.constant(float('inf'), dtype=tf.float32))
             
-            entropy = tf.reduce_mean(entropy)
+            # batch, max_len, key_dim
+            all_log_probs = masked_logits - tf.reduce_logsumexp(masked_logits, axis=-1, keepdims=True)
+            
+            # scalar
+            entropy = tf.reduce_mean(-tf.reduce_sum(tf.exp(all_log_probs) * all_log_probs, axis=-1))
+            
+            # batch,
+            new_probs = tf.reduce_sum(tf.gather(all_log_probs,
+                                                action_seq,
+                                                batch_dims=2), axis=1)
+            # batch,
+            old_probs = tf.reduce_sum(tf.gather(prob_batch,
+                                                action_seq,
+                                                batch_dims=2), axis=1)
             
             approx_kl = tf.reduce_mean(old_probs - new_probs)
             

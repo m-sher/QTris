@@ -65,7 +65,8 @@ class TetrisEnv():
         return self._current_time_step
     
     def _press_key(self, key):
-        self._game.push(self._mov_dict[key])
+        if key in self._mov_dict.keys():
+            self._game.push(self._mov_dict[key])
     
     def _get_data(self):
         board = self._get_board()

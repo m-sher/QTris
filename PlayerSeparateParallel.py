@@ -86,7 +86,7 @@ class Player():
          episode_boards, episode_pieces, episode_actions,
          episode_probs, episode_values, episode_rewards, episode_dones) = step_data
         
-        key_chars = self._ind_to_str[tuple(action)]
+        key_chars = ''.join([self._ind_to_str[key] for key in action])
         episode_boards.append(last_board)
         episode_pieces.append(piece)
         episode_actions.append(action)
@@ -102,7 +102,11 @@ class Player():
             last_diff > self._max_diff):
             episode_dones.append(1.0)
             board, piece, _, _ = game.reset()
-            env_rewards = -1.0
+            last_heights = self._get_heights(board)
+            last_holes = self._get_holes(board, last_heights)
+            last_bumpiness = self._get_bumpiness(last_heights)
+            last_diff = self._get_diff(last_heights)
+            env_rewards = -10.0
         else:
             episode_dones.append(0.0)
             env_rewards = hole_reward + bumpy_reward + height_reward + diff_reward + attack + self._step_reward
@@ -134,18 +138,9 @@ class Player():
 
         for t in range(max_steps):
 
-            all_actions, all_logits, all_values = model(board_obs, piece_obs, greedy=greedy, training=False)
+            all_actions, all_probs, all_values = model.predict((board_obs, piece_obs), greedy=greedy)
 
-            all_total_probs = tf.zeros((self._num_players,), tf.float32)
-            for i, head_logits in enumerate(all_logits):
-                # num_players,
-                head_dist = tfp.distributions.Categorical(logits=head_logits / temperature)
-                
-                chosen_prob = head_dist.log_prob(all_actions[:, i])
-                
-                all_total_probs += chosen_prob
-
-            all_step_data = [all_board, all_piece, all_actions.numpy(), all_total_probs.numpy(),
+            all_step_data = [all_board, all_piece, all_actions.numpy(), all_probs.numpy(),
                              all_values.numpy(), all_last_heights, all_last_holes, all_last_bumpiness,
                              all_last_diff, all_episode_boards, all_episode_pieces, all_episode_actions,
                              all_episode_probs, all_episode_values, all_episode_rewards, all_episode_dones]

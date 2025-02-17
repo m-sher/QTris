@@ -1,5 +1,4 @@
 import tensorflow as tf
-import tensorflow_probability as tfp
 from tensorflow import keras
 from keras import layers
 
@@ -127,11 +126,12 @@ class DecoderLayer(layers.Layer):
         return out_seq, attn_scores
 
 class TetrisModel(keras.Model):
-    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, trunk_dim, out_dims):
+    def __init__(self, piece_dim, key_dim, max_len, depth, num_heads, num_layers, dropout_rate, trunk_dim):
         super().__init__()
 
+        self._key_dim = key_dim
+        self._max_len = max_len
         self._depth = depth
-        self._out_dims = out_dims
         
         self.make_patches = keras.Sequential([
             keras.Input(shape=(28, 10, 1)),
@@ -162,27 +162,33 @@ class TetrisModel(keras.Model):
         self.piece_decoder_layers = [DecoderLayer(units=depth, causal=False, num_heads=num_heads, dropout_rate=dropout_rate, name=f'piece_dec_{i}')
                                      for i in range(num_layers)]
         
-        self.flatten_rep = layers.Flatten()
-        
-        self.policy_heads = []
-        self.policy_embeddings = []
-        for i, dim in enumerate(self._out_dims[:-1]):
-            head = keras.Sequential([
-                layers.Dense(trunk_dim, activation='relu'),
-                layers.Dense(dim)
-            ], name=f'policy_head_{i}')
-            self.policy_heads.append(head)
-        
-        for i, dim in enumerate(self._out_dims[:-2]):
-            embed_layer = layers.Embedding(input_dim=dim, output_dim=depth, name=f'policy_embed_{i}')
-            self.policy_embeddings.append(embed_layer)
-        
         self.value_top = keras.Sequential([
+            layers.Flatten(),
             layers.Dropout(dropout_rate),
             layers.Dense(trunk_dim, activation='relu'),
             layers.Dropout(dropout_rate),
-            layers.Dense(out_dims[-1])
+            layers.Dense(1)
         ], name='value_top')
+        
+        self.key_embedding = layers.Embedding(
+            input_dim=key_dim,
+            output_dim=depth,
+        )
+        
+        self.key_pos_encoding = PosEncoding(
+            depth=depth,
+            max_length=max_len
+        )
+        
+        self.key_decoder_layers = [DecoderLayer(units=depth, causal=True, num_heads=num_heads, dropout_rate=dropout_rate, name=f'key_dec_{i}')
+                                   for i in range(num_layers)]
+        
+        self.policy_top = keras.Sequential([
+            layers.Dropout(dropout_rate),
+            layers.Dense(trunk_dim, activation='relu'),
+            layers.Dropout(dropout_rate),
+            layers.Dense(key_dim)
+        ])
     
     @tf.function
     def process_obs(self, inputs, training=False):
@@ -203,54 +209,132 @@ class TetrisModel(keras.Model):
             piece_dec, last_attn = piece_dec_layer([board_enc, piece_dec], training=training)
             piece_scores.append(last_attn)
         
-        latent_state_rep = self.flatten_rep(piece_dec)
-        
-        return latent_state_rep, piece_scores
+        return piece_dec, piece_scores
     
     @tf.function
-    def hierarchical_policy(self, latent_state_rep, greedy=False, gt_actions=None, training=False):
-        chosen_actions = []
-        all_logits = []
-        all_embeddings = []
-        current_state = latent_state_rep
+    def process_keys(self, inputs, training=False):
         
-        for i in range(len(self.policy_heads)):
-            # Compute logits for the current decision
-            logits = self.policy_heads[i](current_state, training=training)
+        piece_dec, key_seq = inputs
+        
+        key_scores = []
+        key_dec = self.key_embedding(key_seq, training=training)
+        key_dec = self.key_pos_encoding(key_dec, training=training)
+        
+        for key_dec_layer in self.key_decoder_layers:
+            key_dec, last_attn = key_dec_layer([piece_dec, key_dec], training=training)
+            key_scores.append(last_attn)
             
-            if gt_actions is not None:
-                chosen_action = tf.stop_gradient(gt_actions[:, i])
-            elif greedy:
-                chosen_action = tf.stop_gradient(tf.argmax(logits, axis=-1, output_type=tf.int32))
+        key_out = self.policy_top(key_dec, training=training)
+        
+        return key_out, key_scores
+    
+    @tf.function
+    def predict(self, inputs, greedy=False, return_scores=False):
+        
+        board, piece = inputs
+        
+        piece_dec, piece_scores = self.process_obs((board, piece), training=False)
+        
+        values = self.value_top(piece_dec, training=False)
+        values = tf.squeeze(values, axis=-1)
+        
+        key_seq = tf.zeros((tf.shape(board)[0], 1), dtype=tf.int32)
+        
+        seq_log_probs = tf.zeros((tf.shape(board)[0], 0, self._key_dim), dtype=tf.float32)
+        
+        for i in range(self._max_len):
+            # batch, seq, key_dim
+            key_out, key_scores = self.process_keys((piece_dec, key_seq), training=False)
+        
+            # batch, key_dim
+            is_last = tf.broadcast_to(tf.constant(i == self._max_len - 1)[None, None], (tf.shape(key_out)[0], self._key_dim))
+        
+            # batch, key_dim
+            can_hold = tf.broadcast_to((tf.shape(key_seq)[-1] == 1)[None, None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # DAS keys are 1 and 2
+            # batch, key_dim
+            num_tap_l = tf.broadcast_to(tf.reduce_sum(tf.cast(key_seq == 2, tf.float32), axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            num_tap_r = tf.broadcast_to(tf.reduce_sum(tf.cast(key_seq == 3, tf.float32), axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # DAS keys are 3 and 4
+            # batch, key_dim
+            num_DAS_L = tf.broadcast_to(tf.reduce_sum(tf.cast(key_seq == 4, tf.float32), axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            num_DAS_R = tf.broadcast_to(tf.reduce_sum(tf.cast(key_seq == 5, tf.float32), axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # rotate keys are 6, 7, and 8
+            # batch, key_dim
+            has_rotate_a = tf.broadcast_to(tf.reduce_any(key_seq == 6, axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            has_rotate_c = tf.broadcast_to(tf.reduce_any(key_seq == 7, axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            has_rotate_1 = tf.broadcast_to(tf.reduce_any(key_seq == 8, axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # soft drop is key 9
+            # batch, key_dim
+            has_soft_dropped = tf.broadcast_to(tf.reduce_any(key_seq == 9, axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # hard drop is key 10
+            # batch, key_dim
+            has_hard_dropped = tf.broadcast_to(tf.reduce_any(key_seq == 10, axis=-1)[..., None], (tf.shape(key_out)[0], self._key_dim))
+            
+            # batch, key_dim
+            key_inds = tf.broadcast_to(tf.range(self._key_dim)[None, ...], (tf.shape(key_out)[0], self._key_dim))
+            
+            # TODO
+            # Improve valid masking
+            # Mostly post-soft drop limits      
+            
+            # batch, key_dim
+            mask = (~(key_inds == 0) &  # start
+                    (~(key_inds == 1) | (can_hold & ~is_last)) & # hold
+                    (~(key_inds == 2) | (~has_soft_dropped & (num_tap_l < 2) & (num_tap_r == 0) & ((num_tap_l == 0) | (num_DAS_R == 0)) & (num_DAS_L == 0) & ~has_hard_dropped & ~is_last)) & # tap l
+                    (~(key_inds == 3) | (~has_soft_dropped & (num_tap_r < 2) & (num_tap_l == 0) & ((num_tap_r == 0) | (num_DAS_L == 0)) & (num_DAS_R == 0) & ~has_hard_dropped & ~is_last)) & # tap r
+                    (~(key_inds == 4) | (((has_soft_dropped & (num_DAS_L < 2) & (num_DAS_R < 2)) | ((num_tap_l == 0) & (num_tap_r == 0) & (num_DAS_L == 0) & (num_DAS_R == 0))) & ~has_hard_dropped & ~is_last)) & # DAS L
+                    (~(key_inds == 5) | (((has_soft_dropped & (num_DAS_L < 2) & (num_DAS_R < 2)) | ((num_tap_l == 0) & (num_tap_r == 0) & (num_DAS_L == 0) & (num_DAS_R == 0))) & ~has_hard_dropped & ~is_last)) & # DAS R
+                    (~(key_inds == 6) | ((has_soft_dropped | (~has_rotate_a & ~has_rotate_c & ~has_rotate_1)) & ~has_hard_dropped & ~is_last)) & # anticlockwise
+                    (~(key_inds == 7) | ((has_soft_dropped | (~has_rotate_a & ~has_rotate_c & ~has_rotate_1)) & ~has_hard_dropped & ~is_last)) & # clockwise
+                    (~(key_inds == 8) | ((has_soft_dropped | (~has_rotate_a & ~has_rotate_c & ~has_rotate_1)) & ~has_hard_dropped & ~is_last)) & # 180
+                    (~(key_inds == 9) | (~has_soft_dropped & ~has_hard_dropped & ~is_last)) & # soft drop
+                    (~(key_inds == 10) | ~has_hard_dropped) & # hard drop
+                    (~(key_inds == 11) | has_hard_dropped )) # pad        
+            
+            # batch, key_dim
+            masked_logits = tf.where(mask,
+                                     key_out[:, -1],
+                                     -tf.constant(float('inf'), dtype=tf.float32))
+            
+            if greedy:
+                # batch, 1
+                chosen_key = tf.argmax(masked_logits, axis=-1, output_type=tf.int32)[..., None]
             else:
-                distribution = tfp.distributions.Categorical(logits=logits)
-                chosen_action = tf.stop_gradient(distribution.sample())
-            
-            chosen_actions.append(chosen_action)
-            
-            all_logits.append(logits)
-            
-            if i < len(self.policy_embeddings):
-                all_embeddings.append(self.policy_embeddings[i](chosen_action))
+                # batch, 1
+                chosen_key = tf.random.categorical(masked_logits, num_samples=1, dtype=tf.int32)
                 
-                current_state = tf.concat([latent_state_rep] + all_embeddings, axis=-1)
+            key_seq = tf.concat([key_seq, chosen_key], axis=-1)
+            
+            # batch, key_dim
+            key_log_probs = tf.nn.log_softmax(masked_logits, axis=-1)
+            
+            seq_log_probs = tf.concat([seq_log_probs,
+                                       key_log_probs[:, None, :]], axis=1)
         
-        chosen_actions = tf.stack(chosen_actions, axis=-1)
-        
-        return chosen_actions, all_logits
+        if return_scores:
+            return key_seq, seq_log_probs, values, piece_scores
+        else:
+            return key_seq, seq_log_probs, values
     
     @tf.function
-    def call(self, board, piece, greedy=False, gt_actions=None, training=False, return_scores=False):
+    def call(self, inputs, greedy=False, training=False, return_scores=False):
         
-        latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
-
-        all_actions, all_logits = self.hierarchical_policy(latent_state_rep=latent_state_rep,
-                                                           greedy=greedy,
-                                                           gt_actions=gt_actions,
-                                                           training=training)
-        values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
+        board, piece, inp_seq = inputs
+        
+        piece_dec, piece_scores = self.process_obs((board, piece), training=training)
+        
+        values = self.value_top(piece_dec, training=training)
+        values = tf.squeeze(values, axis=-1)
+        
+        key_out, key_scores = self.process_keys((piece_dec, inp_seq), training=training)
 
         if return_scores:
-            return all_actions, all_logits, values, piece_scores
+            return key_out, values, piece_scores
         else:
-            return all_actions, all_logits, values
+            return key_out, values
