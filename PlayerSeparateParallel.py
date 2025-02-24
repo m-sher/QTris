@@ -15,16 +15,17 @@ class Player():
         self._max_holes = max_holes
         self._max_height = max_height
         self._max_diff = max_diff
-        self._clear_reward = 1.0
-        self._hole_reward = 0.05
-        self._bumpy_reward = 0.05
-        self._height_reward = 0.05
-        self._diff_reward = 0.05
-        self._step_reward = 0.5
+        self._clear_reward = 0.5
+        self._hole_reward = 0.01
+        self._bumpy_reward = 0.01
+        self._height_reward = 0.01
+        self._diff_reward = 0.01
+        self._step_reward = 0.1
         
         pygame.init()
         self.screen = pygame.display.set_mode((250*players_to_render, 700))
         self.clock = pygame.time.Clock()
+        self._render_interval = 1000 / 30
 
     def _get_heights(self, board):
         row_positions = np.arange(board.shape[0], 0, -1, dtype=np.int32)[..., None]
@@ -100,12 +101,19 @@ class Player():
             last_holes > self._max_holes or
             np.max(last_heights) > self._max_height or
             last_diff > self._max_diff):
-            episode_dones.append(1.0)
+            
             board, piece, _, _ = game.reset()
+            last_heights = self._get_heights(board)
+            last_holes = self._get_holes(board, last_heights)
+            last_bumpiness = self._get_bumpiness(last_heights)
+            last_diff = self._get_diff(last_heights)
+            done = 1.0
             env_rewards = -1.0
         else:
-            episode_dones.append(0.0)
+            done = 0.0
             env_rewards = hole_reward + bumpy_reward + height_reward + diff_reward + attack + self._step_reward
+        
+        episode_dones.append(done)
         
         episode_rewards.append(np.array(env_rewards, np.float32))
 
@@ -132,20 +140,16 @@ class Player():
         board_obs = tf.cast(tf.stack(all_board, axis=0), tf.float32)[..., None]
         piece_obs = tf.cast(tf.stack(all_piece, axis=0), tf.int32)
 
+        last_ticks = pygame.time.get_ticks()
+
         for t in range(max_steps):
 
-            all_actions, all_logits, all_values = model(board_obs, piece_obs, greedy=greedy, training=False)
+            all_actions, all_logits, all_values = model.predict((board_obs, piece_obs), greedy=greedy, temperature=temperature, training=False)
 
-            all_total_probs = tf.zeros((self._num_players,), tf.float32)
-            for i, head_logits in enumerate(all_logits):
-                # num_players,
-                head_dist = tfp.distributions.Categorical(logits=head_logits / temperature)
-                
-                chosen_prob = head_dist.log_prob(all_actions[:, i])
-                
-                all_total_probs += chosen_prob
+            distributions = tfp.distributions.Categorical(logits=all_logits / temperature)
+            log_probs = tf.reduce_sum(distributions.log_prob(all_actions), axis=-1)
 
-            all_step_data = [all_board, all_piece, all_actions.numpy(), all_total_probs.numpy(),
+            all_step_data = [all_board, all_piece, all_actions.numpy(), log_probs.numpy(),
                              all_values.numpy(), all_last_heights, all_last_holes, all_last_bumpiness,
                              all_last_diff, all_episode_boards, all_episode_pieces, all_episode_actions,
                              all_episode_probs, all_episode_values, all_episode_rewards, all_episode_dones]
@@ -157,18 +161,23 @@ class Player():
             board_obs = tf.cast(tf.stack(all_board, axis=0), tf.float32)[..., None]
             piece_obs = tf.cast(tf.stack(all_piece, axis=0), tf.int32)
 
-            self.clock.tick(30)
+            self.clock.tick()
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     pygame.quit()
-            self.screen.fill((0, 0, 0))
-            
-            for i, board in zip(range(self._players_to_render), all_board):
-                board_surface = pygame.Surface((10, 28))
-                pygame.surfarray.blit_array(board_surface, board.T * 255)
-                board_surface = pygame.transform.scale(board_surface, (250, 700))
-                update_rect = self.screen.blit(board_surface, (250 * i, 0))
-                pygame.display.update(update_rect)
+                    
+            cur_ticks = pygame.time.get_ticks()
+            if cur_ticks - last_ticks >= self._render_interval:
+                self.screen.fill((0, 0, 0))
+                
+                for i, board in zip(range(self._players_to_render), all_board):
+                    board_surface = pygame.Surface((10, 28))
+                    pygame.surfarray.blit_array(board_surface, board.T * 255)
+                    board_surface = pygame.transform.scale(board_surface, (250, 700))
+                    update_rect = self.screen.blit(board_surface, (250 * i, 0))
+                    pygame.display.update(update_rect)
+                    
+                last_ticks = cur_ticks
         
         for player in range(self._num_players):
             all_episode_boards[player] = tf.stack(all_episode_boards[player])
