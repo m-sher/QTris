@@ -13,6 +13,7 @@ class Trainer():
         self._entropy_decay = entropy_decay
         self._value_coef = value_coef
         self.model = model
+        self._head_dims = self.model._out_dims[:-1]
         self._num_players = num_players
         self._gamma = gamma
         self._lam = lam
@@ -43,7 +44,9 @@ class Trainer():
         
         self._max_episode_steps = max_episode_steps
         self.wandb_run = wandb.init(
-            project='Tetris'
+            project='Tetris',
+            id='2j87dfqt',
+            resume='must'
         )
 
     @tf.function(reduce_retracing=True)
@@ -95,9 +98,9 @@ class Trainer():
 
     @tf.function
     def _critic_loss_fn(self, returns, new_values, old_values):
-        # returns -> batch, 1
-        # new_values -> batch, 1
-        # old_values -> batch, 1
+        # returns -> batch,
+        # new_values -> batch,
+        # old_values -> batch,
         
         returns = tf.ensure_shape(returns, (None,))
         new_values = tf.ensure_shape(new_values, (None,))
@@ -118,23 +121,14 @@ class Trainer():
     def _train_step(self, batch):
         
         (board_batch, piece_batch, action_batch,
-         prob_batch, value_batch, advantage_batch, return_batch) = batch
+         old_probs, value_batch, advantage_batch, return_batch) = batch
         
         with tf.GradientTape() as tape:
-            _, all_logits, all_values, scores = self.model(board_batch, piece_batch, training=True, return_scores=True)
+            all_logits, all_values, scores = self.model((board_batch, piece_batch, action_batch), training=True, return_scores=True)
             
-            old_probs = prob_batch
-            new_probs = tf.zeros_like(prob_batch, tf.float32) # batch,
-            entropy = tf.zeros_like(prob_batch, tf.float32) # batch,
-            for i, head_logits in enumerate(all_logits):
-                # num_players,
-                head_dist = tfp.distributions.Categorical(logits=head_logits / self._temp)
-                
-                new_probs += head_dist.log_prob(action_batch[:, i])
-                
-                entropy += head_dist.entropy()
-            
-            entropy = tf.reduce_mean(entropy)
+            distributions = tfp.distributions.Categorical(logits=all_logits / self._temp)
+            new_probs = tf.reduce_sum(distributions.log_prob(action_batch), axis=-1)
+            entropy = tf.reduce_mean(tf.reduce_sum(distributions.entropy(), axis=-1))
             
             approx_kl = tf.reduce_mean(old_probs - new_probs)
             
@@ -238,11 +232,12 @@ class Trainer():
                        'board': wandb.Image(board_examples[0]),
                        'current_scores': wandb.Image(norm_c_scores)})
 
+            self._entropy_coef = max(self._entropy_coef * self._entropy_decay, 0.01)
+
             if (gen + 1) % 100 == 0:
-                self._entropy_coef = max(self._entropy_coef * self._entropy_decay, 0.01)
                 self.checkpoint_manager.save()
 
-    # FIX THIS 
+
     """
     def save_demo(self, filename, max_steps):
         # Open piece display array
