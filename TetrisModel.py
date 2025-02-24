@@ -1,5 +1,4 @@
 import tensorflow as tf
-import tensorflow_probability as tfp
 from tensorflow import keras
 from keras import layers
 
@@ -127,7 +126,7 @@ class DecoderLayer(layers.Layer):
         return out_seq, attn_scores
 
 class TetrisModel(keras.Model):
-    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, trunk_dim, out_dims):
+    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, out_dims):
         super().__init__()
 
         self._depth = depth
@@ -168,7 +167,7 @@ class TetrisModel(keras.Model):
         self.policy_embeddings = []
         for i, dim in enumerate(self._out_dims[:-1]):
             head = keras.Sequential([
-                layers.Dense(trunk_dim, activation='relu'),
+                layers.Dense(depth, activation='relu'),
                 layers.Dense(dim)
             ], name=f'policy_head_{i}')
             self.policy_heads.append(head)
@@ -178,13 +177,10 @@ class TetrisModel(keras.Model):
             self.policy_embeddings.append(embed_layer)
         
         self.value_top = keras.Sequential([
-            layers.Dropout(dropout_rate),
-            layers.Dense(trunk_dim, activation='relu'),
-            layers.Dropout(dropout_rate),
+            layers.Dense(depth, activation='relu'),
             layers.Dense(out_dims[-1])
         ], name='value_top')
     
-    @tf.function
     def process_obs(self, inputs, training=False):
         
         board, piece = inputs
@@ -207,9 +203,8 @@ class TetrisModel(keras.Model):
         
         return latent_state_rep, piece_scores
     
-    @tf.function
-    def hierarchical_policy(self, latent_state_rep, greedy=False, gt_actions=None, training=False):
-        chosen_actions = []
+    def sample(self, latent_state_rep, greedy=False, temperature=1.0, training=False):
+        all_actions = []
         all_logits = []
         all_embeddings = []
         current_state = latent_state_rep
@@ -218,15 +213,12 @@ class TetrisModel(keras.Model):
             # Compute logits for the current decision
             logits = self.policy_heads[i](current_state, training=training)
             
-            if gt_actions is not None:
-                chosen_action = tf.stop_gradient(gt_actions[:, i])
-            elif greedy:
-                chosen_action = tf.stop_gradient(tf.argmax(logits, axis=-1, output_type=tf.int32))
+            if greedy:
+                chosen_action = tf.argmax(logits, axis=-1, output_type=tf.int32)
             else:
-                distribution = tfp.distributions.Categorical(logits=logits)
-                chosen_action = tf.stop_gradient(distribution.sample())
+                chosen_action = tf.squeeze(tf.random.categorical(logits / temperature, 1), axis=-1)
             
-            chosen_actions.append(chosen_action)
+            all_actions.append(chosen_action)
             
             all_logits.append(logits)
             
@@ -235,22 +227,62 @@ class TetrisModel(keras.Model):
                 
                 current_state = tf.concat([latent_state_rep] + all_embeddings, axis=-1)
         
-        chosen_actions = tf.stack(chosen_actions, axis=-1)
+        all_actions = tf.stack(all_actions, axis=-1)
+        ragged_logits = tf.ragged.stack(all_logits, axis=0)
+        all_logits = tf.transpose(ragged_logits.to_tensor(default_value=float('-inf')), perm=[1, 0, 2])
         
-        return chosen_actions, all_logits
+        return all_actions, all_logits
+    
+    def get_probs(self, latent_state_rep, gt_actions, training=False):
+        
+        embeddings = [
+            self.policy_embeddings[i](gt_actions[:, i], training=training)
+            for i in range(len(self.policy_embeddings))
+        ]
+        
+        states = [latent_state_rep] + [
+            tf.concat([latent_state_rep] + embeddings[:i], axis=-1)
+            for i in range(1, len(self.policy_heads))
+        ]
+        
+        all_logits = [
+            head(state, training=training)
+            for head, state in zip(self.policy_heads, states)
+        ]
+        
+        ragged_logits = tf.ragged.stack(all_logits, axis=0)
+        all_logits = tf.transpose(ragged_logits.to_tensor(default_value=float('-inf')), perm=[1, 0, 2])
+        
+        return all_logits
     
     @tf.function
-    def call(self, board, piece, greedy=False, gt_actions=None, training=False, return_scores=False):
+    def predict(self, inputs, greedy=False, temperature=1.0, training=False, return_scores=False):
+        
+        board, piece = inputs
+        
+        latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
+    
+        all_actions, all_logits = self.sample(latent_state_rep, greedy=greedy, temperature=temperature, training=training)
+    
+        all_values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
+    
+        if return_scores:
+            return all_actions, all_logits, all_values, piece_scores
+        else:
+            return all_actions, all_logits, all_values
+    
+    @tf.function
+    def call(self, inputs, training=False, return_scores=False):
+        
+        board, piece, gt_actions = inputs
         
         latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
 
-        all_actions, all_logits = self.hierarchical_policy(latent_state_rep=latent_state_rep,
-                                                           greedy=greedy,
-                                                           gt_actions=gt_actions,
-                                                           training=training)
-        values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
+        all_logits = self.get_probs(latent_state_rep, gt_actions)
+        
+        all_values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
 
         if return_scores:
-            return all_actions, all_logits, values, piece_scores
+            return all_logits, all_values, piece_scores
         else:
-            return all_actions, all_logits, values
+            return all_logits, all_values
