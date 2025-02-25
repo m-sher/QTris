@@ -15,7 +15,7 @@ num_layers = 4
 dropout_rate = 0.1
 out_dims = [2, 37, 8, 1]
 
-entropy_coef = 0.026181
+entropy_coef = 0.018892
 entropy_decay = 0.9999
 value_coef = 0.5
 gamma = 0.95
