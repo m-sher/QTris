@@ -133,7 +133,7 @@ class TetrisModel(keras.Model):
         self._out_dims = out_dims
         
         self.make_patches = keras.Sequential([
-            keras.Input(shape=(28, 10, 1)),
+            keras.Input(shape=(24, 10, 1)),
             layers.Rescaling(scale=2.0, offset=-1.0),
             layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid'),
             layers.Reshape((-1, depth))
@@ -216,7 +216,9 @@ class TetrisModel(keras.Model):
             if greedy:
                 chosen_action = tf.argmax(logits, axis=-1, output_type=tf.int32)
             else:
-                chosen_action = tf.squeeze(tf.random.categorical(logits / temperature, 1), axis=-1)
+                chosen_action = tf.squeeze(tf.random.categorical(logits / temperature,
+                                                                 num_samples=1,
+                                                                 dtype=tf.int32), axis=-1)
             
             all_actions.append(chosen_action)
             
@@ -233,7 +235,7 @@ class TetrisModel(keras.Model):
         
         return all_actions, all_logits
     
-    def get_probs(self, latent_state_rep, gt_actions, training=False):
+    def get_logits(self, latent_state_rep, gt_actions, training=False):
         
         embeddings = [
             self.policy_embeddings[i](gt_actions[:, i], training=training)
@@ -278,7 +280,7 @@ class TetrisModel(keras.Model):
         
         latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
 
-        all_logits = self.get_probs(latent_state_rep, gt_actions)
+        all_logits = self.get_logits(latent_state_rep, gt_actions)
         
         all_values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
 
