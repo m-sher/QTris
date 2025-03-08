@@ -14,3 +14,4 @@ conv3.npy
 /expert_demo_checkpoint
 /saved_expert_dset
 /combined_checkpoints
+/NewTetrisEnv/__pycache__
