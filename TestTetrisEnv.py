@@ -19,12 +19,12 @@ out_dims = [2, 35, 8, 1]
 
 # Environment params
 generations = 10000
-num_envs = 64
+num_envs = 32
 num_collection_steps = 500
 queue_size = 5
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 epochs_per_gen = 10
 
 gamma = 0.99
