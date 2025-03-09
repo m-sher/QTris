@@ -66,8 +66,12 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
                                 element_shape=(num_envs,))
     all_attacks = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                  element_shape=(num_envs,))
-    all_supp_rewards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+    all_step_rewards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                       element_shape=(num_envs,))
+    all_hole_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+                                        element_shape=(num_envs,))
+    all_death_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+                                         element_shape=(num_envs,))
     all_dones = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                element_shape=(num_envs,))
 
@@ -78,6 +82,7 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         # Run model prediction
         board = observation['board']
         pieces = observation['pieces']
+
         actions, logits, values = model.predict((board, pieces))
         dist = tfp.distributions.Categorical(logits=logits)
         log_probs = tf.reduce_sum(dist.log_prob(actions), axis=-1)
@@ -89,7 +94,12 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         }
 
         time_step = env.step(action_dict)
-        attack, supp_reward = time_step.reward
+        reward = time_step.reward
+        attack = reward['attack']
+        step_reward = reward['step_reward']
+        hole_penalty = reward['hole_penalty']
+        death_penalty = reward['death_penalty']
+
         dones = time_step.is_last()
 
         dones = tf.cast(dones, tf.float32)
@@ -100,7 +110,9 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         all_log_probs = all_log_probs.write(step, log_probs)
         all_values = all_values.write(step, values)
         all_attacks = all_attacks.write(step, attack)
-        all_supp_rewards = all_supp_rewards.write(step, supp_reward)
+        all_step_rewards = all_step_rewards.write(step, step_reward)
+        all_hole_penalty = all_hole_penalty.write(step, hole_penalty)
+        all_death_penalty = all_death_penalty.write(step, death_penalty)
         all_dones = all_dones.write(step, dones)
 
         observation = time_step.observation
@@ -111,11 +123,14 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
     all_log_probs = all_log_probs.stack()
     all_values = all_values.stack()
     all_attacks = all_attacks.stack()
-    all_supp_rewards = all_supp_rewards.stack()
+    all_step_rewards = all_step_rewards.stack()
+    all_hole_penalty = all_hole_penalty.stack()
+    all_death_penalty = all_death_penalty.stack()
     all_dones = all_dones.stack()
 
     return (all_boards, all_pieces, all_actions, all_log_probs,
-            all_values, all_attacks, all_supp_rewards, all_dones)
+            all_values, all_attacks, all_step_rewards,
+            all_hole_penalty, all_death_penalty, all_dones)
 
 @tf.function
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
@@ -163,7 +178,7 @@ def train_step(model, optimizer, board_batch, pieces_batch, actions_batch,
         dist = tfp.distributions.Categorical(logits=logits)
         new_log_probs = tf.reduce_sum(dist.log_prob(actions_batch), axis=-1)
         
-        # Stabilizer penalties
+        # Stabilizer penalty
         entropy = tf.reduce_mean(tf.reduce_sum(dist.entropy(), axis=-1))
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
         
@@ -202,7 +217,7 @@ def train_step(model, optimizer, board_batch, pieces_batch, actions_batch,
 
 
 def train_on_dataset(model, optimizer, dataset, num_epochs, beta):
-    for epoch in range(num_epochs):
+    for _ in range(num_epochs):
         for batch in dataset:
             step_out = train_step(model, optimizer,
                                   batch['boards'],
@@ -243,7 +258,7 @@ def main(argv):
     print("Restored checkpoint", flush=True)
 
     # Set up environments
-    constructors = [lambda: TetrisPyEnv(queue_size=queue_size, seed=123) for _ in range(num_envs)]
+    constructors = [lambda idx=i: TetrisPyEnv(queue_size=queue_size, seed=123, idx=idx) for i in range(num_envs)]
     ppy_env = ParallelPyEnvironment(constructors, start_serially=True, blocking=False)
     tf_env = TFPyEnvironment(ppy_env)
     last_time = time.time()
@@ -255,13 +270,15 @@ def main(argv):
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
         
-        (all_boards, all_pieces, all_actions,
-         all_log_probs, all_values, all_attacks,
-         all_supp_rewards, all_dones) = collect_trajectory(model,
-                                                           tf_env,
-                                                           num_collection_steps,
-                                                           num_envs)
-        all_rewards = all_attacks + all_supp_rewards
+        (all_boards, all_pieces,
+         all_actions, all_log_probs,
+         all_values, all_attacks,
+         all_step_rewards, all_hole_penalty,
+         all_death_penalty, all_dones) = collect_trajectory(model,
+                                                              tf_env,
+                                                              num_collection_steps,
+                                                              num_envs)
+        all_rewards = all_attacks + all_step_rewards + all_hole_penalty + all_death_penalty
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
@@ -301,6 +318,9 @@ def main(argv):
         train_out = train_on_dataset(model, optimizer, dataset,
                                      epochs_per_gen, beta)
         
+        # Save checkpoint
+        checkpoint_manager.save()
+
         print(f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...", flush=True)
         last_time = time.time()
         
@@ -319,7 +339,9 @@ def main(argv):
         # Compute more metrics
         avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
-        avg_supp_reward = tf.reduce_mean(tf.reduce_sum(all_supp_rewards, axis=0))
+        avg_step_reward = tf.reduce_mean(tf.reduce_sum(all_step_rewards, axis=0))
+        avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
+        avg_death_penalty = tf.reduce_mean(tf.reduce_sum(all_death_penalty, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(num_collection_steps / tf.reduce_sum(all_dones, axis=0))
@@ -335,7 +357,9 @@ def main(argv):
                    'clipped_frac': clipped_frac,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
-                   'avg_supp_reward': avg_supp_reward,
+                   'avg_step_reward': avg_step_reward,
+                   'avg_hole_penalty': avg_hole_penalty,
+                   'avg_death_penalty': avg_death_penalty,
                    'avg_attacks': avg_attacks,
                    'avg_deaths': avg_deaths,
                    'avg_pieces': avg_pieces,
