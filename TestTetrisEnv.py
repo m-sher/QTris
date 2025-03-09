@@ -1,4 +1,4 @@
-from TetrisEnv import TetrisPyEnv
+from TFTetrisEnv import TFTetrisEnv
 from TetrisModel import TetrisModel
 import tensorflow as tf
 from tensorflow import keras
@@ -240,7 +240,7 @@ def main(argv):
     print("Restored checkpoint", flush=True)
 
     # Set up environments
-    constructors = [lambda: TetrisPyEnv(queue_size=queue_size, seed=123) for _ in range(num_envs)]
+    constructors = [lambda: TFTetrisEnv(queue_size=queue_size, seed=123) for _ in range(num_envs)]
     ppy_env = ParallelPyEnvironment(constructors, start_serially=True, blocking=False)
     tf_env = TFPyEnvironment(ppy_env)
     last_time = time.time()
