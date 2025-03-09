@@ -1,6 +1,6 @@
 | Demo | Description |
 | ----------- | ----------- |
-| <img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="150"> | <p>The gif to the left is a 1000 piece demo of the model playing. The set of pieces on the right represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice a few T-spins and quads. It's also interesting to note that the model tends to save T pieces and I pieces for longer than it saves others.</p><p>The current version of the model is only able to "see" the board, the active piece, the hold piece, and the queue of the next 5 pieces. It has no way to consider Combo, Back-to-Back (B2B), or Garbage Queue (yet :D).</p><p>The model processes the available information as follows: </p><ul><li>CNN feature extraction on the board</li><li>Encode each piece as a vector</li><li>Perform self-attention on the sequence of piece vectors</li><li>Perform cross-attention between the sequence of piece vectors and the extracted board features</li><li>Repeat self-attention/cross-attention </li><li>Encode each keypress as a vector (only the start token at the first step)</li><li>Perform self-attention on the sequence of keypress vectors</li><li>Perform cross-attention between the sequence of keypress vectors and the board-context piece vectors</li><li>Repeat self-attention/cross-attention </li><li>Predict next keypress</li><li>Append new keypress to sequence and repeat until Hard Drop key is chosen</li></ul> |
+| <img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="150"> | <p>The gif to the left is a 1000 piece demo of the model playing. The set of pieces on the right represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice a few T-spins and quads. It's also interesting to note that the model tends to save T pieces and I pieces for longer than it saves others.</p><p>The current version of the model is only able to "see" the board, the active piece, the hold piece, and the queue of the next 5 pieces. It has no way to consider Combo, Back-to-Back (B2B), or Garbage Queue (yet :D).</p><p>The model processes the available information as follows: </p><ol><li>Linear convolution to make board patches</li><li>Perform self-attention on patches</li><li>Encode each piece as a vector</li><li>Run decoder steps on board patches and piece vectors:</li><ol><li>Perform self-attention on the sequence of piece vectors</li><li>Perform cross-attention between the sequence of piece vectors and board patch vectors</li><li>Repeat decoder steps</li></ol><li>Flatten to form latent state vector</li><li>Generate hold action distribution based on latent state vector</li><li>Sample from distribution to get hold action</li><li>Embed hold action as vector and combine with latent state vector</li><li>Generate position action distribution based on new state vector</li><li>Sample from distribution to get position action</li><li>Embed position action as vector and combine with state vector</li><li>Generate spin action distribution based on new state vector</li><li>Sample from distribution to get spin action</li></ol> |
 
 # Todo Section: #
 
@@ -24,11 +24,11 @@ $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, g
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
 
-$$\color{orange}\text{●}$$ Check piece/death calculations for logging
-
 $$\color{yellow}\text{●}$$ Create demo/explanation videos w/ manim
 
 ### Completed Items: ###
+
+$$\color{orange}\text{●}$$ ~~Check piece/death calculations for logging~~
 
 $$\color{orange}\text{●}$$ ~~Check if tf.data.Dataset.save maintains pipeline operations when loading~~
 
