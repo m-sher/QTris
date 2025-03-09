@@ -20,6 +20,8 @@ $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY
 
 $$\color{green}\text{●}$$ Write this ReadMe
 
+$$\color{red}\text{●}$$ Redo pretrainer for new model architecture 
+
 $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
 $$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue

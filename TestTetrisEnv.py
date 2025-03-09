@@ -173,7 +173,6 @@ def train_step(model, optimizer, board_batch, pieces_batch, actions_batch,
         
         # Compute metrics
         clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
-        avg_probs = tf.reduce_mean(old_log_probs)
         
         # Value loss
         value_error = values - returns_batch
@@ -195,7 +194,7 @@ def train_step(model, optimizer, board_batch, pieces_batch, actions_batch,
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
     
     return (policy_loss, value_loss, entropy, approx_kl,
-            clipped_frac, avg_probs, board_batch, scores)
+            clipped_frac, board_batch, scores)
 
 
 def train_on_dataset(model, optimizer, dataset, num_epochs, beta):
@@ -301,7 +300,7 @@ def main(argv):
         
         # Unpack metrics
         (policy_loss, value_loss, entropy, approx_kl,
-         clipped_frac, avg_probs, boards, scores) = train_out
+         clipped_frac, boards, scores) = train_out
         
         # Adjust beta
         if approx_kl > target_kl * (1 + kl_tolerance):
@@ -312,7 +311,11 @@ def main(argv):
             beta = 1.0
         
         # Compute more metrics
+        avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
+        avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
+        avg_pieces = tf.reduce_mean(num_collection_steps / tf.reduce_sum(all_dones, axis=0))
+        
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
         
@@ -324,6 +327,8 @@ def main(argv):
                    'clipped_frac': clipped_frac,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
+                   'avg_deaths': avg_deaths,
+                   'avg_pieces': avg_pieces,
                    'board': wandb.Image(boards[0]),
                    'scores': wandb.Image(norm_c_scores)})
         
