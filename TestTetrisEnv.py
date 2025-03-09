@@ -1,4 +1,4 @@
-from NewTetrisEnv.TetrisEnv import TetrisPyEnv
+from TetrisEnv import TetrisPyEnv
 from TetrisModel import TetrisModel
 import tensorflow as tf
 from tensorflow import keras
@@ -19,12 +19,12 @@ out_dims = [2, 35, 8, 1]
 
 # Environment params
 generations = 10000
-num_envs = 32
+num_envs = 64
 num_collection_steps = 500
 queue_size = 5
 
 # Training params
-mini_batch_size = 512
+mini_batch_size = 1024
 epochs_per_gen = 10
 
 gamma = 0.99
@@ -33,7 +33,7 @@ ppo_clip = 0.2
 value_clip = 0.2
 
 value_coef = 0.5
-entropy_coef = 0.01
+entropy_coef = 0.05
 
 target_kl = 0.01
 kl_tolerance = 0.3
@@ -231,12 +231,21 @@ def main(argv):
                         out_dims=out_dims)
     optimizer = keras.optimizers.Adam(3e-4)
     model.compile(optimizer=optimizer)
-    
+    print("Initialized model and optimizer", flush=True)
+
+    # Initialize checkpoint manager
+    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './new_checkpoints', max_to_keep=3)
+    checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    print("Restored checkpoint", flush=True)
+
     # Set up environments
     constructors = [lambda: TetrisPyEnv(queue_size=queue_size, seed=123) for _ in range(num_envs)]
     ppy_env = ParallelPyEnvironment(constructors, start_serially=True, blocking=False)
     tf_env = TFPyEnvironment(ppy_env)
     last_time = time.time()
+    print("Initialized environments", flush=True)
+
     # Collect trajectories and train
     for gen in range(generations):
         # Collect trajectory
