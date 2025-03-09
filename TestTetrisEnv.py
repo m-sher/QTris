@@ -64,8 +64,10 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
                                    element_shape=(num_envs,))
     all_values = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                 element_shape=(num_envs,))
-    all_rewards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+    all_attacks = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                  element_shape=(num_envs,))
+    all_supp_rewards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+                                      element_shape=(num_envs,))
     all_dones = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                element_shape=(num_envs,))
 
@@ -87,7 +89,7 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         }
 
         time_step = env.step(action_dict)
-        rewards = time_step.reward
+        attack, supp_reward = time_step.reward
         dones = time_step.is_last()
 
         dones = tf.cast(dones, tf.float32)
@@ -97,7 +99,8 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         all_actions = all_actions.write(step, actions)
         all_log_probs = all_log_probs.write(step, log_probs)
         all_values = all_values.write(step, values)
-        all_rewards = all_rewards.write(step, rewards)
+        all_attacks = all_attacks.write(step, attack)
+        all_supp_rewards = all_supp_rewards.write(step, supp_reward)
         all_dones = all_dones.write(step, dones)
 
         observation = time_step.observation
@@ -107,11 +110,12 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
     all_actions = all_actions.stack()
     all_log_probs = all_log_probs.stack()
     all_values = all_values.stack()
-    all_rewards = all_rewards.stack()
+    all_attacks = all_attacks.stack()
+    all_supp_rewards = all_supp_rewards.stack()
     all_dones = all_dones.stack()
 
     return (all_boards, all_pieces, all_actions, all_log_probs,
-            all_values, all_rewards, all_dones)
+            all_values, all_attacks, all_supp_rewards, all_dones)
 
 @tf.function
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
@@ -252,11 +256,13 @@ def main(argv):
         last_time = time.time()
         
         (all_boards, all_pieces, all_actions,
-         all_log_probs, all_values,
-         all_rewards, all_dones) = collect_trajectory(model,
-                                                      tf_env,
-                                                      num_collection_steps,
-                                                      num_envs)
+         all_log_probs, all_values, all_attacks,
+         all_supp_rewards, all_dones) = collect_trajectory(model,
+                                                           tf_env,
+                                                           num_collection_steps,
+                                                           num_envs)
+        all_rewards = all_attacks + all_supp_rewards
+
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
         # Compute advantages and returns
@@ -313,6 +319,8 @@ def main(argv):
         # Compute more metrics
         avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
+        avg_supp_reward = tf.reduce_mean(tf.reduce_sum(all_supp_rewards, axis=0))
+        avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(num_collection_steps / tf.reduce_sum(all_dones, axis=0))
         
@@ -327,6 +335,8 @@ def main(argv):
                    'clipped_frac': clipped_frac,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
+                   'avg_supp_reward': avg_supp_reward,
+                   'avg_attacks': avg_attacks,
                    'avg_deaths': avg_deaths,
                    'avg_pieces': avg_pieces,
                    'board': wandb.Image(boards[0]),
