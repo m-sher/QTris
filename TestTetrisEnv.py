@@ -70,8 +70,6 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
                                       element_shape=(num_envs,))
     all_hole_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                         element_shape=(num_envs,))
-    all_death_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
-                                         element_shape=(num_envs,))
     all_dones = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                element_shape=(num_envs,))
 
@@ -98,7 +96,6 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         attack = reward['attack']
         step_reward = reward['step_reward']
         hole_penalty = reward['hole_penalty']
-        death_penalty = reward['death_penalty']
 
         dones = time_step.is_last()
 
@@ -112,7 +109,6 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
         all_attacks = all_attacks.write(step, attack)
         all_step_rewards = all_step_rewards.write(step, step_reward)
         all_hole_penalty = all_hole_penalty.write(step, hole_penalty)
-        all_death_penalty = all_death_penalty.write(step, death_penalty)
         all_dones = all_dones.write(step, dones)
 
         observation = time_step.observation
@@ -125,12 +121,11 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
     all_attacks = all_attacks.stack()
     all_step_rewards = all_step_rewards.stack()
     all_hole_penalty = all_hole_penalty.stack()
-    all_death_penalty = all_death_penalty.stack()
     all_dones = all_dones.stack()
 
     return (all_boards, all_pieces, all_actions, all_log_probs,
             all_values, all_attacks, all_step_rewards,
-            all_hole_penalty, all_death_penalty, all_dones)
+            all_hole_penalty, all_dones)
 
 @tf.function
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
@@ -237,6 +232,8 @@ def main(argv):
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
+        id='asocj8bs',
+        resume='must',
         config=config,
     )
     
@@ -274,11 +271,11 @@ def main(argv):
          all_actions, all_log_probs,
          all_values, all_attacks,
          all_step_rewards, all_hole_penalty,
-         all_death_penalty, all_dones) = collect_trajectory(model,
-                                                              tf_env,
-                                                              num_collection_steps,
-                                                              num_envs)
-        all_rewards = all_attacks + all_step_rewards + all_hole_penalty + all_death_penalty
+         all_dones) = collect_trajectory(model,
+                                         tf_env,
+                                         num_collection_steps,
+                                         num_envs)
+        all_rewards = all_attacks + all_step_rewards + all_hole_penalty
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
@@ -341,7 +338,6 @@ def main(argv):
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
         avg_step_reward = tf.reduce_mean(tf.reduce_sum(all_step_rewards, axis=0))
         avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
-        avg_death_penalty = tf.reduce_mean(tf.reduce_sum(all_death_penalty, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(num_collection_steps / tf.reduce_sum(all_dones, axis=0))
@@ -359,7 +355,6 @@ def main(argv):
                    'avg_reward': avg_reward,
                    'avg_step_reward': avg_step_reward,
                    'avg_hole_penalty': avg_hole_penalty,
-                   'avg_death_penalty': avg_death_penalty,
                    'avg_attacks': avg_attacks,
                    'avg_deaths': avg_deaths,
                    'avg_pieces': avg_pieces,
