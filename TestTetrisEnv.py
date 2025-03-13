@@ -6,6 +6,7 @@ import tensorflow_probability as tfp
 import tf_agents
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
+import pygame
 import wandb
 import time
 
@@ -53,7 +54,7 @@ config = {
     'kl_tolerance': kl_tolerance,
 }
 
-def collect_trajectory(model, env, num_collection_steps, num_envs):
+def collect_trajectory(model, env, num_collection_steps, num_envs, render):
     all_boards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                       element_shape=(num_envs, 24, 10))
     all_pieces = tf.TensorArray(dtype=tf.int32, size=num_collection_steps,
@@ -73,14 +74,29 @@ def collect_trajectory(model, env, num_collection_steps, num_envs):
     all_dones = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                element_shape=(num_envs,))
 
+    # Initialize pygame
+    if render:
+        pygame.init()
+        screen = pygame.display.set_mode((250, 600))
+        pygame.display.set_caption("Tetris")
+
     time_step = env.reset()
     observation = time_step.observation # dict of batched boards and pieces
 
     for step in range(num_collection_steps):
-        # Run model prediction
         board = observation['board']
         pieces = observation['pieces']
 
+        # Render the state of the first environment
+        if render:
+            screen.fill((0, 0, 0))
+            board_surf = pygame.Surface((10, 24))
+            pygame.surfarray.blit_array(board_surf, board[0].numpy().T * 255)
+            board_surf = pygame.transform.scale(board_surf, (250, 600))
+            screen.blit(board_surf, (0, 0))
+            pygame.display.update()
+
+        # Run model prediction
         actions, logits, values = model.predict((board, pieces))
         dist = tfp.distributions.Categorical(logits=logits)
         log_probs = tf.reduce_sum(dist.log_prob(actions), axis=-1)
@@ -267,6 +283,7 @@ def main(argv):
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
         
+        # Render every 10 generations
         (all_boards, all_pieces,
          all_actions, all_log_probs,
          all_values, all_attacks,
@@ -274,7 +291,8 @@ def main(argv):
          all_dones) = collect_trajectory(model,
                                          tf_env,
                                          num_collection_steps,
-                                         num_envs)
+                                         num_envs,
+                                         render=gen % 10 == 0)
         all_rewards = all_attacks + all_step_rewards + all_hole_penalty
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
