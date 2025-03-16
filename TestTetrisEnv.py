@@ -23,9 +23,10 @@ generations = 10000
 num_envs = 32
 num_collection_steps = 500
 queue_size = 5
+max_holes = 2
 
 # Training params
-mini_batch_size = 512
+mini_batch_size = 1024
 epochs_per_gen = 10
 
 gamma = 0.99
@@ -69,8 +70,12 @@ def collect_trajectory(model, env, num_collection_steps, num_envs, render):
                                  element_shape=(num_envs,))
     all_step_rewards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                       element_shape=(num_envs,))
-    all_hole_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+    all_height_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                         element_shape=(num_envs,))
+    all_hole_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+                                      element_shape=(num_envs,))
+    all_death_penalty = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+                                       element_shape=(num_envs,))
     all_dones = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
                                element_shape=(num_envs,))
 
@@ -111,7 +116,9 @@ def collect_trajectory(model, env, num_collection_steps, num_envs, render):
         reward = time_step.reward
         attack = reward['attack']
         step_reward = reward['step_reward']
+        height_reward = reward['height_penalty']
         hole_penalty = reward['hole_penalty']
+        death_penalty = reward['death_penalty']
 
         dones = time_step.is_last()
 
@@ -124,7 +131,9 @@ def collect_trajectory(model, env, num_collection_steps, num_envs, render):
         all_values = all_values.write(step, values)
         all_attacks = all_attacks.write(step, attack)
         all_step_rewards = all_step_rewards.write(step, step_reward)
+        all_height_penalty = all_height_penalty.write(step, height_reward)
         all_hole_penalty = all_hole_penalty.write(step, hole_penalty)
+        all_death_penalty = all_death_penalty.write(step, death_penalty)
         all_dones = all_dones.write(step, dones)
 
         observation = time_step.observation
@@ -136,12 +145,15 @@ def collect_trajectory(model, env, num_collection_steps, num_envs, render):
     all_values = all_values.stack()
     all_attacks = all_attacks.stack()
     all_step_rewards = all_step_rewards.stack()
+    all_height_penalty = all_height_penalty.stack()
     all_hole_penalty = all_hole_penalty.stack()
+    all_death_penalty = all_death_penalty.stack()
     all_dones = all_dones.stack()
 
     return (all_boards, all_pieces, all_actions, all_log_probs,
             all_values, all_attacks, all_step_rewards,
-            all_hole_penalty, all_dones)
+            all_height_penalty, all_hole_penalty, all_death_penalty,
+            all_dones)
 
 @tf.function
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
@@ -248,7 +260,7 @@ def main(argv):
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
-        id='asocj8bs',
+        id='20urbl3e',
         resume='must',
         config=config,
     )
@@ -271,7 +283,11 @@ def main(argv):
     print("Restored checkpoint", flush=True)
 
     # Set up environments
-    constructors = [lambda idx=i: TetrisPyEnv(queue_size=queue_size, seed=123, idx=idx) for i in range(num_envs)]
+    constructors = [lambda idx=i: TetrisPyEnv(queue_size=queue_size,
+                                              max_holes=max_holes,
+                                              seed=123,
+                                              idx=idx)
+                    for i in range(num_envs)]
     ppy_env = ParallelPyEnvironment(constructors, start_serially=True, blocking=False)
     tf_env = TFPyEnvironment(ppy_env)
     last_time = time.time()
@@ -287,13 +303,14 @@ def main(argv):
         (all_boards, all_pieces,
          all_actions, all_log_probs,
          all_values, all_attacks,
-         all_step_rewards, all_hole_penalty,
+         all_step_rewards, all_height_penalty,
+         all_hole_penalty, all_death_penalty,
          all_dones) = collect_trajectory(model,
                                          tf_env,
                                          num_collection_steps,
                                          num_envs,
                                          render=gen % 10 == 0)
-        all_rewards = all_attacks + all_step_rewards + all_hole_penalty
+        all_rewards = all_attacks + all_step_rewards + all_height_penalty + all_hole_penalty + all_death_penalty
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
@@ -355,8 +372,10 @@ def main(argv):
         avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
         avg_step_reward = tf.reduce_mean(tf.reduce_sum(all_step_rewards, axis=0))
-        avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
+        avg_height_penalty = tf.reduce_mean(tf.reduce_sum(all_height_penalty, axis=0))
+        avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
+        avg_death_penalty = tf.reduce_mean(tf.reduce_sum(all_death_penalty, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(num_collection_steps / tf.reduce_sum(all_dones, axis=0))
         
@@ -371,9 +390,11 @@ def main(argv):
                    'clipped_frac': clipped_frac,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
-                   'avg_step_reward': avg_step_reward,
-                   'avg_hole_penalty': avg_hole_penalty,
                    'avg_attacks': avg_attacks,
+                   'avg_step_reward': avg_step_reward,
+                   'avg_height_penalty': avg_height_penalty,
+                   'avg_hole_penalty': avg_hole_penalty,
+                   'avg_death_penalty': avg_death_penalty,
                    'avg_deaths': avg_deaths,
                    'avg_pieces': avg_pieces,
                    'board': wandb.Image(boards[0]),
