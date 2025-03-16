@@ -20,7 +20,9 @@ $$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY
 
 $$\color{green}\text{●}$$ Write this ReadMe
 
-$$\color{red}\text{●}$$ Redo pretrainer for new model architecture 
+$$\color{green}\text{●}$$ Redo pretrainer for new model architecture 
+
+$$\color{orange}\text{●}$$ Organize new working training script into separate files
 
 $$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
 
