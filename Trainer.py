@@ -56,7 +56,7 @@ config = {
 }
 
 def collect_trajectory(model, env, num_collection_steps, num_envs, render):
-    all_boards = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
+    all_boards = tf.TensorArray(dtype=tf.int32, size=num_collection_steps,
                                       element_shape=(num_envs, 24, 10))
     all_pieces = tf.TensorArray(dtype=tf.int32, size=num_collection_steps,
                                       element_shape=(num_envs, queue_size + 2))
@@ -280,6 +280,7 @@ def main(argv):
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrain_checkpoints', max_to_keep=3)
     checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './train_checkpoints', max_to_keep=3)
     print("Restored checkpoint", flush=True)
 
     # Set up environments
@@ -309,7 +310,7 @@ def main(argv):
                                          tf_env,
                                          num_collection_steps,
                                          num_envs,
-                                         render=gen % 10 == 0)
+                                         render=gen % 5 == 0)
         all_rewards = all_attacks + all_step_rewards + all_height_penalty + all_hole_penalty + all_death_penalty
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
