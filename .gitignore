@@ -18,3 +18,4 @@ conv3.npy
 /new_checkpoints
 /old
 /pretrain_checkpoints
+/train_checkpoints
