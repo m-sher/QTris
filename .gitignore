@@ -17,3 +17,4 @@ conv3.npy
 /NewTetrisEnv/__pycache__
 /new_checkpoints
 /old
+/pretrain_checkpoints
