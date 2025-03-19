@@ -260,8 +260,8 @@ def main(argv):
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
-        id='20urbl3e',
-        resume='must',
+        # id='20urbl3e',
+        # resume='must',
         config=config,
     )
     
@@ -278,7 +278,7 @@ def main(argv):
 
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './new_checkpoints', max_to_keep=3)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrain_checkpoints', max_to_keep=3)
     checkpoint.restore(checkpoint_manager.latest_checkpoint)
     print("Restored checkpoint", flush=True)
 
