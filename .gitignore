@@ -19,3 +19,5 @@ conv3.npy
 /old
 /pretrain_checkpoints
 /train_checkpoints
+/combined_pretrain_checkpoints
+/combined_train_checkpoints
