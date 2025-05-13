@@ -126,12 +126,11 @@ class DecoderLayer(layers.Layer):
         return out_seq, attn_scores
 
 class TetrisModel(keras.Model):
-    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, trunk_dim, num_actions):
+    def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, out_dims):
         super().__init__()
 
         self._depth = depth
-        self._trunk_dim = trunk_dim
-        self._num_actions = num_actions
+        self._out_dims = out_dims
         
         self.make_patches = keras.Sequential([
             keras.Input(shape=(24, 10, 1)),
@@ -163,12 +162,26 @@ class TetrisModel(keras.Model):
                                      for i in range(num_layers)]
         
         self.flatten_rep = layers.Flatten()
-
-        self.trunk = layers.Dense(trunk_dim, activation='relu')
-
-        self.policy_head = layers.Dense(num_actions)
-        self.value_head = layers.Dense(1)
-
+        
+        self.policy_heads = []
+        self.policy_embeddings = []
+        for i, dim in enumerate(self._out_dims[:-1]):
+            head = keras.Sequential([
+                layers.Dense(depth, activation='relu'),
+                layers.Dense(dim)
+            ], name=f'policy_head_{i}')
+            self.policy_heads.append(head)
+        
+        for i, dim in enumerate(self._out_dims[:-2]):
+            embed_layer = layers.Embedding(input_dim=dim, output_dim=depth, name=f'policy_embed_{i}')
+            self.policy_embeddings.append(embed_layer)
+        
+        self.value_top = keras.Sequential([
+            layers.Dense(depth, activation='relu'),
+            layers.Dense(depth, activation='relu'),
+            layers.Dense(out_dims[-1])
+        ], name='value_top')
+    
     def process_obs(self, inputs, training=False):
         
         board, piece = inputs
@@ -191,19 +204,88 @@ class TetrisModel(keras.Model):
         
         return latent_state_rep, piece_scores
     
+    def sample(self, latent_state_rep, greedy=False, temperature=1.0, training=False):
+        all_actions = []
+        all_logits = []
+        all_embeddings = []
+        current_state = latent_state_rep
+        
+        for i in range(len(self.policy_heads)):
+            # Compute logits for the current decision
+            logits = self.policy_heads[i](current_state, training=training)
+            
+            if greedy:
+                chosen_action = tf.argmax(logits, axis=-1, output_type=tf.int32)
+            else:
+                chosen_action = tf.squeeze(tf.random.categorical(logits / temperature,
+                                                                 num_samples=1,
+                                                                 dtype=tf.int32), axis=-1)
+            
+            all_actions.append(chosen_action)
+            
+            all_logits.append(logits)
+            
+            if i < len(self.policy_embeddings):
+                all_embeddings.append(self.policy_embeddings[i](chosen_action))
+                
+                current_state = tf.concat([latent_state_rep] + all_embeddings, axis=-1)
+        
+        all_actions = tf.stack(all_actions, axis=-1)
+        ragged_logits = tf.ragged.stack(all_logits, axis=0)
+        all_logits = tf.transpose(ragged_logits.to_tensor(default_value=float('-inf')), perm=[1, 0, 2])
+        
+        return all_actions, all_logits
+    
+    def get_logits(self, latent_state_rep, gt_actions, training=False):
+        
+        embeddings = [
+            self.policy_embeddings[i](gt_actions[:, i], training=training)
+            for i in range(len(self.policy_embeddings))
+        ]
+        
+        states = [latent_state_rep] + [
+            tf.concat([latent_state_rep] + embeddings[:i], axis=-1)
+            for i in range(1, len(self.policy_heads))
+        ]
+        
+        all_logits = [
+            head(state, training=training)
+            for head, state in zip(self.policy_heads, states)
+        ]
+        
+        ragged_logits = tf.ragged.stack(all_logits, axis=0)
+        all_logits = tf.transpose(ragged_logits.to_tensor(default_value=float('-inf')), perm=[1, 0, 2])
+        
+        return all_logits
+    
     @tf.function
-    def call(self, inputs, training=False, return_scores=False):
+    def predict(self, inputs, greedy=False, temperature=1.0, training=False, return_scores=False):
         
         board, piece = inputs
         
         latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
+    
+        all_actions, all_logits = self.sample(latent_state_rep, greedy=greedy, temperature=temperature, training=training)
+    
+        all_values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
+    
+        if return_scores:
+            return all_actions, all_logits, all_values, piece_scores
+        else:
+            return all_actions, all_logits, all_values
+    
+    @tf.function
+    def call(self, inputs, training=False, return_scores=False):
+        
+        board, piece, gt_actions = inputs
+        
+        latent_state_rep, piece_scores = self.process_obs((board, piece), training=training)
 
-        trunk_out = self.trunk(latent_state_rep, training=training)
-
-        policy_out = self.policy_head(trunk_out, training=training)
-        value_out = tf.squeeze(self.value_head(trunk_out, training=training), axis=-1)
+        all_logits = self.get_logits(latent_state_rep, gt_actions)
+        
+        all_values = tf.squeeze(self.value_top(latent_state_rep, training=training), axis=-1)
 
         if return_scores:
-            return policy_out, value_out, piece_scores
+            return all_logits, all_values, piece_scores
         else:
-            return policy_out, value_out
+            return all_logits, all_values
