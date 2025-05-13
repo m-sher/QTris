@@ -21,3 +21,8 @@ conv3.npy
 /train_checkpoints
 /combined_pretrain_checkpoints
 /combined_train_checkpoints
+/combined_nonormtrain_checkpoints
+/tetris_expert_dataset
+/value_checkpoints
+/policy_checkpoints
+test.py
