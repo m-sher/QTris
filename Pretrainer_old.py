@@ -1,7 +1,7 @@
 from TFTetrisEnv.TetrisEnv import TetrisPyEnv
-from TFTetrisEnv.Moves import Moves, Convert
+from TFTetrisEnv.Moves import Moves
 from TFTetrisEnv.Pieces import PieceType
-from CombinedHeadTetrisModel import TetrisModel
+from QTris.TetrisModel_old import TetrisModel
 import multiprocessing
 import tensorflow as tf
 from tensorflow import keras
@@ -220,14 +220,11 @@ class Pretrainer():
         """
         Perform a single training step.
         """
-        board, piece_seq, separate_action = batch
-
-        action = tf.gather_nd(Convert.to_ind,
-                              separate_action)
+        board, piece_seq, action = batch
 
         with tf.GradientTape() as tape:
             # Forward pass
-            logits, _ = model((board, piece_seq), training=True)
+            logits, _ = model((board, piece_seq, action), training=True)
             # Compute loss
             loss = self.scc(action, logits)
         # Compute and apply gradients
@@ -248,7 +245,6 @@ class Pretrainer():
 
         # Train model
         for epoch in range(epochs):
-            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
                 # Perform training step
                 loss, accuracy = self._train_step(model, batch)
@@ -258,6 +254,7 @@ class Pretrainer():
             # Save checkpoint after each epoch
             if checkpoint_manager is not None:
                 checkpoint_manager.save()
+            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
 
 def main():
     # Model params
@@ -266,8 +263,7 @@ def main():
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.1
-    trunk_dim = 128
-    num_actions = Convert.to_move.shape[0]
+    out_dims = [2, 35, 8, 1]
 
     # Initialize model and optimizer
     model = TetrisModel(piece_dim=piece_dim,
@@ -275,9 +271,7 @@ def main():
                         num_heads=num_heads,
                         num_layers=num_layers,
                         dropout_rate=dropout_rate,
-                        trunk_dim=trunk_dim,
-                        num_actions=num_actions)
-    
+                        out_dims=out_dims)
     optimizer = keras.optimizers.Adam(3e-4)
     model.compile(optimizer=optimizer)
     print("Initialized model and optimizer.", flush=True)
@@ -285,9 +279,8 @@ def main():
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_train_checkpoints', max_to_keep=3)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrain_checkpoints', max_to_keep=3)
     checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_pretrain_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()

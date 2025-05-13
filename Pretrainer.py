@@ -1,6 +1,6 @@
-from TFTetrisEnv.TetrisEnv import TetrisPyEnv
-from TFTetrisEnv.Moves import Moves
-from TFTetrisEnv.Pieces import PieceType
+from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnvs.PyTetrisEnv.Moves import Moves, Convert
+from TetrisEnvs.PyTetrisEnv.Pieces import PieceType
 from TetrisModel import TetrisModel
 import multiprocessing
 import tensorflow as tf
@@ -115,7 +115,7 @@ class Pretrainer():
         return True
     
     def _find_action(self, transition: tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
-                     test_env: TetrisPyEnv) -> tuple[int, int, int]:
+                     test_env: PyTetrisEnv) -> tuple[int, int, int]:
         """
         Determine the action taken to transition from state_t to state_t1.
         """
@@ -159,7 +159,7 @@ class Pretrainer():
         """
 
         # Initialize test environment
-        self.test_env = TetrisPyEnv(queue_size=5, max_holes=100, seed=123, idx=0)
+        self.test_env = PyTetrisEnv(queue_size=5, max_holes=100, seed=123, idx=0)
 
         # Load transitions
         raw_data = self._load_raw_data()
@@ -180,10 +180,19 @@ class Pretrainer():
                    .filter(lambda board, piece_seq, action: tf.reduce_all(action[1] != (-1, -1, -1))))
 
         # Save dataset and ensure it can be loaded
-        dataset.save('E:\\tetris_expert_dataset')
-        dataset = tf.data.Dataset.load('E:\\tetris_expert_dataset')
+        dataset.save('tetris_expert_dataset')
+        dataset = tf.data.Dataset.load('tetris_expert_dataset')
 
         return dataset
+
+    @tf.function
+    def _get_key_sequence(self, separate_action):
+        action = tf.gather_nd(Convert.to_ind,
+                              separate_action)
+        key_sequence = tf.gather(Convert.to_sequence,
+                                 action)
+        return key_sequence
+        
 
     def _load_dataset(self, batch_size: int=1024) -> tf.data.Dataset:
         """
@@ -191,13 +200,13 @@ class Pretrainer():
         """
 
         # Check if dataset exists
-        if not os.path.exists('E:\\tetris_expert_dataset'):
+        if not os.path.exists('tetris_expert_dataset'):
             print("Dataset not found. Generating dataset...", flush=True)
             # Generate dataset
             dataset = self._generate_dataset()
         else:
             try:
-                dataset = tf.data.Dataset.load('E:\\tetris_expert_dataset')
+                dataset = tf.data.Dataset.load('tetris_expert_dataset')
                 print("Dataset loaded successfully.", flush=True)
             except:
                 print("Dataset loading failed. Generating dataset...", flush=True)
@@ -205,13 +214,17 @@ class Pretrainer():
                 dataset = self._generate_dataset()
 
         dataset = (dataset
-                  .cache()
-                  .shuffle(100000)
-                  .batch(batch_size,
-                         deterministic=False,
-                         drop_remainder=True,
-                         num_parallel_calls=tf.data.AUTOTUNE)
-                  .prefetch(tf.data.AUTOTUNE))
+                   .map(lambda board, piece_seq, separate_action:
+                        (board, piece_seq, self._get_key_sequence(separate_action)),
+                        num_parallel_calls=tf.data.AUTOTUNE,
+                        deterministic=False)
+                   .cache()
+                   .shuffle(100000)
+                   .batch(batch_size,
+                          deterministic=False,
+                          drop_remainder=True,
+                          num_parallel_calls=tf.data.AUTOTUNE)
+                   .prefetch(tf.data.AUTOTUNE))
         
         return dataset
 
@@ -220,19 +233,21 @@ class Pretrainer():
         """
         Perform a single training step.
         """
-        board, piece_seq, action = batch
+        board, piece_seq, key_sequence = batch
+        input_sequence = key_sequence[:, :-1]
+        target_sequence = key_sequence[:, 1:]
 
         with tf.GradientTape() as tape:
             # Forward pass
-            logits, _ = model((board, piece_seq, action), training=True)
+            logits = model((board, piece_seq, input_sequence), training=True)
             # Compute loss
-            loss = self.scc(action, logits)
+            loss = self.scc(target_sequence, logits)
         # Compute and apply gradients
         gradients = tape.gradient(loss, model.trainable_variables)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         # Compute accuracy
-        accuracy = tf.reduce_mean(tf.cast(tf.argmax(logits, axis=-1, output_type=tf.int32) == action, tf.float32))
+        accuracy = tf.reduce_mean(tf.cast(tf.argmax(logits, axis=-1, output_type=tf.int32) == target_sequence, tf.float32))
 
         return loss, accuracy
 
@@ -245,6 +260,7 @@ class Pretrainer():
 
         # Train model
         for epoch in range(epochs):
+            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
                 # Perform training step
                 loss, accuracy = self._train_step(model, batch)
@@ -254,37 +270,44 @@ class Pretrainer():
             # Save checkpoint after each epoch
             if checkpoint_manager is not None:
                 checkpoint_manager.save()
-            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
 
 def main():
     # Model params
     piece_dim = 8
+    key_dim = 12
     depth = 32
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.1
-    out_dims = [2, 35, 8, 1]
 
     # Initialize model and optimizer
     model = TetrisModel(piece_dim=piece_dim,
+                        key_dim=key_dim,
                         depth=depth,
                         num_heads=num_heads,
                         num_layers=num_layers,
-                        dropout_rate=dropout_rate,
-                        out_dims=out_dims)
-    optimizer = keras.optimizers.Adam(3e-4)
+                        dropout_rate=dropout_rate)
+    
+    optimizer = keras.optimizers.Adam(1e-4)
     model.compile(optimizer=optimizer)
     print("Initialized model and optimizer.", flush=True)
+
+    dummy_board = tf.random.uniform((32, 24, 10, 1), dtype=tf.float32)
+    dummy_pieces = tf.random.uniform((32, 7), dtype=tf.int32, minval=0, maxval=8)
+    dummy_keys = tf.random.uniform((32, 9), dtype=tf.int32, minval=0, maxval=12)
+    model((dummy_board, dummy_pieces, dummy_keys), training=False)
+    model.summary()
 
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrain_checkpoints', max_to_keep=3)
-    checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_pretrain_checkpoints', max_to_keep=3)
+    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_pretrain_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
-    pretrainer.train(model, checkpoint_manager=checkpoint_manager)
+    pretrainer.train(model, epochs=15, checkpoint_manager=checkpoint_manager)
 
 if __name__ == "__main__":
     main()
