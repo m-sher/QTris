@@ -12,7 +12,7 @@ import time
 # Model params
 piece_dim = 8
 key_dim = 12
-depth = 16
+depth = 32
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.1
@@ -20,7 +20,7 @@ max_len = 9
 
 # Environment params
 generations = 10000
-num_envs = 16
+num_envs = 32
 num_collection_steps = 500
 queue_size = 5
 max_holes = 10
@@ -208,104 +208,6 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
         board_batch, piece_scores
     )
 
-# @tf.function
-# def train_step(p_model, v_model, p_optimizer, v_optimizer, online_batch, beta, entropy_coef):
-#     online_board_batch = online_batch['boards']
-#     online_pieces_batch = online_batch['pieces']
-#     online_actions_batch = online_batch['actions']
-#     old_individual_log_probs = online_batch['old_log_probs'][:, 1:]
-#     mask_batch = online_batch['masks']
-#     advantages_batch = online_batch['advantages']
-#     returns_batch = online_batch['returns']
-#     old_values_batch = online_batch['old_values']
-
-#     invalid_mask = mask_batch[:, 1:, :] # batch, max_len - 1, key_dim
-#     pad_mask = online_actions_batch[:, 1:] != Keys.PAD # batch, max_len - 1
-
-#     online_input_actions = online_actions_batch[:, :-1]
-#     online_target_actions = online_actions_batch[:, 1:]
-
-#     with tf.GradientTape() as p_tape:
-#         logits, piece_scores, key_scores = p_model((
-#             online_board_batch,
-#             online_pieces_batch,
-#             online_input_actions
-#         ), training=True, return_scores=True)
-
-#         masked_logits = tf.where(invalid_mask,
-#                                  logits,
-#                                  tf.constant(-1e9, dtype=tf.float32)) # batch, max_len - 1, num_actions
-
-#         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
-    
-#         individual_log_probs = dist.log_prob(online_target_actions) # batch, max_len - 1
-#         new_masked_pad_probs = tf.where(pad_mask,
-#                                         individual_log_probs,
-#                                         tf.constant(0.0, dtype=tf.float32))
-        
-#         # Should be a no-op because these should already be masked
-#         old_masked_pad_probs = tf.where(pad_mask,
-#                                         old_individual_log_probs,
-#                                         tf.constant(0.0, dtype=tf.float32))
-        
-#         new_log_probs = tf.reduce_sum(new_masked_pad_probs, axis=-1) # batch
-        
-#         old_log_probs = tf.reduce_sum(old_masked_pad_probs, axis=-1) # batch
-        
-#         # PPO loss
-#         ratio = tf.exp(new_log_probs - old_log_probs)
-#         clipped_ratio = tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip)
-#         ppo_loss = -tf.reduce_mean(tf.minimum(
-#             ratio * advantages_batch,
-#             clipped_ratio * advantages_batch
-#         ))
-        
-#         # Compute bonuses
-#         masked_entropy = tf.where(pad_mask,
-#                                   dist.entropy(),
-#                                   tf.constant(0.0, dtype=tf.float32)) # batch, max_len - 1
-#         entropy = tf.reduce_mean(tf.reduce_sum(masked_entropy, axis=-1))
-#         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
-
-#         # Compute total loss
-#         total_policy_loss = (
-#             ppo_loss
-#             - entropy_coef * entropy
-#             + beta * approx_kl
-#         )
-
-#     # Apply policy gradients
-#     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
-#     p_optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
-
-#     # Compute metrics
-#     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
-
-#     with tf.GradientTape() as v_tape:
-#         values = v_model((online_board_batch, online_pieces_batch), training=True)
-#         values = tf.squeeze(values, axis=-1)
-
-#         # Value loss
-#         value_error = values - returns_batch
-#         clipped_values = old_values_batch + tf.clip_by_value(
-#             values - old_values_batch, -value_clip, value_clip
-#         )
-#         clipped_value_error = clipped_values - returns_batch
-#         value_loss = tf.reduce_mean(tf.maximum(
-#             tf.square(value_error),
-#             tf.square(clipped_value_error)
-#         ))
-    
-#     # Apply value gradients
-#     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
-#     v_optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
-    
-#     return (
-#         ppo_loss, entropy, approx_kl,
-#         clipped_frac, value_loss,
-#         online_board_batch, piece_scores
-#     )
-
 def train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
                      num_updates, beta, entropy_coef):
     for _ in range(num_updates):
@@ -350,12 +252,12 @@ def main(argv):
     # Initialize checkpoint manager
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './small_checkpoints/policy_checkpoints', max_to_keep=3)
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
+    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, './small_checkpoints/value_checkpoints', max_to_keep=3)
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
-    print("Restored checkpoints", flush=True)
+    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    # print("Restored checkpoints", flush=True)
 
     p_model.build(input_shape=[(None, 24, 10, 1),
                                (None, queue_size + 2),
@@ -398,8 +300,8 @@ def main(argv):
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
-        id='434b3yec',
-        resume='must',
+        # id='434b3yec',
+        # resume='must',
         config=config,
     )
 
