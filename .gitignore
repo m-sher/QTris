@@ -26,3 +26,6 @@ conv3.npy
 /value_checkpoints
 /policy_checkpoints
 test.py
+/large_checkpoints
+/pretrained_policy_checkpoints
+/small_checkpoints
