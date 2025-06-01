@@ -1,7 +1,7 @@
 from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnvs.PyTetrisEnv.Moves import Moves, Convert
 from TetrisEnvs.PyTetrisEnv.Pieces import PieceType
-from TetrisModel import TetrisModel
+from TetrisModel import PolicyModel
 import multiprocessing
 import tensorflow as tf
 from tensorflow import keras
@@ -194,7 +194,7 @@ class Pretrainer():
         return key_sequence
         
 
-    def _load_dataset(self, batch_size: int=1024) -> tf.data.Dataset:
+    def _load_dataset(self, batch_size: int | None=1024) -> tf.data.Dataset:
         """
         Load the dataset from disk if it exists, otherwise generate it.
         """
@@ -214,17 +214,23 @@ class Pretrainer():
                 dataset = self._generate_dataset()
 
         dataset = (dataset
-                   .map(lambda board, piece_seq, separate_action:
-                        (board, piece_seq, self._get_key_sequence(separate_action)),
+                   .map(lambda board, piece_seq, separate_action: {
+                            'boards': tf.cast(board[..., None], tf.float32),
+                            'pieces': tf.cast(piece_seq, tf.int64),
+                            'actions': tf.cast(self._get_key_sequence(separate_action), tf.int64)
+                        },
                         num_parallel_calls=tf.data.AUTOTUNE,
                         deterministic=False)
                    .cache()
-                   .shuffle(100000)
-                   .batch(batch_size,
-                          deterministic=False,
-                          drop_remainder=True,
-                          num_parallel_calls=tf.data.AUTOTUNE)
-                   .prefetch(tf.data.AUTOTUNE))
+                   .shuffle(2000000))
+
+        if batch_size:
+            dataset = (dataset
+                       .batch(batch_size,
+                              deterministic=False,
+                              drop_remainder=True,
+                              num_parallel_calls=tf.data.AUTOTUNE)
+                       .prefetch(tf.data.AUTOTUNE))
         
         return dataset
 
@@ -233,7 +239,9 @@ class Pretrainer():
         """
         Perform a single training step.
         """
-        board, piece_seq, key_sequence = batch
+        board = batch['boards']
+        piece_seq = batch['piecs']
+        key_sequence = batch['actions']
         input_sequence = key_sequence[:, :-1]
         target_sequence = key_sequence[:, 1:]
 
@@ -276,17 +284,22 @@ def main():
     piece_dim = 8
     key_dim = 12
     depth = 32
+    max_len = 9
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.1
+    batch_size = 512
 
     # Initialize model and optimizer
-    model = TetrisModel(piece_dim=piece_dim,
+    model = PolicyModel(batch_size=batch_size,
+                        piece_dim=piece_dim,
                         key_dim=key_dim,
                         depth=depth,
+                        max_len=max_len,
                         num_heads=num_heads,
                         num_layers=num_layers,
-                        dropout_rate=dropout_rate)
+                        dropout_rate=dropout_rate,
+                        output_dim=key_dim)
     
     optimizer = keras.optimizers.Adam(1e-4)
     model.compile(optimizer=optimizer)
@@ -301,13 +314,13 @@ def main():
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_pretrain_checkpoints', max_to_keep=3)
-    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './combined_pretrain_checkpoints', max_to_keep=3)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints_4', max_to_keep=3)
+    checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrained_policy_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
-    pretrainer.train(model, epochs=15, checkpoint_manager=checkpoint_manager)
+    pretrainer.train(model, batch_size=batch_size, epochs=15, checkpoint_manager=checkpoint_manager)
 
 if __name__ == "__main__":
     main()
