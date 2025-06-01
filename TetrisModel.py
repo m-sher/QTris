@@ -1,6 +1,7 @@
 import tensorflow as tf
 import keras
 from keras import layers
+from tensorflow_probability import distributions
 from TetrisEnvs.TFTetrisEnv.TFMoves import TFConvert
 
 @tf.function(jit_compile=True)
@@ -139,7 +140,9 @@ class PolicyModel(keras.Model):
         self.make_patches = keras.Sequential([
             keras.Input(shape=(24, 10, 1)),
             layers.Rescaling(scale=2.0, offset=-1.0),
-            layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid'),
+            layers.Conv2D(filters=depth//2, kernel_size=3, strides=1, padding='same', activation='relu'),
+            layers.Conv2D(filters=depth, kernel_size=3, strides=1, padding='same', activation='relu'),
+            layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid', activation='relu'),
             layers.Reshape((-1, depth))
         ])
         
@@ -254,12 +257,14 @@ class PolicyModel(keras.Model):
         mask = generate_mask(ind, stacked_key_sequence)
         logits, _ = self.process_keys((piece_dec, stacked_key_sequence), training=False)
 
-        masked_logits = tf.where(mask, logits[:, ind - 1, :], tf.constant(float('-inf'), dtype=tf.float32))
-        action = tf.squeeze(tf.random.categorical(logits=masked_logits,
-                                                  num_samples=1), axis=-1)
-        log_prob = tf.gather(tf.nn.log_softmax(masked_logits, axis=-1),
-                             action,
-                             batch_dims=1)
+        masked_logits = tf.where(mask,
+                                 logits[:, ind - 1, :],
+                                 tf.constant(-1e9, dtype=tf.float32))
+
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        action = dist.sample()
+        log_prob = dist.log_prob(action)
 
         key_sequence = key_sequence.write(ind, action)
         log_probs = log_probs.write(ind, log_prob)
@@ -304,7 +309,9 @@ class ValueModel(keras.Model):
         self.make_patches = keras.Sequential([
             keras.Input(shape=(24, 10, 1)),
             layers.Rescaling(scale=2.0, offset=-1.0),
-            layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid'),
+            layers.Conv2D(filters=depth//2, kernel_size=3, strides=1, padding='same', activation='relu'),
+            layers.Conv2D(filters=depth, kernel_size=3, strides=1, padding='same', activation='relu'),
+            layers.Conv2D(filters=depth, kernel_size=2, strides=2, padding='valid', activation='relu'),
             layers.Reshape((-1, depth))
         ])
         
@@ -332,10 +339,9 @@ class ValueModel(keras.Model):
 
         self.trunk = keras.Sequential([
             layers.Flatten(),
+            layers.Dropout(dropout_rate),
             layers.Dense(depth, activation='relu'),
-            layers.Dropout(dropout_rate),
             layers.Dense(depth // 2, activation='relu'),
-            layers.Dropout(dropout_rate),
         ], name='trunk')
 
         self.top = layers.Dense(output_dim)
