@@ -11,7 +11,7 @@ import time
 # Model params
 piece_dim = 8
 key_dim = 12
-depth = 32
+depth = 16
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.1
