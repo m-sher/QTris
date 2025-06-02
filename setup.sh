@@ -12,5 +12,5 @@ conda activate tetris
 git clone https://github.com/m-sher/QTris.git
 git clone https://github.com/m-sher/TFTetrisEnv.git
 cd QTris
-pip install -r major_reqs.txt wandb tqdm
+pip install -r requirements.txt
 pip install ../TFTetrisEnv
