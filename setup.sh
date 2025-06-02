@@ -8,7 +8,7 @@ apt-get update
 apt-get -y install cuda-toolkit-12-9
 curl -O https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh
 bash ./Anaconda3-2024.10-1-Linux-x86_64.sh
-source ~/.bashrc
+source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda create -n tetris python=3.11.11 -y
 conda activate tetris
 git clone https://github.com/m-sher/QTris.git
