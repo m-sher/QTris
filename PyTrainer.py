@@ -28,7 +28,7 @@ max_height = 10
 
 # Training params
 mini_batch_size = 512
-num_updates = 10
+num_updates = 20
 
 gamma = 0.99
 lam = 0.95
@@ -86,14 +86,14 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
     online_board_batch = online_batch['boards']
     online_pieces_batch = online_batch['pieces']
     online_actions_batch = online_batch['actions']
-    old_individual_log_probs = online_batch['old_log_probs'][:, 1:]
+    old_log_probs = online_batch['old_log_probs'][:, 1:]
     mask_batch = online_batch['masks']
-    advantages_batch = online_batch['advantages']
+    advantages_batch = online_batch['advantages'][..., None] # batch, 1
     returns_batch = online_batch['returns']
     old_values_batch = online_batch['old_values']
 
     invalid_mask = mask_batch[:, 1:, :] # batch, max_len - 1, key_dim
-    pad_mask = online_actions_batch[:, 1:] != Keys.PAD # batch, max_len - 1
+    pad_mask = tf.cast(online_actions_batch[:, 1:] != Keys.PAD, tf.float32) # batch, max_len - 1
 
     offline_board_batch = offline_batch['boards']
     offline_pieces_batch = offline_batch['pieces']
@@ -133,34 +133,20 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
     
-        individual_log_probs = dist.log_prob(online_target_actions) # batch, max_len - 1
-        new_masked_pad_probs = tf.where(pad_mask,
-                                        individual_log_probs,
-                                        tf.constant(0.0, dtype=tf.float32))
-        
-        # Should be a no-op because these should already be masked
-        old_masked_pad_probs = tf.where(pad_mask,
-                                        old_individual_log_probs,
-                                        tf.constant(0.0, dtype=tf.float32))
-        
-        new_log_probs = tf.reduce_sum(new_masked_pad_probs, axis=-1) # batch
-        
-        old_log_probs = tf.reduce_sum(old_masked_pad_probs, axis=-1) # batch
+        new_log_probs = dist.log_prob(online_target_actions) # batch, max_len - 1
         
         # PPO loss
-        ratio = tf.exp(new_log_probs - old_log_probs)
+        ratio = tf.exp(new_log_probs - old_log_probs) # batch, max_len - 1
         clipped_ratio = tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip)
-        ppo_loss = -tf.reduce_mean(tf.minimum(
+        ppo_loss = -tf.reduce_sum(tf.minimum(
             ratio * advantages_batch,
             clipped_ratio * advantages_batch
-        ))
+        ) * pad_mask) / tf.reduce_sum(pad_mask)
         
         # Compute bonuses
-        masked_entropy = tf.where(pad_mask,
-                                  dist.entropy(),
-                                  tf.constant(0.0, dtype=tf.float32)) # batch, max_len - 1
-        entropy = tf.reduce_mean(tf.reduce_sum(masked_entropy, axis=-1))
-        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+        masked_entropy = dist.entropy() * pad_mask # batch, max_len - 1
+        entropy = tf.reduce_sum(masked_entropy) / tf.reduce_sum(pad_mask)
+        approx_kl = tf.reduce_sum((old_log_probs - new_log_probs) * pad_mask) / tf.reduce_sum(pad_mask)
 
         # Compute loss from expert demonstration
         expert_policy_loss = scc(offline_target_actions, offline_logits)
@@ -181,7 +167,7 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
     expert_policy_acc = tf.reduce_mean(
         tf.cast(tf.argmax(offline_logits, axis=-1) == offline_target_actions, tf.float32)
     )
-    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+    clipped_frac = tf.reduce_sum(tf.cast(ratio != clipped_ratio, tf.float32) * pad_mask) / tf.reduce_sum(pad_mask)
 
     with tf.GradientTape() as v_tape:
         values = v_model((online_board_batch, online_pieces_batch), training=True)
@@ -210,12 +196,11 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
 
 def train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
                      num_updates, beta, entropy_coef):
-    for _ in range(num_updates):
-        for online_batch in online_dataset:
-            offline_batch = next(offline_dataset)
-            step_out = train_step(p_model, v_model,
-                                  online_batch, offline_batch,
-                                  beta, entropy_coef)
+    for online_batch in online_dataset.take(num_updates):
+        offline_batch = next(offline_dataset)
+        step_out = train_step(p_model, v_model,
+                                online_batch, offline_batch,
+                                beta, entropy_coef)
     return step_out
 
 def main(argv):
@@ -252,12 +237,12 @@ def main(argv):
     # Initialize checkpoint manager
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './small_checkpoints/policy_checkpoints', max_to_keep=3)
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
+    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, './small_checkpoints/value_checkpoints', max_to_keep=3)
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
-    print("Restored checkpoints", flush=True)
+    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    # print("Restored checkpoints", flush=True)
 
     p_model.build(input_shape=[(None, 24, 10, 1),
                                (None, queue_size + 2),
@@ -300,8 +285,8 @@ def main(argv):
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
-        id='iauixt1w',
-        resume='must',
+        # id='iauixt1w',
+        # resume='must',
         config=config,
     )
 
@@ -314,7 +299,7 @@ def main(argv):
         (all_boards, all_pieces, all_actions, all_log_probs, all_masks,
          all_values, all_attacks, all_clears, all_height_penalty,
          all_hole_penalty, all_skyline_penalty, all_bumpy_penalty,
-         all_death_penalty, all_dones) = runner.collect_trajectory(render=gen % 5 == 0)
+         all_death_penalty, all_dones) = runner.collect_trajectory(render=True)
         
         all_rewards = (tf.maximum(all_attacks + all_clears +
                                   all_height_penalty + all_hole_penalty +
