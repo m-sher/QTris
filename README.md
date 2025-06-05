@@ -4,94 +4,44 @@
 
 # Todo Section: #
 
-### Priority Colors: ###
-
-$$\color{red}\text{●}$$ High priority
-
-$$\color{orange}\text{●}$$ Medium priority
-
-$$\color{yellow}\text{●}$$ Low priority
-
-$$\color{green}\text{●}$$ In progress
-
 ### Todo Items: ###
 
-$$\color{green}\text{●}$$ Refer to this every day: JUST LET IT TRAIN SERIOUSLY IT'S WORKING, JUST LET IT LEARN
-
-$$\color{green}\text{●}$$ Write this ReadMe
-
-$$\color{green}\text{●}$$ Redo pretrainer for new model architecture 
-
-$$\color{orange}\text{●}$$ Organize new working training script into separate files
-
-$$\color{orange}\text{●}$$ Give the model more information (e.g. b2b, combo, garbage queue)
-
-$$\color{orange}\text{●}$$ Instead of 1v1 environment, periodic garbage sent to queue
-
-$$\color{yellow}\text{●}$$ Create demo/explanation videos w/ manim
+- Redo priority colors in ReadMe
+- Give the model more information (e.g. b2b, combo, garbage queue)
+- 1v1 environment or periodic garbage sent to queue
+- Create demo/explanation videos w/ manim
 
 ### Completed Items: ###
 
-$$\color{orange}\text{●}$$ ~~Check piece/death calculations for logging~~
-
-$$\color{orange}\text{●}$$ ~~Check if tf.data.Dataset.save maintains pipeline operations when loading~~
-
-$$\color{orange}\text{●}$$ ~~Add custom read function to shuffle shard reading order~~
-
-$$\color{yellow}\text{●}$$ ~~Kill for too bumpy (maybe)~~
-
-$$\color{yellow}\text{●}$$ ~~Fix method for saving demo gif in Trainer~~
-
-$$\color{yellow}\text{●}$$ ~~Rename trainer attributes to follow private convention~~
-
-$$\color{orange}\text{●}$$ ~~Split pretrainer dataset files into smaller chunks to improve loading time - tf.data.Dataset.save instead~~
-
-$$\color{yellow}\text{●}$$ ~~Change expert dataset structure to match novice dataset~~
-
-$$\color{yellow}\text{●}$$ ~~Fix pretrainer functions to make the class easier to use (why did I make them like that??)~~
-
-$$\color{yellow}\text{●}$$ ~~Log more information to WandB - episode lengths, number of deaths, average action prob~~
-
-$$\color{orange}\text{●}$$ ~~Remove reference model to speed up training, but log model output for per-step kl-div~~
-
-$$\color{orange}\text{●}$$ ~~Implement parallel trajectory collection~~
-
-$$\color{orange}\text{●}$$ ~~Revisit encouraging short actions - possibly by re-separating key sequences~~
-
-$$\color{orange}\text{●}$$ ~~Move demo gif creation to its own file to not clutter the notebook~~
-
-$$\color{yellow}\text{●}$$ ~~Consider reducing gamma - Failures later in episodes are affecting early placements too heavily~~
-
-$$\color{yellow}\text{●}$$ ~~Adjust reward design to directly penalize holes~~
-
-$$\color{orange}\text{●}$$ ~~Make the model larger~~
-
-$$\color{orange}\text{●}$$ ~~Make feature extraction deeper~~
-
-$$\color{orange}\text{●}$$ ~~Rescale input to [-1, 1]~~
-
-$$\color{yellow}\text{●}$$ ~~Fix logged attention score differences (difference between unnormalized scores instead of normalized)~~
-
-$$\color{yellow}\text{●}$$ ~~Log attention score differences~~
-
-$$\color{yellow}\text{●}$$ ~~Consider using individual values (already calculated) when computing advantages~~
-
-$$\color{yellow}\text{●}$$ ~~Log attention scores to WandB~~
-
-$$\color{yellow}\text{●}$$ ~~Reevaluate use of reference model~~
-
-$$\color{yellow}\text{●}$$ ~~Consider standardizing/scaling returns to ease value function learning (rejected)~~
-
-$$\color{orange}\text{●}$$ ~~Save optimizer parameters~~
-
-$$\color{red}\text{●}$$ ~~Add temperature in place of epsilon-greedy/stochastic-sampling~~
-
-$$\color{red}\text{●}$$ ~~Treat key sequences as actions but maintain separate probabilities (re-separated)~~
-
-$$\color{orange}\text{●}$$ ~~Fix value function learning~~
-
-$$\color{orange}\text{●}$$ ~~Make entire model trainable with one optimizer (re-separated)~~
-
-$$\color{orange}\text{●}$$ ~~Adjust reward scaling such that attacks are favored more heavily~~
-
-$$\color{red}\text{●}$$ ~~Fix last value for GAE calculation~~
+- ~~Check piece/death calculations for logging~~
+- ~~Check if tf.data.Dataset.save maintains pipeline operations when loading~~
+- ~~Add custom read function to shuffle shard reading order~~
+- ~~Kill for too bumpy (maybe)~~
+- ~~Fix method for saving demo gif in Trainer~~
+- ~~Rename trainer attributes to follow private convention~~
+- ~~Split pretrainer dataset files into smaller chunks to improve loading time - tf.data.Dataset.save instead~~
+- ~~Change expert dataset structure to match novice dataset~~
+- ~~Fix pretrainer functions to make the class easier to use (why did I make them like that??)~~
+- ~~Log more information to WandB - episode lengths, number of deaths, average action prob~~
+- ~~Remove reference model to speed up training, but log model output for per-step kl-div~~
+- ~~Implement parallel trajectory collection~~
+- ~~Revisit encouraging short actions - possibly by re-separating key sequences~~
+- ~~Move demo gif creation to its own file to not clutter the notebook~~
+- ~~Consider reducing gamma - Failures later in episodes are affecting early placements too heavily~~
+- ~~Adjust reward design to directly penalize holes~~
+- ~~Make the model larger~~
+- ~~Make feature extraction deeper~~
+- ~~Rescale input to [-1, 1]~~
+- ~~Fix logged attention score differences (difference between unnormalized scores instead of normalized)~~
+- ~~Log attention score differences~~
+- ~~Consider using individual values (already calculated) when computing advantages~~
+- ~~Log attention scores to WandB~~
+- ~~Reevaluate use of reference model~~
+- ~~Consider standardizing/scaling returns to ease value function learning (rejected)~~
+- ~~Save optimizer parameters~~
+- ~~Add temperature in place of epsilon-greedy/stochastic-sampling~~
+- ~~Treat key sequences as actions but maintain separate probabilities (re-separated)~~
+- ~~Fix value function learning~~
+- ~~Make entire model trainable with one optimizer (re-separated)~~
+- ~~Adjust reward scaling such that attacks are favored more heavily~~
+- ~~Fix last value for GAE calculation~~
