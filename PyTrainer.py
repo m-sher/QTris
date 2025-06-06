@@ -27,14 +27,13 @@ max_holes = 10
 max_height = 10
 
 # Training params
-mini_batch_size = 512
-num_updates = 20
+mini_batch_size = 1024
+num_epochs = 4
 
 gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.2
-expert_coef = 0.001
 
 target_kl = 0.01
 kl_tolerance = 0.3
@@ -43,7 +42,7 @@ config = {
     'num_envs': num_envs,
     'num_collection_steps': num_collection_steps,
     'mini_batch_size': mini_batch_size,
-    'epochs_per_gen': num_updates,
+    'num_epochs': num_epochs,
     'gamma': gamma,
     'lam': lam,
     'ppo_clip': ppo_clip,
@@ -58,7 +57,7 @@ scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
 
     advantages = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
-                                element_shape=(num_envs,))
+                                element_shape=(num_envs, 1))
 
     last_adv = tf.zeros(advantages.element_shape, dtype=tf.float32)
     last_val = values[-1]
@@ -72,109 +71,88 @@ def compute_gae_and_returns(values, rewards, dones, gamma, lam):
 
     advantages = advantages.stack()
 
-    returns = advantages + values
+    returns = tf.ensure_shape(advantages + values, (num_collection_steps, num_envs, 1))
 
-    advantages = (
-        (advantages - tf.reduce_mean(advantages)) /
-        (tf.math.reduce_std(advantages) + 1e-8)
+    advantages = tf.ensure_shape((
+            (advantages - tf.reduce_mean(advantages)) /
+            (tf.math.reduce_std(advantages) + 1e-8)),
+        (num_collection_steps, num_envs, 1)
     )
 
     return advantages, returns
 
-@tf.function
-def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef):
-    online_board_batch = online_batch['boards']
-    online_pieces_batch = online_batch['pieces']
-    online_actions_batch = online_batch['actions']
-    old_log_probs = online_batch['old_log_probs'][:, 1:]
-    mask_batch = online_batch['masks']
-    advantages_batch = online_batch['advantages'][..., None] # batch, 1
-    returns_batch = online_batch['returns']
-    old_values_batch = online_batch['old_values']
+@tf.function()
+def train_step(p_model, v_model, online_batch, beta, entropy_coef):
+    online_board_batch = tf.ensure_shape(online_batch['boards'], (mini_batch_size, 24, 10, 1))
+    online_pieces_batch = tf.ensure_shape(online_batch['pieces'], (mini_batch_size, queue_size + 2))
+    online_actions_batch = tf.ensure_shape(online_batch['actions'], (mini_batch_size, max_len))
+    log_probs_batch = tf.ensure_shape(online_batch['old_log_probs'][:, 1:], (mini_batch_size, max_len - 1))
+    mask_batch = tf.ensure_shape(online_batch['masks'], (mini_batch_size, max_len, key_dim))
+    advantages_batch = tf.ensure_shape(online_batch['advantages'], (mini_batch_size, 1))
+    returns_batch = tf.ensure_shape(online_batch['returns'], (mini_batch_size, 1))
+    old_values_batch = tf.ensure_shape(online_batch['old_values'], (mini_batch_size, 1))
 
     invalid_mask = mask_batch[:, 1:, :] # batch, max_len - 1, key_dim
     pad_mask = tf.cast(online_actions_batch[:, 1:] != Keys.PAD, tf.float32) # batch, max_len - 1
 
-    offline_board_batch = offline_batch['boards']
-    offline_pieces_batch = offline_batch['pieces']
-    offline_actions_batch = offline_batch['actions']
-
-    board_batch = tf.concat([
-        online_board_batch,
-        offline_board_batch
-    ], axis=0)
-
-    pieces_batch = tf.concat([
-        online_pieces_batch,
-        offline_pieces_batch
-    ], axis=0)
-
-    actions_batch = tf.concat([
-        online_actions_batch,
-        offline_actions_batch
-    ], axis=0)
-
-    input_actions_batch = actions_batch[:, :-1]
-    online_target_actions = online_actions_batch[:, 1:]
-    offline_target_actions = offline_actions_batch[:, 1:]
+    input_actions_batch = online_actions_batch[:, :-1]
+    target_actions_batch = online_actions_batch[:, 1:]
 
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model((
-            board_batch,
-            pieces_batch,
+            online_board_batch,
+            online_pieces_batch,
             input_actions_batch
         ), training=True, return_scores=True)
 
-        online_logits, offline_logits = tf.split(logits, num_or_size_splits=2, axis=0)
+        logits = tf.ensure_shape(logits, (mini_batch_size, max_len - 1, key_dim)) # batch, max_len - 1, num_actions
 
         masked_logits = tf.where(invalid_mask,
-                                 online_logits,
+                                 logits,
                                  tf.constant(-1e9, dtype=tf.float32)) # batch, max_len - 1, num_actions
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
     
-        new_log_probs = dist.log_prob(online_target_actions) # batch, max_len - 1
-        
+        new_log_probs = tf.ensure_shape(dist.log_prob(target_actions_batch), (mini_batch_size, max_len - 1))
+        new_log_probs = tf.ensure_shape(new_log_probs * pad_mask, (mini_batch_size, max_len - 1))
+        new_log_probs = tf.ensure_shape(tf.reduce_sum(new_log_probs, axis=-1, keepdims=True), (mini_batch_size, 1))
+
+        old_log_probs = tf.ensure_shape(log_probs_batch * pad_mask, (mini_batch_size, max_len - 1))
+        old_log_probs = tf.ensure_shape(tf.reduce_sum(old_log_probs, axis=-1, keepdims=True), (mini_batch_size, 1))
+
         # PPO loss
-        ratio = tf.exp(new_log_probs - old_log_probs) # batch, max_len - 1
-        clipped_ratio = tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip)
-        ppo_loss = -tf.reduce_sum(tf.minimum(
+        ratio = tf.ensure_shape(tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1))
+        clipped_ratio = tf.ensure_shape(tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, 1))
+        ppo_loss = -tf.reduce_mean(tf.minimum(
             ratio * advantages_batch,
             clipped_ratio * advantages_batch
-        ) * pad_mask) / tf.reduce_sum(pad_mask)
+        ))
         
-        # Compute bonuses
-        masked_entropy = dist.entropy() * pad_mask # batch, max_len - 1
-        entropy = tf.reduce_sum(masked_entropy) / tf.reduce_sum(pad_mask)
-        approx_kl = tf.reduce_sum((old_log_probs - new_log_probs) * pad_mask) / tf.reduce_sum(pad_mask)
-
-        # Compute loss from expert demonstration
-        expert_policy_loss = scc(offline_target_actions, offline_logits)
+        # Compute bonus/penalty
+        entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
+        entropy = tf.ensure_shape(tf.reduce_sum(entropy * pad_mask, axis=-1, keepdims=True), (mini_batch_size, 1))
+        entropy = tf.reduce_mean(entropy)
+        
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         # Compute total loss
         total_policy_loss = (
             ppo_loss
             - entropy_coef * entropy
             + beta * approx_kl
-            + expert_coef * expert_policy_loss
         )
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    # Compute metrics
-    expert_policy_acc = tf.reduce_mean(
-        tf.cast(tf.argmax(offline_logits, axis=-1) == offline_target_actions, tf.float32)
-    )
-    clipped_frac = tf.reduce_sum(tf.cast(ratio != clipped_ratio, tf.float32) * pad_mask) / tf.reduce_sum(pad_mask)
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
     with tf.GradientTape() as v_tape:
         values = v_model((online_board_batch, online_pieces_batch), training=True)
-        values = tf.squeeze(values, axis=-1)
 
         # Value loss
-        value_error = values - returns_batch
+        value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
         clipped_values = old_values_batch + tf.clip_by_value(
             values - old_values_batch, -value_clip, value_clip
         )
@@ -189,18 +167,16 @@ def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
     
     return (
-        ppo_loss, entropy, approx_kl, expert_policy_loss,
-        expert_policy_acc, clipped_frac, value_loss,
-        board_batch, piece_scores
+        ppo_loss, entropy, approx_kl, clipped_frac, value_loss,
+        online_board_batch, piece_scores
     )
 
-def train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
-                     num_updates, beta, entropy_coef):
-    for online_batch in online_dataset.take(num_updates):
-        offline_batch = next(offline_dataset)
-        step_out = train_step(p_model, v_model,
-                                online_batch, offline_batch,
-                                beta, entropy_coef)
+def train_on_dataset(p_model, v_model, online_dataset,
+                     num_epochs, beta, entropy_coef):
+    for _ in range(num_epochs):
+        for online_batch in online_dataset:
+            step_out = train_step(p_model, v_model,
+                                  online_batch, beta, entropy_coef)
     return step_out
 
 def main(argv):
@@ -228,21 +204,21 @@ def main(argv):
 
     print("Initialized models", flush=True)
 
-    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_optimizer = keras.optimizers.Adam(3e-4, clipnorm=1.0)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    v_optimizer = keras.optimizers.Adam(3e-4)
+    v_optimizer = keras.optimizers.Adam(3e-4, clipnorm=1.0)
     v_model.compile(optimizer=v_optimizer, jit_compile=True)
 
     # Initialize checkpoint manager
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './small_checkpoints/policy_checkpoints', max_to_keep=3)
-    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, './small_checkpoints/value_checkpoints', max_to_keep=3)
-    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
-    # print("Restored checkpoints", flush=True)
+    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    print("Restored checkpoints", flush=True)
 
     p_model.build(input_shape=[(None, 24, 10, 1),
                                (None, queue_size + 2),
@@ -270,18 +246,6 @@ def main(argv):
     print("Initialized runner", flush=True)
     last_time = time.time()
 
-    # Initialize expert dataset from pretrainer
-    pretrainer = Pretrainer()
-    offline_dataset = iter(
-        pretrainer._load_dataset(batch_size=None)
-        .repeat()
-        .batch(mini_batch_size,
-               num_parallel_calls=tf.data.AUTOTUNE,
-               deterministic=False,
-               drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
-    )
-
     # Initialize WandB logging
     wandb_run = wandb.init(
         project='Tetris',
@@ -299,11 +263,10 @@ def main(argv):
         (all_boards, all_pieces, all_actions, all_log_probs, all_masks,
          all_values, all_attacks, all_clears, all_height_penalty,
          all_hole_penalty, all_skyline_penalty, all_bumpy_penalty,
-         all_death_penalty, all_dones) = runner.collect_trajectory(render=True)
+         all_death_penalty, all_dones) = runner.collect_trajectory(render=False)
         
-        all_rewards = (tf.maximum(all_attacks + all_clears +
-                                  all_height_penalty + all_hole_penalty +
-                                  all_skyline_penalty + all_bumpy_penalty + 1.0, 0.0) + all_death_penalty) * 0.1
+        all_rewards = tf.ensure_shape((all_attacks + all_clears + all_height_penalty + all_hole_penalty +
+                                       all_skyline_penalty + all_bumpy_penalty + all_death_penalty)[..., None], (num_collection_steps, num_envs, 1))
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
@@ -318,9 +281,9 @@ def main(argv):
         actions_flat = tf.reshape(all_actions, (-1, max_len))
         log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
         masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
-        advantages_flat = tf.reshape(all_advantages, (-1,))
-        returns_flat = tf.reshape(all_returns, (-1,))
-        values_flat = tf.reshape(all_values, (-1,))
+        advantages_flat = tf.reshape(all_advantages, (-1, 1))
+        returns_flat = tf.reshape(all_returns, (-1, 1))
+        values_flat = tf.reshape(all_values, (-1, 1))
         
         # Create TF dataset from data
         online_dataset = (
@@ -344,8 +307,8 @@ def main(argv):
         last_time = time.time()
         
         # Train on collected data
-        train_out = train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
-                                     num_updates, beta, entropy_coef)
+        train_out = train_on_dataset(p_model, v_model, online_dataset,
+                                     num_epochs, beta, entropy_coef)
         
         # Save checkpoint
         p_checkpoint_manager.save()
@@ -355,8 +318,7 @@ def main(argv):
         last_time = time.time()
         
         # Unpack metrics
-        (ppo_loss, entropy, approx_kl, expert_policy_loss,
-         expert_policy_acc, clipped_frac, value_loss,
+        (ppo_loss, entropy, approx_kl, clipped_frac, value_loss,
          boards, scores) = train_out
         
         # Compute more metrics
@@ -382,8 +344,6 @@ def main(argv):
                    'approx_kl': approx_kl,
                    'clipped_frac': clipped_frac,
                    'value_loss': value_loss,
-                   'expert_policy_loss': expert_policy_loss,
-                   'expert_policy_acc': expert_policy_acc,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
                    'avg_attacks': avg_attacks,
@@ -408,7 +368,7 @@ def main(argv):
         else:
             beta = 1.0
 
-        if avg_probs > 0.75:
+        if avg_probs > 0.6:
             entropy_coef = 0.08
         elif avg_probs < 0.3:
             entropy_coef = 0.01
