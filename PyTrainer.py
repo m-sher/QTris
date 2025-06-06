@@ -20,10 +20,10 @@ max_len = 9
 
 # Environment params
 generations = 10000
-num_envs = 32
+num_envs = 64
 num_collection_steps = 500
 queue_size = 5
-max_holes = 10
+max_holes = 2
 max_height = 10
 
 # Training params
@@ -265,8 +265,9 @@ def main(argv):
          all_hole_penalty, all_skyline_penalty, all_bumpy_penalty,
          all_death_penalty, all_dones) = runner.collect_trajectory(render=False)
         
-        all_rewards = tf.ensure_shape((all_attacks + all_clears + all_height_penalty + all_hole_penalty +
-                                       all_skyline_penalty + all_bumpy_penalty + all_death_penalty)[..., None], (num_collection_steps, num_envs, 1))
+        all_rewards = tf.ensure_shape((tf.maximum(all_attacks + all_clears + all_height_penalty + all_hole_penalty +
+                                                  all_skyline_penalty + all_bumpy_penalty), 0.0) + all_death_penalty,
+                                      (num_collection_steps, num_envs))
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
         last_time = time.time()
