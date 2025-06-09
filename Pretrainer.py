@@ -301,7 +301,7 @@ def main():
                         dropout_rate=dropout_rate,
                         output_dim=key_dim)
     
-    optimizer = keras.optimizers.Adam(1e-4)
+    optimizer = keras.optimizers.Adam(3e-4)
     model.compile(optimizer=optimizer)
     print("Initialized model and optimizer.", flush=True)
 
@@ -314,9 +314,7 @@ def main():
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints_4', max_to_keep=3)
-    checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrained_policy_checkpoints', max_to_keep=3)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrained_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
