@@ -240,7 +240,7 @@ class Pretrainer():
         Perform a single training step.
         """
         board = batch['boards']
-        piece_seq = batch['piecs']
+        piece_seq = batch['pieces']
         key_sequence = batch['actions']
         input_sequence = key_sequence[:, :-1]
         target_sequence = key_sequence[:, 1:]
@@ -255,7 +255,7 @@ class Pretrainer():
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
 
         # Compute accuracy
-        accuracy = tf.reduce_mean(tf.cast(tf.argmax(logits, axis=-1, output_type=tf.int32) == target_sequence, tf.float32))
+        accuracy = tf.reduce_mean(tf.cast(tf.argmax(logits, axis=-1, output_type=tf.int64) == target_sequence, tf.float32))
 
         return loss, accuracy
 
