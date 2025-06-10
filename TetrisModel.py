@@ -244,7 +244,7 @@ class PolicyModel(keras.Model):
             return output
 
     @tf.function(jit_compile=True)
-    def _generate_next_key(self, ind, piece_dec, key_sequence, log_probs, masks):
+    def _generate_next_key(self, ind, piece_dec, key_sequence, log_probs, masks, greedy=False):
 
         def generate_mask(ind, stacked_key_sequence):
             matching_sequence = tf.reduce_all(stacked_key_sequence[:, None, :ind] == TFConvert.to_sequence[None, :, :ind], axis=-1)[..., None]
@@ -260,10 +260,14 @@ class PolicyModel(keras.Model):
         masked_logits = tf.where(mask,
                                  logits[:, ind - 1, :],
                                  tf.constant(-1e9, dtype=tf.float32))
-
+        
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
-        action = dist.sample()
+        if greedy:
+            action = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        else:
+            action = dist.sample()
+        
         log_prob = dist.log_prob(action)
 
         key_sequence = key_sequence.write(ind, action)
@@ -275,8 +279,9 @@ class PolicyModel(keras.Model):
     @tf.function(jit_compile=True, input_signature=[
         (tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
          tf.TensorSpec(shape=(None, 7), dtype=tf.int64)),
+        tf.TensorSpec(shape=None, dtype=tf.bool)
     ])
-    def predict(self, inputs):
+    def predict(self, inputs, greedy=False):
 
         piece_dec, piece_scores = self.process_obs(inputs, training=False)
 
@@ -288,7 +293,7 @@ class PolicyModel(keras.Model):
         ind = tf.constant(1, dtype=tf.int32)
         ind, key_sequence, log_probs, masks = tf.while_loop(
             lambda i, ks, lp, m: tf.less(i, self._max_len),
-            lambda i, ks, lp, m: self._generate_next_key(i, piece_dec, ks, lp, m),
+            lambda i, ks, lp, m: self._generate_next_key(i, piece_dec, ks, lp, m, greedy),
             [ind, key_sequence, log_probs, masks],
             parallel_iterations=1
         )
@@ -297,8 +302,7 @@ class PolicyModel(keras.Model):
         log_probs = tf.transpose(log_probs.stack(), perm=[1, 0]) # len, batch -> batch, len
         masks = tf.transpose(masks.stack(), perm=[1, 0, 2]) # len, batch, key_dim -> batch, len, key_dim
 
-        return key_sequence, log_probs, masks
-
+        return key_sequence, log_probs, masks, piece_scores
 
 class ValueModel(keras.Model):
     def __init__(self, piece_dim, depth, num_heads, num_layers, dropout_rate, output_dim):

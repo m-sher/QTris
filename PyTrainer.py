@@ -208,12 +208,12 @@ def main(argv):
 
     # Initialize checkpoint manager
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
-    p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './small_checkpoints/policy_checkpoints', max_to_keep=3)
-    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
+    p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './policy_checkpoints', max_to_keep=3)
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
-    v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, './small_checkpoints/value_checkpoints', max_to_keep=3)
-    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, './value_checkpoints', max_to_keep=3)
+    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
     print("Restored checkpoints", flush=True)
 
     p_model.build(input_shape=[(None, 24, 10, 1),
