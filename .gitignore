@@ -10,3 +10,6 @@
 /small_checkpoints
 test.py
 /tetris_expert_dataset
+/policy_checkpoints
+/pretrained_checkpoints
+/value_checkpoints
