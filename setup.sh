@@ -11,7 +11,7 @@ bash ./Anaconda3-2024.10-1-Linux-x86_64.sh
 source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda create -n tetris python=3.11.11 -y
 conda activate tetris
-conda env config vars set TF_FORCE_GPU_ALLOW_GROWTH=true TF_NUM_INTEROP_THREADS=16 TF_NUM_INTRAOP_THREADS=16
+conda env config vars set TF_FORCE_GPU_ALLOW_GROWTH=true TF_NUM_INTEROP_THREADS=32 TF_NUM_INTRAOP_THREADS=32
 git clone https://github.com/m-sher/QTris.git
 git clone https://github.com/m-sher/TFTetrisEnv.git
 cd QTris
