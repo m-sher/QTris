@@ -288,7 +288,7 @@ def main():
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.1
-    batch_size = 512
+    batch_size = 1024
 
     # Initialize model and optimizer
     model = PolicyModel(batch_size=batch_size,
@@ -314,11 +314,13 @@ def main():
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
+    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints', max_to_keep=3)
+    checkpoint.restore(checkpoint_manager.latest_checkpoint)
     checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrained_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
-    pretrainer.train(model, batch_size=batch_size, epochs=15, checkpoint_manager=checkpoint_manager)
+    pretrainer.train(model, batch_size=batch_size, epochs=2, checkpoint_manager=checkpoint_manager)
 
 if __name__ == "__main__":
     main()
