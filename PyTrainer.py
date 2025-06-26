@@ -19,21 +19,23 @@ dropout_rate = 0.1
 max_len = 9
 
 # Environment params
-generations = 10000
+generations = 1000000
 num_envs = 64
 num_collection_steps = 500
 queue_size = 5
-max_holes = 2
-max_height = 10
+max_holes = 5
+max_height = 20
+att_freq = 7
 
 # Training params
 mini_batch_size = 1024
-num_updates = num_envs * num_collection_steps // mini_batch_size
+num_updates = 4 * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.2
+expert_coef = 0.01
 
 target_kl = 0.01
 kl_tolerance = 0.3
@@ -47,9 +49,12 @@ config = {
     'lam': lam,
     'ppo_clip': ppo_clip,
     'value_clip': value_clip,
+    'expert_coef': expert_coef,
     'target_kl': target_kl,
     'kl_tolerance': kl_tolerance,
 }
+
+scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
 @tf.function(jit_compile=True)
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
@@ -80,12 +85,14 @@ def compute_gae_and_returns(values, rewards, dones, gamma, lam):
     return advantages, returns
 
 @tf.function()
-def train_step(p_model, v_model, online_batch, beta, entropy_coef):
+def train_step(p_model, v_model, online_batch, offline_batch, beta, entropy_coef):
     online_board_batch = tf.ensure_shape(online_batch['boards'], (mini_batch_size, 24, 10, 1))
     online_pieces_batch = tf.ensure_shape(online_batch['pieces'], (mini_batch_size, queue_size + 2))
     online_actions_batch = tf.ensure_shape(online_batch['actions'], (mini_batch_size, max_len))
+    
     log_probs_batch = tf.ensure_shape(online_batch['old_log_probs'][:, 1:], (mini_batch_size, max_len - 1))
     mask_batch = tf.ensure_shape(online_batch['masks'], (mini_batch_size, max_len, key_dim))
+    
     advantages_batch = tf.ensure_shape(online_batch['advantages'], (mini_batch_size, 1))
     returns_batch = tf.ensure_shape(online_batch['returns'], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch['old_values'], (mini_batch_size, 1))
@@ -93,37 +100,61 @@ def train_step(p_model, v_model, online_batch, beta, entropy_coef):
     invalid_mask = mask_batch[:, 1:, :] # batch, max_len - 1, key_dim
     pad_mask = tf.cast(online_actions_batch[:, 1:] != Keys.PAD, tf.float32) # batch, max_len - 1
 
-    input_actions_batch = online_actions_batch[:, :-1]
-    target_actions_batch = online_actions_batch[:, 1:]
+    offline_board_batch = offline_batch['boards']
+    offline_pieces_batch = offline_batch['pieces']
+    offline_actions_batch = offline_batch['actions']
+
+    board_batch = tf.concat([
+        online_board_batch,
+        offline_board_batch
+    ], axis=0)
+
+    pieces_batch = tf.concat([
+        online_pieces_batch,
+        offline_pieces_batch
+    ], axis=0)
+
+    actions_batch = tf.concat([
+        online_actions_batch,
+        offline_actions_batch
+    ], axis=0)
+
+    input_actions_batch = actions_batch[:, :-1]
+    online_target_actions = online_actions_batch[:, 1:]
+    offline_target_actions = offline_actions_batch[:, 1:]
 
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model((
-            online_board_batch,
-            online_pieces_batch,
+            board_batch,
+            pieces_batch,
             input_actions_batch
         ), training=True, return_scores=True)
 
-        logits = tf.ensure_shape(logits, (mini_batch_size, max_len - 1, key_dim)) # batch, max_len - 1, num_actions
+        logits = tf.ensure_shape(logits, (2 * mini_batch_size, max_len - 1, key_dim)) # 2 * batch, max_len - 1, num_actions
+        online_logits = logits[:mini_batch_size]
+        offline_logits = logits[mini_batch_size:]
 
         masked_logits = tf.where(invalid_mask,
-                                 logits,
+                                 online_logits,
                                  tf.constant(-1e9, dtype=tf.float32)) # batch, max_len - 1, num_actions
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
     
-        new_log_probs = tf.ensure_shape(dist.log_prob(target_actions_batch), (mini_batch_size, max_len - 1))
+        new_log_probs = tf.ensure_shape(dist.log_prob(online_target_actions), (mini_batch_size, max_len - 1))
         new_log_probs = tf.ensure_shape((new_log_probs * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1))
+        new_log_probs = tf.ensure_shape(tf.reduce_sum(new_log_probs, axis=1), (mini_batch_size, 1))
 
         old_log_probs = tf.ensure_shape((log_probs_batch * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1))
+        old_log_probs = tf.ensure_shape(tf.reduce_sum(old_log_probs, axis=1), (mini_batch_size, 1))
 
         # PPO loss
-        ratio = tf.ensure_shape(tf.exp(new_log_probs - old_log_probs), (mini_batch_size, max_len - 1, 1))
-        clipped_ratio = tf.ensure_shape(tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, max_len - 1, 1))
+        ratio = tf.ensure_shape(tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1))
+        clipped_ratio = tf.ensure_shape(tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, 1))
 
-        surr1 = tf.ensure_shape(ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
-        surr2 = tf.ensure_shape(clipped_ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
+        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
+        surr2 = tf.ensure_shape(clipped_ratio * advantages_batch, (mini_batch_size, 1))
 
-        ppo_loss = -tf.reduce_mean(tf.reduce_sum(tf.minimum(surr1, surr2), axis=1))
+        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
         
         # Compute bonus/penalty
         entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
@@ -132,18 +163,24 @@ def train_step(p_model, v_model, online_batch, beta, entropy_coef):
         
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
+        expert_policy_loss = scc(offline_target_actions, offline_logits)
+
         # Compute total loss
         total_policy_loss = (
             ppo_loss
             - entropy_coef * entropy
             + beta * approx_kl
+            + expert_coef * expert_policy_loss
         )
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32) * pad_mask[..., None])
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+    expert_policy_acc = tf.reduce_mean(
+        tf.cast(tf.argmax(offline_logits, axis=-1) == offline_target_actions, tf.float32)
+    )
 
     with tf.GradientTape() as v_tape:
         values = v_model((online_board_batch, online_pieces_batch), training=True)
@@ -165,14 +202,16 @@ def train_step(p_model, v_model, online_batch, beta, entropy_coef):
     
     return (
         ppo_loss, entropy, approx_kl, clipped_frac, value_loss,
-        online_board_batch, piece_scores
+        expert_policy_loss, expert_policy_acc, online_board_batch[0], piece_scores
     )
 
-def train_on_dataset(p_model, v_model, online_dataset,
+def train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
                      num_updates, beta, entropy_coef):
     for online_batch in online_dataset.take(num_updates):
-        step_out = train_step(p_model, v_model,
-                              online_batch, beta, entropy_coef)
+        offline_batch = next(offline_dataset)
+        step_out = train_step(p_model, v_model, online_batch, 
+                              offline_batch, beta, entropy_coef)
+
     return step_out
 
 def main(argv):
@@ -231,6 +270,7 @@ def main(argv):
     runner = PyTetrisRunner(queue_size=queue_size,
                             max_holes=max_holes,
                             max_height=max_height,
+                            att_freq=att_freq,
                             max_len=max_len,
                             key_dim=key_dim,
                             num_steps=num_collection_steps,
@@ -241,6 +281,17 @@ def main(argv):
 
     print("Initialized runner", flush=True)
     last_time = time.time()
+
+    pretrainer = Pretrainer()
+    offline_dataset = iter(
+        pretrainer._load_dataset(batch_size=None)
+        .repeat()
+        .batch(mini_batch_size,
+               num_parallel_calls=tf.data.AUTOTUNE,
+               deterministic=False,
+               drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
     # Initialize WandB logging
     wandb_run = wandb.init(
@@ -261,14 +312,9 @@ def main(argv):
          all_hole_penalty, all_skyline_penalty, all_bumpy_penalty,
          all_death_penalty, all_dones) = runner.collect_trajectory(render=False)
         
-        supp_rewards = tf.ensure_shape(
-            tf.clip_by_value(all_height_penalty + all_hole_penalty +
-                             all_skyline_penalty + all_bumpy_penalty, -1.0, 1.0),
-            (num_collection_steps, num_envs)
-        )
-
-        all_rewards = tf.ensure_shape((all_attacks + all_clears +
-                                       supp_rewards + all_death_penalty)[..., None],
+        all_rewards = tf.ensure_shape(((2 * all_attacks) ** 2 + all_clears + all_height_penalty +
+                                       all_hole_penalty + all_skyline_penalty + all_bumpy_penalty +
+                                       all_death_penalty)[..., None] * 0.1,
                                       (num_collection_steps, num_envs, 1))
 
         print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
@@ -312,7 +358,7 @@ def main(argv):
         last_time = time.time()
         
         # Train on collected data
-        train_out = train_on_dataset(p_model, v_model, online_dataset,
+        train_out = train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
                                      num_updates, beta, entropy_coef)
         
         # Save checkpoint
@@ -324,8 +370,8 @@ def main(argv):
         
         # Unpack metrics
         (ppo_loss, entropy, approx_kl, clipped_frac, value_loss,
-         boards, scores) = train_out
-        
+         expert_loss, expert_acc, board, scores) = train_out
+
         # Compute more metrics
         avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
@@ -349,6 +395,8 @@ def main(argv):
                    'approx_kl': approx_kl,
                    'clipped_frac': clipped_frac,
                    'value_loss': value_loss,
+                   'expert_loss': expert_loss,
+                   'expert_acc': expert_acc,
                    'avg_probs': avg_probs,
                    'avg_reward': avg_reward,
                    'avg_attacks': avg_attacks,
@@ -362,7 +410,7 @@ def main(argv):
                    'avg_pieces': avg_pieces,
                    'policy_learning_rate': p_optimizer.learning_rate,
                    'value_learning_rate': v_optimizer.learning_rate,
-                   'board': wandb.Image(boards[0, ..., 0]),
+                   'board': wandb.Image(board[..., 0]),
                    'scores': wandb.Image(norm_c_scores)})
         
         # Adjust beta
