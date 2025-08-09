@@ -222,7 +222,7 @@ class Pretrainer():
                         num_parallel_calls=tf.data.AUTOTUNE,
                         deterministic=False)
                    .cache()
-                   .shuffle(2000000))
+                   .shuffle(1000000))
 
         if batch_size:
             dataset = (dataset
@@ -283,7 +283,7 @@ def main():
     # Model params
     piece_dim = 8
     key_dim = 12
-    depth = 32
+    depth = 64
     max_len = 9
     num_heads = 4
     num_layers = 4
@@ -314,13 +314,13 @@ def main():
     # Load checkpoint if it exists
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints', max_to_keep=3)
-    checkpoint.restore(checkpoint_manager.latest_checkpoint)
+    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints', max_to_keep=3)
+    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
     checkpoint_manager = tf.train.CheckpointManager(checkpoint, './pretrained_checkpoints', max_to_keep=3)
     print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
-    pretrainer.train(model, batch_size=batch_size, epochs=2, checkpoint_manager=checkpoint_manager)
+    pretrainer.train(model, batch_size=batch_size, epochs=10, checkpoint_manager=checkpoint_manager)
 
 if __name__ == "__main__":
     main()
