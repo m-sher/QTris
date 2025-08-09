@@ -13,13 +13,13 @@ import time
 num_envs = 1
 piece_dim = 8
 key_dim = 12
-depth = 32
+depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.1
 max_len = 9
 
-num_steps = 100
+num_steps = 500
 queue_size = 5
 max_holes = 10
 max_height = 20
@@ -35,7 +35,7 @@ p_model = PolicyModel(batch_size=num_envs,
                       output_dim=key_dim)
 
 p_checkpoint = tf.train.Checkpoint(model=p_model)
-p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './policy_checkpoints_6', max_to_keep=3)
+p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './policy_checkpoints', max_to_keep=3)
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
 p_model.build(input_shape=[(None, 24, 10, 1),
@@ -47,6 +47,7 @@ p_model.summary()
 py_env = PyTetrisEnv(queue_size=queue_size,
                      max_holes=max_holes,
                      max_height=max_height,
+                     max_steps=num_steps,
                      seed=123,
                      idx=0)
 env = TFPyEnvironment(py_env)
@@ -62,15 +63,35 @@ time_step = env.reset()
 frames = []
 attacks = []
 clears = []
+actions = []
+
+running_attacks = 0
+running_clears = 0
 
 piece_display = np.load('PieceDisplay.npy')
+
+readable_keys = {
+    1: 'h',
+    2: 'l',
+    3: 'r',
+    4: 'L',
+    5: 'R',
+    6: 'c',
+    7: 'a',
+    8: '1',
+    9: 's',
+    10: 'H'
+}
 
 start = time.time()
 for t in range(num_steps):
     board = time_step.observation['board']
     pieces = time_step.observation['pieces']
     attack = time_step.reward['attack']
-    clear = time_step.reward['clear']
+    clear = time_step.reward['clear'] * 2
+    if time_step.is_last():
+        running_attacks = 0
+        running_clears = 0
 
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
@@ -100,17 +121,37 @@ for t in range(num_steps):
     screen.blit(board_surf, (0, 0))
     screen.blit(piece_surf, (250, 0))
     screen.blit(scores_surf, (375, 0))
-    pygame.display.update()
 
-    frames.append(pygame.surfarray.array3d(screen).swapaxes(0, 1))
-    attacks.append(attack.numpy()[0])
-    clears.append(clear.numpy()[0])
+    running_attacks += attack.numpy()[0]
+    running_clears += clear.numpy()[0]
+
+    attacks.append(running_attacks)
+    clears.append(running_clears)
 
     time_step = env.step(key_sequence)
 
-print(f"Time taken: {time.time() - start:.2f} seconds")
+    readable_action = ''.join([readable_keys.get(k, '')
+                               for k in key_sequence.numpy()[0]])
 
-# imageio.mimsave('demo.gif', frames, fps=3)
+    actions.append(readable_action)
+
+    attack_text = font.render(f"Attack: {attacks[-1]}", True, (255, 255, 255))
+    clear_text = font.render(f"Clear: {int(clears[-1])}", True, (255, 255, 255))
+    action_text = font.render(f"Action: {actions[-1]}", True, (255, 255, 255))
+
+    screen.blit(attack_text, (10, 35))
+    screen.blit(clear_text, (10, 70))
+    screen.blit(action_text, (10, 105))
+
+    pygame.display.update()
+
+    frames.append(pygame.surfarray.array3d(screen).swapaxes(0, 1))
+
+time_taken = time.time() - start
+
+print(f"Time taken: {time_taken:3.2f} seconds")
+print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
+imageio.mimsave('Demo.gif', frames, fps=5)
 
 slider = Slider(screen, x=10, y=5, width=600, height=10, min=0, max=num_steps - 1, step=1, colour=(125, 125, 125), handleColour=(50, 50, 50))
 
@@ -130,10 +171,12 @@ while True:
     pygame_widgets.update(events)
     
     attack_text = font.render(f"Attack: {attacks[ind]}", True, (255, 255, 255))
-    clear_text = font.render(f"Clear: {int(clears[ind] * 5)}", True, (255, 255, 255))
-    
+    clear_text = font.render(f"Clear: {int(clears[ind])}", True, (255, 255, 255))
+    action_text = font.render(f"Action: {actions[ind]}", True, (255, 255, 255))
+
     # Position text below the slider
     screen.blit(attack_text, (10, 35))
     screen.blit(clear_text, (10, 70))
+    screen.blit(action_text, (10, 105))
 
     pygame.display.update()
