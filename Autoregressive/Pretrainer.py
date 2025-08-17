@@ -228,8 +228,8 @@ class Pretrainer:
         )
 
         # Save dataset and ensure it can be loaded
-        dataset.save("tetris_expert_dataset")
-        dataset = tf.data.Dataset.load("tetris_expert_dataset")
+        dataset.save("../tetris_expert_dataset")
+        dataset = tf.data.Dataset.load("../tetris_expert_dataset")
 
         return dataset
 
@@ -245,13 +245,13 @@ class Pretrainer:
         """
 
         # Check if dataset exists
-        if not os.path.exists("tetris_expert_dataset"):
+        if not os.path.exists("../tetris_expert_dataset"):
             print("Dataset not found. Generating dataset...", flush=True)
             # Generate dataset
             dataset = self._generate_dataset()
         else:
             try:
-                dataset = tf.data.Dataset.load("tetris_expert_dataset")
+                dataset = tf.data.Dataset.load("../tetris_expert_dataset")
                 print("Dataset loaded successfully.", flush=True)
             except Exception:
                 print("Dataset loading failed. Generating dataset...", flush=True)
