@@ -1,0 +1,213 @@
+import tensorflow as tf
+from TetrisModel import PolicyModel
+from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
+from tf_agents.environments.tf_py_environment import TFPyEnvironment
+import pygame
+import pygame_widgets
+from pygame_widgets.slider import Slider
+from pygame_widgets.button import Button
+import imageio
+import numpy as np
+import time
+
+# Model params
+num_envs = 1
+piece_dim = 8
+key_dim = 12
+depth = 64
+num_heads = 4
+num_layers = 4
+dropout_rate = 0.1
+max_len = 9
+
+num_steps = 500
+queue_size = 5
+max_holes = 100
+max_height = 20
+
+p_model = PolicyModel(batch_size=num_envs,
+                      piece_dim=piece_dim,
+                      key_dim=key_dim,
+                      depth=depth,
+                      max_len=max_len,
+                      num_heads=num_heads,
+                      num_layers=num_layers,
+                      dropout_rate=dropout_rate,
+                      output_dim=key_dim)
+
+p_checkpoint = tf.train.Checkpoint(model=p_model)
+p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './policy_checkpoints', max_to_keep=3)
+p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+
+p_model.build(input_shape=[(None, 24, 10, 1),
+                           (None, queue_size + 2),
+                           (None, max_len)])
+
+p_model.summary()
+
+py_env = PyTetrisEnv(queue_size=queue_size,
+                     max_holes=max_holes,
+                     max_height=max_height,
+                     max_steps=num_steps,
+                     garbage_chance=0.1,
+                     garbage_min=1,
+                     garbage_max=4,
+                     seed=0,
+                     idx=0)
+env = TFPyEnvironment(py_env)
+
+# Initialize pygame
+pygame.init()
+screen = pygame.display.set_mode((625, 600))
+pygame.display.set_caption("Tetris")
+font = pygame.font.Font(None, 30)
+
+time_step = env.reset()
+
+frames = []
+attacks = []
+apps = []
+clears = []
+actions = []
+
+death = 0
+running_attacks = 0
+running_clears = 0
+
+piece_display = np.load('../PieceDisplay.npy')
+
+readable_keys = {
+    1: 'h',
+    2: 'l',
+    3: 'r',
+    4: 'L',
+    5: 'R',
+    6: 'c',
+    7: 'a',
+    8: '1',
+    9: 's',
+    10: 'H'
+}
+
+start = time.time()
+for t in range(num_steps):
+    board = time_step.observation['board']
+    pieces = time_step.observation['pieces']
+    attack = time_step.reward['attack']
+    clear = time_step.reward['clear'] * 2
+    if time_step.is_last():
+        death = t
+        running_attacks = 0
+        running_clears = 0
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+
+    key_sequence, log_probs, masks, scores = p_model.predict((board, pieces), greedy=True)
+
+    board_scores = tf.reshape(tf.reduce_sum(scores, axis=[0, 2, 3])[0], (12, 5))
+    board_scores = (board_scores - tf.reduce_min(board_scores)) / (tf.reduce_max(board_scores) - tf.reduce_min(board_scores))
+
+    piece_sidebar = piece_display[pieces[0].numpy()].reshape((28, 5))
+
+    screen.fill((255, 255, 255))
+
+    board_surf = pygame.Surface((10, 24))
+    piece_surf = pygame.Surface((5, 28))
+    scores_surf = pygame.Surface((5, 12))
+
+    pygame.surfarray.blit_array(board_surf, board[0, ..., 0].numpy().T * 255)
+    pygame.surfarray.blit_array(piece_surf, piece_sidebar.T * 255)
+    pygame.surfarray.blit_array(scores_surf, board_scores.numpy().T * 255)
+
+    board_surf = pygame.transform.scale(board_surf, (250, 600))
+    piece_surf = pygame.transform.scale(piece_surf, (125, 600))
+    scores_surf = pygame.transform.scale(scores_surf, (250, 600))
+
+    screen.blit(board_surf, (0, 0))
+    screen.blit(piece_surf, (250, 0))
+    screen.blit(scores_surf, (375, 0))
+
+    running_attacks += attack.numpy()[0]
+    running_clears += clear.numpy()[0]
+
+    attacks.append(running_attacks)
+    apps.append(running_attacks / (t - death + 1))
+    clears.append(running_clears)
+
+    time_step = env.step(key_sequence)
+
+    readable_action = ''.join([readable_keys.get(k, '')
+                               for k in key_sequence.numpy()[0]])
+
+    actions.append(readable_action)
+
+    attack_text = font.render(f"Attack: {int(attacks[-1])}", True, (255, 255, 255))
+    app_text = font.render(f"APP: {apps[-1]:0.2f}", True, (255, 255, 255))
+    clear_text = font.render(f"Clear: {int(clears[-1])}", True, (255, 255, 255))
+    action_text = font.render(f"Action: {actions[-1]}", True, (255, 255, 255))
+
+    screen.blit(attack_text, (10, 35))
+    screen.blit(app_text, (10, 70))
+    screen.blit(clear_text, (10, 105))
+    screen.blit(action_text, (10, 140))
+
+    pygame.display.update()
+
+    frames.append(pygame.surfarray.array3d(screen).swapaxes(0, 1))
+
+time_taken = time.time() - start
+
+print(f"Time taken: {time_taken:3.2f} seconds")
+print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
+if input("Save?").lower() == 'y':
+    imageio.mimsave('Demo.gif', frames, fps=5)
+
+slider = Slider(screen, x=10, y=5, width=540, height=10, min=0, max=num_steps - 1, step=1, colour=(125, 125, 125), handleColour=(50, 50, 50))
+
+back_btn = Button(
+    screen,
+    560, 0, 28, 20,
+    text='<',
+    fontSize=16,
+    margin=0,
+    onClick=lambda: slider.setValue(max(0, slider.getValue() - 1))
+)
+
+fwd_btn = Button(
+    screen,
+    592, 0, 28, 20,
+    text='>',
+    fontSize=16,
+    margin=0,
+    onClick=lambda: slider.setValue(min(num_steps - 1, slider.getValue() + 1))
+)
+
+while True:
+    events = pygame.event.get()
+    for event in events:
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            exit()
+
+    screen.fill((255, 255, 255))
+
+    ind = slider.getValue()
+    frame = frames[ind]
+
+    pygame.surfarray.blit_array(screen, frame.swapaxes(0, 1))
+    pygame_widgets.update(events)
+    
+    attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))
+    app_text = font.render(f"APP: {apps[ind]:0.2f}", True, (255, 255, 255))
+    clear_text = font.render(f"Clear: {int(clears[ind])}", True, (255, 255, 255))
+    action_text = font.render(f"Action: {actions[ind]}", True, (255, 255, 255))
+
+    # Position text below the slider
+    screen.blit(attack_text, (10, 35))
+    screen.blit(app_text, (10, 70))
+    screen.blit(clear_text, (10, 105))
+    screen.blit(action_text, (10, 140))
+
+    pygame.display.update()
