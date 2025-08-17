@@ -228,8 +228,8 @@ class Pretrainer:
         )
 
         # Save dataset and ensure it can be loaded
-        dataset.save("tetris_expert_dataset")
-        dataset = tf.data.Dataset.load("tetris_expert_dataset")
+        dataset.save("../tetris_expert_dataset")
+        dataset = tf.data.Dataset.load("../tetris_expert_dataset")
 
         return dataset
 
