@@ -1,7 +1,5 @@
 /.ipynb_checkpoints
-/__pycache__
+**/__pycache__
 /wandb
 /tetris_expert_dataset
-/**checkpoint**
-test.py
-demo.gif
+**/**checkpoint**
