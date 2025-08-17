@@ -25,35 +25,39 @@ queue_size = 5
 max_holes = 100
 max_height = 20
 
-p_model = PolicyModel(batch_size=num_envs,
-                      piece_dim=piece_dim,
-                      key_dim=key_dim,
-                      depth=depth,
-                      max_len=max_len,
-                      num_heads=num_heads,
-                      num_layers=num_layers,
-                      dropout_rate=dropout_rate,
-                      output_dim=key_dim)
+p_model = PolicyModel(
+    batch_size=num_envs,
+    piece_dim=piece_dim,
+    key_dim=key_dim,
+    depth=depth,
+    max_len=max_len,
+    num_heads=num_heads,
+    num_layers=num_layers,
+    dropout_rate=dropout_rate,
+    output_dim=key_dim,
+)
 
 p_checkpoint = tf.train.Checkpoint(model=p_model)
-p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, './policy_checkpoints', max_to_keep=3)
+p_checkpoint_manager = tf.train.CheckpointManager(
+    p_checkpoint, "./policy_checkpoints", max_to_keep=3
+)
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
-p_model.build(input_shape=[(None, 24, 10, 1),
-                           (None, queue_size + 2),
-                           (None, max_len)])
+p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, max_len)])
 
 p_model.summary()
 
-py_env = PyTetrisEnv(queue_size=queue_size,
-                     max_holes=max_holes,
-                     max_height=max_height,
-                     max_steps=num_steps,
-                     garbage_chance=0.1,
-                     garbage_min=1,
-                     garbage_max=4,
-                     seed=0,
-                     idx=0)
+py_env = PyTetrisEnv(
+    queue_size=queue_size,
+    max_holes=max_holes,
+    max_height=max_height,
+    max_steps=num_steps,
+    garbage_chance=0.1,
+    garbage_min=1,
+    garbage_max=4,
+    seed=0,
+    idx=0,
+)
 env = TFPyEnvironment(py_env)
 
 # Initialize pygame
@@ -74,27 +78,27 @@ death = 0
 running_attacks = 0
 running_clears = 0
 
-piece_display = np.load('../PieceDisplay.npy')
+piece_display = np.load("../PieceDisplay.npy")
 
 readable_keys = {
-    1: 'h',
-    2: 'l',
-    3: 'r',
-    4: 'L',
-    5: 'R',
-    6: 'c',
-    7: 'a',
-    8: '1',
-    9: 's',
-    10: 'H'
+    1: "h",
+    2: "l",
+    3: "r",
+    4: "L",
+    5: "R",
+    6: "c",
+    7: "a",
+    8: "1",
+    9: "s",
+    10: "H",
 }
 
 start = time.time()
 for t in range(num_steps):
-    board = time_step.observation['board']
-    pieces = time_step.observation['pieces']
-    attack = time_step.reward['attack']
-    clear = time_step.reward['clear'] * 2
+    board = time_step.observation["board"]
+    pieces = time_step.observation["pieces"]
+    attack = time_step.reward["attack"]
+    clear = time_step.reward["clear"] * 2
     if time_step.is_last():
         death = t
         running_attacks = 0
@@ -104,10 +108,14 @@ for t in range(num_steps):
         if event.type == pygame.QUIT:
             pygame.quit()
 
-    key_sequence, log_probs, masks, scores = p_model.predict((board, pieces), greedy=True)
+    key_sequence, log_probs, masks, scores = p_model.predict(
+        (board, pieces), greedy=True
+    )
 
     board_scores = tf.reshape(tf.reduce_sum(scores, axis=[0, 2, 3])[0], (12, 5))
-    board_scores = (board_scores - tf.reduce_min(board_scores)) / (tf.reduce_max(board_scores) - tf.reduce_min(board_scores))
+    board_scores = (board_scores - tf.reduce_min(board_scores)) / (
+        tf.reduce_max(board_scores) - tf.reduce_min(board_scores)
+    )
 
     piece_sidebar = piece_display[pieces[0].numpy()].reshape((28, 5))
 
@@ -138,8 +146,9 @@ for t in range(num_steps):
 
     time_step = env.step(key_sequence)
 
-    readable_action = ''.join([readable_keys.get(k, '')
-                               for k in key_sequence.numpy()[0]])
+    readable_action = "".join(
+        [readable_keys.get(k, "") for k in key_sequence.numpy()[0]]
+    )
 
     actions.append(readable_action)
 
@@ -161,27 +170,44 @@ time_taken = time.time() - start
 
 print(f"Time taken: {time_taken:3.2f} seconds")
 print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
-if input("Save?").lower() == 'y':
-    imageio.mimsave('Demo.gif', frames, fps=5)
+if input("Save?").lower() == "y":
+    imageio.mimsave("Demo.gif", frames, fps=5)
 
-slider = Slider(screen, x=10, y=5, width=540, height=10, min=0, max=num_steps - 1, step=1, colour=(125, 125, 125), handleColour=(50, 50, 50))
+slider = Slider(
+    screen,
+    x=10,
+    y=5,
+    width=540,
+    height=10,
+    min=0,
+    max=num_steps - 1,
+    step=1,
+    colour=(125, 125, 125),
+    handleColour=(50, 50, 50),
+)
 
 back_btn = Button(
     screen,
-    560, 0, 28, 20,
-    text='<',
+    560,
+    0,
+    28,
+    20,
+    text="<",
     fontSize=16,
     margin=0,
-    onClick=lambda: slider.setValue(max(0, slider.getValue() - 1))
+    onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
 )
 
 fwd_btn = Button(
     screen,
-    592, 0, 28, 20,
-    text='>',
+    592,
+    0,
+    28,
+    20,
+    text=">",
     fontSize=16,
     margin=0,
-    onClick=lambda: slider.setValue(min(num_steps - 1, slider.getValue() + 1))
+    onClick=lambda: slider.setValue(min(num_steps - 1, slider.getValue() + 1)),
 )
 
 while True:
@@ -198,7 +224,7 @@ while True:
 
     pygame.surfarray.blit_array(screen, frame.swapaxes(0, 1))
     pygame_widgets.update(events)
-    
+
     attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))
     app_text = font.render(f"APP: {apps[ind]:0.2f}", True, (255, 255, 255))
     clear_text = font.render(f"Clear: {int(clears[ind])}", True, (255, 255, 255))
