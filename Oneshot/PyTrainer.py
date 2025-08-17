@@ -1,5 +1,4 @@
 from Runner import PyTetrisRunner
-from TetrisEnvs.PyTetrisEnv.Moves import Keys
 from TetrisModel import TetrisModel
 from Pretrainer import Pretrainer
 import tensorflow as tf
@@ -41,26 +40,27 @@ expert_coef = 1.0
 target_kl = 0.04
 
 config = {
-    'num_envs': num_envs,
-    'num_collection_steps': num_collection_steps,
-    'mini_batch_size': mini_batch_size,
-    'num_updates': num_updates,
-    'gamma': gamma,
-    'lam': lam,
-    'ppo_clip': ppo_clip,
-    'value_clip': value_clip,
-    'entropy_coef': entropy_coef,
-    'expert_coef': expert_coef,
-    'target_kl': target_kl,
+    "num_envs": num_envs,
+    "num_collection_steps": num_collection_steps,
+    "mini_batch_size": mini_batch_size,
+    "num_updates": num_updates,
+    "gamma": gamma,
+    "lam": lam,
+    "ppo_clip": ppo_clip,
+    "value_clip": value_clip,
+    "entropy_coef": entropy_coef,
+    "expert_coef": expert_coef,
+    "target_kl": target_kl,
 }
 
 scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
+
 @tf.function(jit_compile=True)
 def compute_gae_and_returns(values, rewards, dones, gamma, lam):
-
-    advantages = tf.TensorArray(dtype=tf.float32, size=num_collection_steps,
-                                element_shape=(num_envs, 1))
+    advantages = tf.TensorArray(
+        dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
+    )
 
     last_adv = tf.zeros(advantages.element_shape, dtype=tf.float32)
     last_val = values[-1]
@@ -72,77 +72,86 @@ def compute_gae_and_returns(values, rewards, dones, gamma, lam):
         advantages = advantages.write(t, last_adv)
         last_val = values[t]
 
-    advantages = tf.ensure_shape(advantages.stack(), (num_collection_steps, num_envs, 1))
+    advantages = tf.ensure_shape(
+        advantages.stack(), (num_collection_steps, num_envs, 1)
+    )
 
     returns = tf.ensure_shape(advantages + values, (num_collection_steps, num_envs, 1))
 
     return advantages, returns
 
+
 @tf.function()
 def train_step(p_model, v_model, online_batch, offline_batch):
-    online_board_batch = tf.ensure_shape(online_batch['boards'], (mini_batch_size, 24, 10, 1))
-    online_pieces_batch = tf.ensure_shape(online_batch['pieces'], (mini_batch_size, queue_size + 2))
-    online_actions_batch = tf.ensure_shape(online_batch['actions'], (mini_batch_size,))
-    
-    old_log_probs = tf.ensure_shape(online_batch['old_log_probs'][..., None], (mini_batch_size, 1))
-    
-    advantages_batch = tf.ensure_shape(online_batch['advantages'], (mini_batch_size, 1))
-    returns_batch = tf.ensure_shape(online_batch['returns'], (mini_batch_size, 1))
-    old_values_batch = tf.ensure_shape(online_batch['old_values'], (mini_batch_size, 1))
+    online_board_batch = tf.ensure_shape(
+        online_batch["boards"], (mini_batch_size, 24, 10, 1)
+    )
+    online_pieces_batch = tf.ensure_shape(
+        online_batch["pieces"], (mini_batch_size, queue_size + 2)
+    )
+    online_actions_batch = tf.ensure_shape(online_batch["actions"], (mini_batch_size,))
 
-    offline_board_batch = offline_batch['boards']
-    offline_pieces_batch = offline_batch['pieces']
-    offline_actions_batch = offline_batch['actions']
+    old_log_probs = tf.ensure_shape(
+        online_batch["old_log_probs"][..., None], (mini_batch_size, 1)
+    )
 
-    board_batch = tf.concat([
-        online_board_batch,
-        offline_board_batch
-    ], axis=0)
+    advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
+    old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
-    pieces_batch = tf.concat([
-        online_pieces_batch,
-        offline_pieces_batch
-    ], axis=0)
+    offline_board_batch = offline_batch["boards"]
+    offline_pieces_batch = offline_batch["pieces"]
+    offline_actions_batch = offline_batch["actions"]
 
-    advantages_batch = ((advantages_batch - tf.reduce_mean(advantages_batch)) /
-                        (tf.math.reduce_std(advantages_batch) + 1e-8))
+    board_batch = tf.concat([online_board_batch, offline_board_batch], axis=0)
+
+    pieces_batch = tf.concat([online_pieces_batch, offline_pieces_batch], axis=0)
+
+    advantages_batch = (advantages_batch - tf.reduce_mean(advantages_batch)) / (
+        tf.math.reduce_std(advantages_batch) + 1e-8
+    )
 
     with tf.GradientTape() as p_tape:
-        logits, piece_scores = p_model((
-            board_batch,
-            pieces_batch
-        ), training=True, return_scores=True)
+        logits, piece_scores = p_model(
+            (board_batch, pieces_batch), training=True, return_scores=True
+        )
 
-        logits = tf.ensure_shape(logits, (2 * mini_batch_size, action_dim)) # 2 * batch, action_dim
+        logits = tf.ensure_shape(
+            logits, (2 * mini_batch_size, action_dim)
+        )  # 2 * batch, action_dim
         online_logits = logits[:mini_batch_size]
         offline_logits = logits[mini_batch_size:]
 
         dist = distributions.Categorical(logits=online_logits, dtype=tf.int64)
-    
-        new_log_probs = tf.ensure_shape(dist.log_prob(online_actions_batch)[..., None], (mini_batch_size, 1))
 
-        # PPO loss        
-        ratio = tf.ensure_shape(tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1))
-        clipped_ratio = tf.ensure_shape(tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, 1))
+        new_log_probs = tf.ensure_shape(
+            dist.log_prob(online_actions_batch)[..., None], (mini_batch_size, 1)
+        )
+
+        # PPO loss
+        ratio = tf.ensure_shape(
+            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
+        )
+        clipped_ratio = tf.ensure_shape(
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, 1)
+        )
 
         surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
         surr2 = tf.ensure_shape(clipped_ratio * advantages_batch, (mini_batch_size, 1))
 
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
-        
+
         # Compute bonus/penalty
         entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size,))
         entropy = tf.reduce_mean(entropy)
-        
+
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         expert_policy_loss = scc(offline_actions_batch, offline_logits)
 
         # Compute total loss
         total_policy_loss = (
-            ppo_loss
-            - entropy_coef * entropy
-            + expert_coef * expert_policy_loss
+            ppo_loss - entropy_coef * entropy + expert_coef * expert_policy_loss
         )
 
     # Apply policy gradients
@@ -164,50 +173,60 @@ def train_step(p_model, v_model, online_batch, offline_batch):
             values - old_values_batch, -value_clip, value_clip
         )
         clipped_value_error = clipped_values - returns_batch
-        value_loss = tf.reduce_mean(tf.maximum(
-            tf.square(value_error),
-            tf.square(clipped_value_error)
-        ))
-    
+        value_loss = tf.reduce_mean(
+            tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
+        )
+
     # Apply value gradients
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
-    
+
     return (
-        ppo_loss, entropy, approx_kl, clipped_frac, avg_probs, value_loss,
-        expert_policy_loss, expert_policy_acc, online_board_batch[0], piece_scores
+        ppo_loss,
+        entropy,
+        approx_kl,
+        clipped_frac,
+        avg_probs,
+        value_loss,
+        expert_policy_loss,
+        expert_policy_acc,
+        online_board_batch[0],
+        piece_scores,
     )
 
-def train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
-                     num_epochs):
+
+def train_on_dataset(p_model, v_model, online_dataset, offline_dataset, num_epochs):
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
             offline_batch = next(offline_dataset)
-            step_out = train_step(p_model, v_model, online_batch, 
-                                  offline_batch)
+            step_out = train_step(p_model, v_model, online_batch, offline_batch)
 
         approx_kl = step_out[2]
         if approx_kl >= 1.5 * target_kl:
-           break
-    
+            break
+
     return step_out
 
-def main(argv):
-   
-    # Initialize model and optimizer
-    p_model = TetrisModel(piece_dim=piece_dim,
-                          depth=depth,
-                          num_heads=num_heads,
-                          num_layers=num_layers,
-                          dropout_rate=dropout_rate,
-                          output_dim=action_dim)
 
-    v_model = TetrisModel(piece_dim=piece_dim,
-                          depth=depth,
-                          num_heads=num_heads,
-                          num_layers=num_layers,
-                          dropout_rate=dropout_rate,
-                          output_dim=1)
+def main(argv):
+    # Initialize model and optimizer
+    p_model = TetrisModel(
+        piece_dim=piece_dim,
+        depth=depth,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        dropout_rate=dropout_rate,
+        output_dim=action_dim,
+    )
+
+    v_model = TetrisModel(
+        piece_dim=piece_dim,
+        depth=depth,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        dropout_rate=dropout_rate,
+        output_dim=1,
+    )
 
     print("Initialized models", flush=True)
 
@@ -219,57 +238,72 @@ def main(argv):
 
     # Initialize checkpoint manager
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
-    p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, '../checkpoints/pretrained_checkpoints', max_to_keep=3)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "../checkpoints/pretrained_checkpoints", max_to_keep=3
+    )
     p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
-    p_checkpoint_manager = tf.train.CheckpointManager(p_checkpoint, '../checkpoints/policy_checkpoints', max_to_keep=3)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "../checkpoints/policy_checkpoints", max_to_keep=3
+    )
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
-    v_checkpoint_manager = tf.train.CheckpointManager(v_checkpoint, '../checkpoints/value_checkpoints', max_to_keep=3)
+    v_checkpoint_manager = tf.train.CheckpointManager(
+        v_checkpoint, "../checkpoints/value_checkpoints", max_to_keep=3
+    )
     # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
-    print(f"Restored checkpoints | Prev iterations: {p_optimizer.iterations}", flush=True)
+    print(
+        f"Restored checkpoints | Prev iterations: {p_optimizer.iterations}", flush=True
+    )
 
     p_optimizer.iterations.assign(0)
     v_optimizer.iterations.assign(0)
 
-    print(f"New iterations: {p_optimizer.iterations} | {p_optimizer._iterations}", flush=True)
+    print(
+        f"New iterations: {p_optimizer.iterations} | {p_optimizer._iterations}",
+        flush=True,
+    )
 
-    p_model.build(input_shape=[(None, 24, 10, 1),
-                               (None, queue_size + 2)])
+    p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2)])
 
-    v_model.build(input_shape=[(None, 24, 10, 1),
-                               (None, queue_size + 2)])
+    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2)])
     print("Built models", flush=True)
 
     p_model.summary()
     v_model.summary()
 
     # Initialize runner
-    runner = PyTetrisRunner(queue_size=queue_size,
-                            max_holes=max_holes,
-                            max_height=max_height,
-                            max_steps=max_steps,
-                            num_steps=num_collection_steps,
-                            num_envs=num_envs,
-                            p_model=p_model,
-                            v_model=v_model,
-                            seed=None)
+    runner = PyTetrisRunner(
+        queue_size=queue_size,
+        max_holes=max_holes,
+        max_height=max_height,
+        max_steps=max_steps,
+        num_steps=num_collection_steps,
+        num_envs=num_envs,
+        p_model=p_model,
+        v_model=v_model,
+        seed=None,
+    )
 
     print("Initialized runner", flush=True)
     last_time = time.time()
 
     pretrainer = Pretrainer()
-    pretrain_dataset = (pretrainer._load_dataset(batch_size=None)
-                        .repeat()
-                        .batch(mini_batch_size,
-                               num_parallel_calls=tf.data.AUTOTUNE,
-                               deterministic=False,
-                               drop_remainder=True)
-                        .prefetch(tf.data.AUTOTUNE))
+    pretrain_dataset = (
+        pretrainer._load_dataset(batch_size=None)
+        .repeat()
+        .batch(
+            mini_batch_size,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False,
+            drop_remainder=True,
+        )
+        .prefetch(tf.data.AUTOTUNE)
+    )
     offline_dataset = iter(pretrain_dataset)
 
     # Initialize WandB logging
     wandb_run = wandb.init(
-        project='Tetris',
+        project="Tetris",
         # id='iauixt1w',
         # resume='must',
         config=config,
@@ -280,26 +314,47 @@ def main(argv):
         # Collect trajectory
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
-        
-        (all_boards, all_pieces, all_actions, all_log_probs,
-         all_values, all_attacks, all_clears, all_height_penalty,
-         all_hole_penalty, all_skyline_penalty, all_bumpy_penalty,
-         all_death_penalty, all_dones) = runner.collect_trajectory(render=False)
-        
-        all_rewards = (all_attacks + all_clears + all_death_penalty +
-                       all_height_penalty + all_hole_penalty +
-                       all_skyline_penalty + all_bumpy_penalty)
 
-        all_rewards = tf.ensure_shape(all_rewards[..., None], (num_collection_steps, num_envs, 1))
+        (
+            all_boards,
+            all_pieces,
+            all_actions,
+            all_log_probs,
+            all_values,
+            all_attacks,
+            all_clears,
+            all_height_penalty,
+            all_hole_penalty,
+            all_skyline_penalty,
+            all_bumpy_penalty,
+            all_death_penalty,
+            all_dones,
+        ) = runner.collect_trajectory(render=False)
 
-        print(f"{time.time() - last_time:2.2f} | Collected. Creating dataset...", flush=True)
+        all_rewards = (
+            all_attacks
+            + all_clears
+            + all_death_penalty
+            + all_height_penalty
+            + all_hole_penalty
+            + all_skyline_penalty
+            + all_bumpy_penalty
+        )
+
+        all_rewards = tf.ensure_shape(
+            all_rewards[..., None], (num_collection_steps, num_envs, 1)
+        )
+
+        print(
+            f"{time.time() - last_time:2.2f} | Collected. Creating dataset...",
+            flush=True,
+        )
         last_time = time.time()
         # Compute advantages and returns
-        all_advantages, all_returns = compute_gae_and_returns(all_values,
-                                                              all_rewards,
-                                                              all_dones,
-                                                              gamma, lam)
-        
+        all_advantages, all_returns = compute_gae_and_returns(
+            all_values, all_rewards, all_dones, gamma, lam
+        )
+
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
@@ -308,42 +363,65 @@ def main(argv):
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))
         values_flat = tf.reshape(all_values, (-1, 1))
-        
+
         # Create TF dataset from data
         online_dataset = (
-            tf.data.Dataset.from_tensor_slices({'boards': boards_flat,
-                                                'pieces': pieces_flat,
-                                                'actions': actions_flat,
-                                                'old_log_probs': log_probs_flat,
-                                                'advantages': advantages_flat,
-                                                'returns': returns_flat,
-                                                'old_values': values_flat})
+            tf.data.Dataset.from_tensor_slices(
+                {
+                    "boards": boards_flat,
+                    "pieces": pieces_flat,
+                    "actions": actions_flat,
+                    "old_log_probs": log_probs_flat,
+                    "advantages": advantages_flat,
+                    "returns": returns_flat,
+                    "old_values": values_flat,
+                }
+            )
             .cache()
             .shuffle(buffer_size=boards_flat.shape[0])
-            .batch(mini_batch_size,
-                   num_parallel_calls=tf.data.AUTOTUNE,
-                   deterministic=False,
-                   drop_remainder=True)
+            .batch(
+                mini_batch_size,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+                drop_remainder=True,
+            )
             .prefetch(tf.data.AUTOTUNE)
         )
-        
-        print(f"{time.time() - last_time:2.2f} | Dataset made. Training on dataset...", flush=True)
+
+        print(
+            f"{time.time() - last_time:2.2f} | Dataset made. Training on dataset...",
+            flush=True,
+        )
         last_time = time.time()
-        
+
         # Train on collected data
-        train_out = train_on_dataset(p_model, v_model, online_dataset, offline_dataset,
-                                     num_epochs)
-        
+        train_out = train_on_dataset(
+            p_model, v_model, online_dataset, offline_dataset, num_epochs
+        )
+
         # Save checkpoint
         p_checkpoint_manager.save()
         v_checkpoint_manager.save()
 
-        print(f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...", flush=True)
+        print(
+            f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...",
+            flush=True,
+        )
         last_time = time.time()
-        
+
         # Unpack metrics
-        (ppo_loss, entropy, approx_kl, clipped_frac, avg_probs,
-         value_loss, expert_loss, expert_acc, board, scores) = train_out
+        (
+            ppo_loss,
+            entropy,
+            approx_kl,
+            clipped_frac,
+            avg_probs,
+            value_loss,
+            expert_loss,
+            expert_acc,
+            board,
+            scores,
+        ) = train_out
 
         # Compute more metrics
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
@@ -355,39 +433,51 @@ def main(argv):
         avg_bumpy_penalty = tf.reduce_mean(tf.reduce_sum(all_bumpy_penalty, axis=0))
         avg_death_penalty = tf.reduce_mean(tf.reduce_sum(all_death_penalty, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
-        avg_pieces = tf.reduce_mean(num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1))
-        
+        avg_pieces = tf.reduce_mean(
+            num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
+        )
+
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
-        norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (tf.reduce_max(c_scores) - tf.reduce_min(c_scores))
-        
-        wandb.log({'ppo_loss': ppo_loss,
-                   'entropy': entropy,
-                   'approx_kl': approx_kl,
-                   'clipped_frac': clipped_frac,
-                   'value_loss': value_loss,
-                   'expert_loss': expert_loss,
-                   'expert_acc': expert_acc,
-                   'avg_probs': avg_probs,
-                   'avg_reward': avg_reward,
-                   'avg_attacks': avg_attacks,
-                   'avg_clears': avg_clears,
-                   'avg_height_penalty': avg_height_penalty,
-                   'avg_hole_penalty': avg_hole_penalty,
-                   'avg_skyline_penalty': avg_skyline_penalty,
-                   'avg_bumpy_penalty': avg_bumpy_penalty,
-                   'avg_death_penalty': avg_death_penalty,
-                   'avg_deaths': avg_deaths,
-                   'avg_pieces': avg_pieces,
-                   'policy_learning_rate': p_optimizer.learning_rate,
-                   'value_learning_rate': v_optimizer.learning_rate,
-                   'board': wandb.Image(board[..., 0]),
-                   'scores': wandb.Image(norm_c_scores)})
+        norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
+            tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
+        )
 
-        print(f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}", flush=True)
+        wandb.log(
+            {
+                "ppo_loss": ppo_loss,
+                "entropy": entropy,
+                "approx_kl": approx_kl,
+                "clipped_frac": clipped_frac,
+                "value_loss": value_loss,
+                "expert_loss": expert_loss,
+                "expert_acc": expert_acc,
+                "avg_probs": avg_probs,
+                "avg_reward": avg_reward,
+                "avg_attacks": avg_attacks,
+                "avg_clears": avg_clears,
+                "avg_height_penalty": avg_height_penalty,
+                "avg_hole_penalty": avg_hole_penalty,
+                "avg_skyline_penalty": avg_skyline_penalty,
+                "avg_bumpy_penalty": avg_bumpy_penalty,
+                "avg_death_penalty": avg_death_penalty,
+                "avg_deaths": avg_deaths,
+                "avg_pieces": avg_pieces,
+                "policy_learning_rate": p_optimizer.learning_rate,
+                "value_learning_rate": v_optimizer.learning_rate,
+                "board": wandb.Image(board[..., 0]),
+                "scores": wandb.Image(norm_c_scores),
+            }
+        )
+
+        print(
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
+            flush=True,
+        )
         last_time = time.time()
-    
-    runner.env.close()
-    # wandb_run.finish()
 
-if __name__ == '__main__':
+    runner.env.close()
+    wandb_run.finish()
+
+
+if __name__ == "__main__":
     tf_agents.system.multiprocessing.handle_main(main)
