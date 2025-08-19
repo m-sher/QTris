@@ -24,8 +24,6 @@ class PosEncoding(layers.Layer):
 
         self.pos_encoding = positional_encoding(max_length, depth)
 
-        self.add = tf.keras.layers.Add()
-
     @tf.function(jit_compile=True)
     def call(self, seq):
         # Already embedded seq
