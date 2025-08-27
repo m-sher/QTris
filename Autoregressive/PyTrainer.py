@@ -15,7 +15,7 @@ key_dim = 12
 depth = 64
 num_heads = 4
 num_layers = 4
-dropout_rate = 0.1
+dropout_rate = 0.05
 max_len = 9
 
 # Environment params
@@ -23,11 +23,11 @@ generations = 1000000
 num_envs = 64
 num_collection_steps = 64
 queue_size = 5
-max_holes = 10
+max_holes = 50
 max_height = 20
 max_steps = 500
 garbage_chance_min = 0.0
-garbage_chance_max = 0.2
+garbage_chance_max = 0.1
 garbage_rows_min = 1
 garbage_rows_max = 4
 
@@ -40,8 +40,8 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.2
-entropy_coef = 0.04
-expert_coef = 1.0
+entropy_coef = 0.02
+expert_coef = 0.5
 
 target_kl = 0.1  # Higher for more iterations
 
@@ -287,10 +287,10 @@ def main(argv):
 
     print("Initialized models", flush=True)
 
-    p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=1.0)
+    p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    v_optimizer = keras.optimizers.Adam(3e-5, clipnorm=1.0)
+    v_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
     v_model.compile(optimizer=v_optimizer, jit_compile=True)
 
     # Initialize checkpoint manager
@@ -304,7 +304,7 @@ def main(argv):
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
     print("Restored checkpoints", flush=True)
 
     p_model.build(
