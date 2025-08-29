@@ -386,7 +386,7 @@ def main():
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint, "./pretrained_checkpoints", max_to_keep=3
     )
-    print("Restored checkpoint.", flush=True)
+    # print("Restored checkpoint.", flush=True)
 
     pretrainer = Pretrainer()
     pretrainer.train(
