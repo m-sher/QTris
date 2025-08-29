@@ -186,12 +186,13 @@ class PolicyModel(keras.Model):
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
 
-        self.board_encoder_layers = [
-            EncoderLayer(
+        self.board_decoder_layers = [
+            DecoderLayer(
                 units=depth,
+                causal=False,
                 num_heads=num_heads,
                 dropout_rate=dropout_rate,
-                name=f"board_enc_{i}",
+                name=f"board_dec_{i}",
             )
             for i in range(num_layers)
         ]
@@ -255,19 +256,21 @@ class PolicyModel(keras.Model):
 
         piece_scores = []
         patches = self.make_patches(board, training=training)
-        board_enc = self.patch_pos_encoding(patches)
-
-        for board_enc_layer in self.board_encoder_layers:
-            board_enc = board_enc_layer(board_enc, training=training)
+        board_dec = self.patch_pos_encoding(patches)
 
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        for piece_dec_layer in self.piece_decoder_layers:
-            piece_dec, last_attn = piece_dec_layer(
-                [board_enc, piece_dec], training=training
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
             )
-            piece_scores.append(last_attn)
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
 
         return piece_dec, piece_scores
 
@@ -442,12 +445,13 @@ class ValueModel(keras.Model):
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
 
-        self.board_encoder_layers = [
-            EncoderLayer(
+        self.board_decoder_layers = [
+            DecoderLayer(
                 units=depth,
+                causal=False,
                 num_heads=num_heads,
                 dropout_rate=dropout_rate,
-                name=f"board_enc_{i}",
+                name=f"board_dec_{i}",
             )
             for i in range(num_layers)
         ]
@@ -491,19 +495,21 @@ class ValueModel(keras.Model):
 
         piece_scores = []
         patches = self.make_patches(board, training=training)
-        board_enc = self.patch_pos_encoding(patches)
-
-        for board_enc_layer in self.board_encoder_layers:
-            board_enc = board_enc_layer(board_enc, training=training)
+        board_dec = self.patch_pos_encoding(patches)
 
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        for piece_dec_layer in self.piece_decoder_layers:
-            piece_dec, last_attn = piece_dec_layer(
-                [board_enc, piece_dec], training=training
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
             )
-            piece_scores.append(last_attn)
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
 
         return piece_dec, piece_scores
 
