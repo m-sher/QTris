@@ -40,10 +40,10 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.2
-entropy_coef = 0.02
+entropy_coef = 0.04
 expert_coef = 0.5
 
-target_kl = 0.1  # Higher for more iterations
+target_kl = 0.04  # Higher for more iterations
 
 config = {
     "num_envs": num_envs,
@@ -161,29 +161,29 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
         new_log_probs = tf.ensure_shape(
             (new_log_probs * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
         )
-        new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(new_log_probs, axis=1), (mini_batch_size, 1)
-        )
+        # new_log_probs = tf.ensure_shape(
+        #     tf.reduce_sum(new_log_probs, axis=1), (mini_batch_size, 1)
+        # )
 
         old_log_probs = tf.ensure_shape(
             (log_probs_batch * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
         )
-        old_log_probs = tf.ensure_shape(
-            tf.reduce_sum(old_log_probs, axis=1), (mini_batch_size, 1)
-        )
+        # old_log_probs = tf.ensure_shape(
+        #     tf.reduce_sum(old_log_probs, axis=1), (mini_batch_size, 1)
+        # )
 
         # PPO loss
         ratio = tf.ensure_shape(
-            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
+            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, max_len - 1, 1)
         )
         clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, 1)
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, max_len - 1, 1)
         )
 
-        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
-        surr2 = tf.ensure_shape(clipped_ratio * advantages_batch, (mini_batch_size, 1))
+        surr1 = tf.ensure_shape(ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
+        surr2 = tf.ensure_shape(clipped_ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
 
-        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2) / seq_lengths)
+        ppo_loss = -tf.reduce_mean(tf.reduce_sum(tf.minimum(surr1, surr2), axis=1) / seq_lengths)
 
         # Compute bonus/penalty
         entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
@@ -390,7 +390,7 @@ def main(argv):
 
         # NO LONGER GIVING CLEAR REWARD. REMEMBER TO EDIT ENVIRONMENT IF REVERTED
         all_rewards = (
-            all_attacks
+            all_attacks ** 2
             + all_efficiency_bonus
             + all_death_penalty
             + all_height_penalty
