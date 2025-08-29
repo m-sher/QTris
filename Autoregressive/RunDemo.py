@@ -52,7 +52,7 @@ py_env = PyTetrisEnv(
     max_holes=max_holes,
     max_height=max_height,
     max_steps=num_steps,
-    garbage_chance=0.1,
+    garbage_chance=0.2,
     garbage_min=1,
     garbage_max=4,
     seed=0,
@@ -98,7 +98,7 @@ for t in range(num_steps):
     board = time_step.observation["board"]
     pieces = time_step.observation["pieces"]
     attack = time_step.reward["attack"]
-    clear = time_step.reward["clear"] * 2
+    clear = time_step.reward["clear"]
     if time_step.is_last():
         death = t
         running_attacks = 0

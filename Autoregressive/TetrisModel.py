@@ -3,6 +3,7 @@ import keras
 from keras import layers
 from tensorflow_probability import distributions
 from TetrisEnvs.TFTetrisEnv.TFMoves import TFConvert
+from TetrisEnvs.PyTetrisEnv.Moves import Convert
 
 
 @tf.function(jit_compile=True)
@@ -40,9 +41,9 @@ class SelfAttention(layers.Layer):
     def __init__(self, causal, **kwargs):
         super().__init__()
         self.causal = causal
-        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
-        self.add = tf.keras.layers.Add()
-        self.layernorm = tf.keras.layers.LayerNormalization()
+        self.mha = keras.layers.MultiHeadAttention(**kwargs)
+        self.add = keras.layers.Add()
+        self.layernorm = keras.layers.LayerNormalization()
 
     @tf.function(jit_compile=True)
     def call(self, x, training=False):
@@ -56,9 +57,9 @@ class SelfAttention(layers.Layer):
 class CrossAttention(layers.Layer):
     def __init__(self, **kwargs):
         super().__init__()
-        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
-        self.add = tf.keras.layers.Add()
-        self.layernorm = tf.keras.layers.LayerNormalization()
+        self.mha = keras.layers.MultiHeadAttention(**kwargs)
+        self.add = keras.layers.Add()
+        self.layernorm = keras.layers.LayerNormalization()
 
     @tf.function(jit_compile=True)
     def call(self, x, y, training=False, **kwargs):
@@ -73,15 +74,15 @@ class CrossAttention(layers.Layer):
 class FeedForward(layers.Layer):
     def __init__(self, units, dropout_rate=0.1):
         super().__init__()
-        self.seq = tf.keras.Sequential(
+        self.seq = keras.Sequential(
             [
-                tf.keras.layers.Dense(units=2 * units, activation="relu"),
-                tf.keras.layers.Dense(units=units),
-                tf.keras.layers.Dropout(rate=dropout_rate),
+                keras.layers.Dense(units=2 * units, activation="relu"),
+                keras.layers.Dense(units=units),
+                keras.layers.Dropout(rate=dropout_rate),
             ]
         )
 
-        self.layernorm = tf.keras.layers.LayerNormalization()
+        self.layernorm = keras.layers.LayerNormalization()
 
     @tf.function(jit_compile=True)
     def call(self, x, training=False):
@@ -132,6 +133,205 @@ class DecoderLayer(layers.Layer):
         out_seq = self.ff(out_seq, training=training)
 
         return out_seq, attn_scores
+
+
+def create_policy_model(
+    piece_dim,
+    key_dim,
+    queue_size,
+    depth,
+    max_len,
+    num_heads,
+    num_layers,
+    dropout_rate,
+    output_dim,
+):
+    make_patches = keras.Sequential(
+        [
+            keras.Input(shape=(24, 10, 1)),
+            layers.Rescaling(scale=2.0, offset=-1.0),
+            layers.Conv2D(
+                filters=depth // 2,
+                kernel_size=3,
+                strides=1,
+                padding="same",
+                activation="relu",
+            ),
+            layers.Conv2D(
+                filters=depth,
+                kernel_size=3,
+                strides=1,
+                padding="same",
+                activation="relu",
+            ),
+            layers.Conv2D(
+                filters=depth,
+                kernel_size=2,
+                strides=2,
+                padding="valid",
+                activation="relu",
+            ),
+            layers.Reshape((-1, depth)),
+        ]
+    )
+
+    num_patches = make_patches.output_shape[1]
+    patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
+
+    board_encoder_layers = [
+        EncoderLayer(
+            units=depth,
+            num_heads=num_heads,
+            dropout_rate=dropout_rate,
+            name=f"board_enc_{i}",
+        )
+        for i in range(num_layers)
+    ]
+
+    piece_embedding = layers.Embedding(
+        input_dim=piece_dim,
+        output_dim=depth,
+    )
+
+    piece_pos_encoding = PosEncoding(
+        depth=depth,
+        max_length=queue_size + 2,
+    )
+
+    piece_decoder_layers = [
+        DecoderLayer(
+            units=depth,
+            causal=False,
+            num_heads=num_heads,
+            dropout_rate=dropout_rate,
+            name=f"piece_dec_{i}",
+        )
+        for i in range(num_layers)
+    ]
+
+    key_embedding = layers.Embedding(
+        input_dim=key_dim,
+        output_dim=depth,
+    )
+
+    key_pos_encoding = PosEncoding(
+        depth=depth,
+        max_length=9,
+    )
+
+    key_decoder_layers = [
+        DecoderLayer(
+            units=depth,
+            causal=True,
+            num_heads=num_heads,
+            dropout_rate=dropout_rate,
+            name=f"key_dec_{i}",
+        )
+        for i in range(num_layers)
+    ]
+
+    trunk = keras.Sequential(
+        [
+            layers.Dropout(dropout_rate),
+            layers.Dense(depth, activation="relu"),
+            layers.Dense(depth // 2, activation="relu"),
+        ],
+        name="trunk",
+    )
+
+    top = layers.Dense(output_dim)
+
+    board_input = keras.Input(shape=(24, 10, 1), name="board")
+    piece_input = keras.Input(shape=(queue_size + 2,), dtype=tf.int64, name="piece")
+
+    patches = make_patches(board_input)
+    board_enc = patch_pos_encoding(patches)
+
+    for board_enc_layer in board_encoder_layers:
+        board_enc = board_enc_layer(board_enc)
+
+    piece_embedding = piece_embedding(piece_input)
+    piece_dec = piece_pos_encoding(piece_embedding)
+
+    for piece_dec_layer in piece_decoder_layers:
+        piece_dec, _ = piece_dec_layer([board_enc, piece_dec])
+
+    obs_process_model = keras.Model(
+        inputs=[board_input, piece_input], outputs=piece_dec, name="ObsProcessModel"
+    )
+
+    piece_dec = keras.Input(
+        shape=(queue_size + 2, depth), dtype=tf.float32, name="piece_dec"
+    )
+    keys_input = keras.Input(shape=(max_len,), dtype=tf.int64, name="keys")
+
+    key_embedding = key_embedding(keys_input)
+    key_dec = key_pos_encoding(key_embedding)
+
+    for key_dec_layer in key_decoder_layers:
+        key_dec, _ = key_dec_layer([piece_dec, key_dec])
+
+    trunk_out = trunk(key_dec)
+    outputs = top(trunk_out)
+
+    key_process_model = keras.Model(
+        inputs=[piece_dec, keys_input], outputs=outputs, name="KeyProcessModel"
+    )
+
+    board_input = keras.Input(shape=(24, 10, 1), name="board")
+    piece_input = keras.Input(shape=(queue_size + 2,), dtype=tf.int64, name="piece")
+    keys_input = keras.Input(shape=(max_len,), dtype=tf.int64, name="keys")
+
+    piece_dec = obs_process_model([board_input, piece_input])
+    outputs = key_process_model([piece_dec, keys_input])
+
+    full_model = keras.Model(
+        inputs=[board_input, piece_input, keys_input],
+        outputs=outputs,
+        name="PolicyModel",
+    )
+
+    return obs_process_model, key_process_model, full_model
+
+
+def generate_key_sequence(full_model, obs_model, key_model, inputs, max_len, key_dim, batch_size):
+    # piece_dec = obs_model(inputs, training=False)
+    # print(inputs[1][0])
+    key_sequence = tf.TensorArray(
+        dtype=tf.int64,
+        size=max_len,
+        dynamic_size=False,
+        element_shape=(batch_size,),
+    )
+    for i in range(1, max_len):
+        stacked_sequence = tf.transpose(key_sequence.stack(), perm=[1, 0])
+        logits = full_model([inputs[0], inputs[1], stacked_sequence], training=False)
+        # logits = key_model([piece_dec, stacked_sequence], training=False)
+
+        # (batch, num_actions) -> bool indicating full match with action up until current index
+        matching_sequences = tf.reduce_all(
+            stacked_sequence[:, None, :i] == Convert.to_sequence[None, :, :i], axis=-1
+        )
+
+        all_next_keys = Convert.to_sequence[None, ..., i] # (1, num_actions,)
+        possible_next_keys = tf.where(
+            matching_sequences,
+            all_next_keys,
+            tf.constant(-1, dtype=tf.int32)
+        )[..., None] # (batch, num_actions, 1)
+        all_keys = tf.range(key_dim, dtype=tf.int32)[None, None, :] # (1, 1, key_dim)
+        mask = tf.reduce_any(possible_next_keys == all_keys, axis=1) # (batch, num_keys)
+
+        masked_logits = tf.where(
+            mask,
+            logits[:, i - 1, :],
+            tf.constant(-1e9, dtype=tf.float32)
+        )
+        print(mask[0], stacked_sequence[0])
+        chosen_key = tf.argmax(masked_logits, axis=-1)
+        key_sequence = key_sequence.write(i, chosen_key)
+
+    return tf.transpose(key_sequence.stack(), perm=[1, 0])
 
 
 class PolicyModel(keras.Model):
