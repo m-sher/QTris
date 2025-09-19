@@ -1,7 +1,6 @@
 from TetrisEnvs.PyTetrisEnv.PyTetrisRunner import PyTetrisRunner
 from TetrisEnvs.PyTetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
-from Pretrainer import Pretrainer
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -41,7 +40,6 @@ lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
 entropy_coef = 0.04
-expert_coef = 0.5
 
 target_kl = 0.04  # Higher for more iterations
 
@@ -55,11 +53,8 @@ config = {
     "ppo_clip": ppo_clip,
     "value_clip": value_clip,
     "entropy_coef": entropy_coef,
-    "expert_coef": expert_coef,
     "target_kl": target_kl,
 }
-
-scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
 
 @tf.function(jit_compile=True)
@@ -88,7 +83,7 @@ def compute_gae_and_returns(values, rewards, dones, gamma, lam):
 
 
 @tf.function()
-def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
+def train_step(p_model, v_model, online_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -121,22 +116,8 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
         tf.reduce_sum(pad_mask, axis=-1, keepdims=True), (mini_batch_size, 1)
     )
 
-    offline_board_batch = offline_batch["boards"]
-    offline_pieces_batch = offline_batch["pieces"]
-    offline_b2b_combo_batch = offline_batch["b2b_combo"]
-    offline_actions_batch = offline_batch["actions"]
-
-    board_batch = tf.concat([online_board_batch, offline_board_batch], axis=0)
-
-    pieces_batch = tf.concat([online_pieces_batch, offline_pieces_batch], axis=0)
-    
-    b2b_combo_batch = tf.concat([online_b2b_combo_batch, offline_b2b_combo_batch], axis=0)
-
-    actions_batch = tf.concat([online_actions_batch, offline_actions_batch], axis=0)
-
-    input_actions_batch = actions_batch[:, :-1]
-    online_target_actions = online_actions_batch[:, 1:]
-    offline_target_actions = offline_actions_batch[:, 1:]
+    input_actions_batch = online_actions_batch[:, :-1]
+    target_actions = online_actions_batch[:, 1:]
 
     advantages_batch = (advantages_batch - tf.reduce_mean(advantages_batch)) / (
         tf.math.reduce_std(advantages_batch) + 1e-8
@@ -144,25 +125,23 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
 
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model(
-            (board_batch, pieces_batch, b2b_combo_batch, input_actions_batch),
+            (online_board_batch, online_pieces_batch, online_b2b_combo_batch, input_actions_batch),
             training=True,
             return_scores=True,
         )
 
         logits = tf.ensure_shape(
-            logits, (2 * mini_batch_size, max_len - 1, key_dim)
-        )  # 2 * batch, max_len - 1, num_actions
-        online_logits = logits[:mini_batch_size]
-        offline_logits = logits[mini_batch_size:]
+            logits, (mini_batch_size, max_len - 1, key_dim)
+        )  # batch, max_len - 1, num_actions
 
         masked_logits = tf.where(
-            invalid_mask, online_logits, tf.constant(-1e9, dtype=tf.float32)
+            invalid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
         )  # batch, max_len - 1, num_actions
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
         new_log_probs = tf.ensure_shape(
-            dist.log_prob(online_target_actions), (mini_batch_size, max_len - 1)
+            dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
             (new_log_probs * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
@@ -209,12 +188,8 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
-        expert_policy_loss = scc(offline_target_actions, offline_logits)
-
         # Compute total loss
-        total_policy_loss = (
-            ppo_loss - entropy_coef * entropy + expert_coef * expert_policy_loss
-        )
+        total_policy_loss = ppo_loss - entropy_coef * entropy
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
@@ -222,11 +197,6 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
 
     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
     avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
-    expert_policy_acc = tf.reduce_mean(
-        tf.cast(
-            tf.argmax(offline_logits, axis=-1) == offline_target_actions, tf.float32
-        )
-    )
 
     with tf.GradientTape() as v_tape:
         values = v_model((online_board_batch, online_pieces_batch, online_b2b_combo_batch), training=True)
@@ -252,21 +222,18 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
         clipped_frac,
         avg_probs,
         value_loss,
-        expert_policy_loss,
-        expert_policy_acc,
         online_board_batch[0],
         piece_scores,
     )
 
 
 def train_on_dataset(
-    p_model, v_model, online_dataset, offline_dataset, num_epochs, entropy_coef
+    p_model, v_model, online_dataset, num_epochs, entropy_coef
 ):
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
-            offline_batch = next(offline_dataset)
             step_out = train_step(
-                p_model, v_model, online_batch, offline_batch, entropy_coef
+                p_model, v_model, online_batch, entropy_coef
             )
 
         approx_kl = step_out[2]
@@ -312,13 +279,13 @@ def main(argv):
     p_checkpoint_manager = tf.train.CheckpointManager(
         p_checkpoint, "./policy_checkpoints", max_to_keep=3
     )
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint)
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint)
+    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
     p_model.build(
@@ -353,20 +320,6 @@ def main(argv):
     print("Initialized runner", flush=True)
     last_time = time.time()
 
-    pretrainer = Pretrainer()
-    pretrain_dataset = (
-        pretrainer._load_dataset(batch_size=None)
-        .repeat()
-        .batch(
-            mini_batch_size,
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=False,
-            drop_remainder=True,
-        )
-        .prefetch(tf.data.AUTOTUNE)
-    )
-    offline_dataset = iter(pretrain_dataset)
-
     # Initialize WandB logging
     wandb_run = wandb.init(
         project="Tetris",
@@ -399,7 +352,7 @@ def main(argv):
             all_bumpy_penalty,
             all_death_penalty,
             all_dones,
-        ) = runner.collect_trajectory(render=False)
+        ) = runner.collect_trajectory(render=True)
 
         all_efficiency_bonus = tf.where(
             all_clears != 0, tf.math.divide_no_nan(all_attacks, all_clears), all_clears
@@ -477,7 +430,7 @@ def main(argv):
 
         # Train on collected data
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, offline_dataset, num_epochs, entropy_coef
+            p_model, v_model, online_dataset, num_epochs, entropy_coef
         )
 
         # Save checkpoint
@@ -498,8 +451,6 @@ def main(argv):
             clipped_frac,
             avg_probs,
             value_loss,
-            expert_loss,
-            expert_acc,
             board,
             scores,
         ) = train_out
@@ -535,8 +486,6 @@ def main(argv):
                 "approx_kl": approx_kl,
                 "clipped_frac": clipped_frac,
                 "value_loss": value_loss,
-                "expert_loss": expert_loss,
-                "expert_acc": expert_acc,
                 "avg_probs": avg_probs,
                 "avg_reward": avg_reward,
                 "avg_attacks": avg_attacks,
