@@ -33,13 +33,13 @@ garbage_rows_max = 4
 
 # Training params
 mini_batch_size = 512
-num_epochs = 4
+num_epochs = 10
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
-value_clip = 0.2
+value_clip = 0.5
 entropy_coef = 0.04
 expert_coef = 0.5
 
@@ -95,6 +95,9 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
     online_pieces_batch = tf.ensure_shape(
         online_batch["pieces"], (mini_batch_size, queue_size + 2)
     )
+    online_b2b_combo_batch = tf.ensure_shape(
+        online_batch["b2b_combo"], (mini_batch_size, 2)
+    )
     online_actions_batch = tf.ensure_shape(
         online_batch["actions"], (mini_batch_size, max_len)
     )
@@ -120,11 +123,14 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
 
     offline_board_batch = offline_batch["boards"]
     offline_pieces_batch = offline_batch["pieces"]
+    offline_b2b_combo_batch = offline_batch["b2b_combo"]
     offline_actions_batch = offline_batch["actions"]
 
     board_batch = tf.concat([online_board_batch, offline_board_batch], axis=0)
 
     pieces_batch = tf.concat([online_pieces_batch, offline_pieces_batch], axis=0)
+    
+    b2b_combo_batch = tf.concat([online_b2b_combo_batch, offline_b2b_combo_batch], axis=0)
 
     actions_batch = tf.concat([online_actions_batch, offline_actions_batch], axis=0)
 
@@ -138,7 +144,7 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
 
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model(
-            (board_batch, pieces_batch, input_actions_batch),
+            (board_batch, pieces_batch, b2b_combo_batch, input_actions_batch),
             training=True,
             return_scores=True,
         )
@@ -177,13 +183,21 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
             tf.exp(new_log_probs - old_log_probs), (mini_batch_size, max_len - 1, 1)
         )
         clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip), (mini_batch_size, max_len - 1, 1)
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
+            (mini_batch_size, max_len - 1, 1),
         )
 
-        surr1 = tf.ensure_shape(ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
-        surr2 = tf.ensure_shape(clipped_ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1))
+        surr1 = tf.ensure_shape(
+            ratio * advantages_batch[:, None, :], (mini_batch_size, max_len - 1, 1)
+        )
+        surr2 = tf.ensure_shape(
+            clipped_ratio * advantages_batch[:, None, :],
+            (mini_batch_size, max_len - 1, 1),
+        )
 
-        ppo_loss = -tf.reduce_mean(tf.reduce_sum(tf.minimum(surr1, surr2), axis=1) / seq_lengths)
+        ppo_loss = -tf.reduce_mean(
+            tf.reduce_sum(tf.minimum(surr1, surr2), axis=1) / seq_lengths
+        )
 
         # Compute bonus/penalty
         entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
@@ -215,7 +229,7 @@ def train_step(p_model, v_model, online_batch, offline_batch, entropy_coef):
     )
 
     with tf.GradientTape() as v_tape:
-        values = v_model((online_board_batch, online_pieces_batch), training=True)
+        values = v_model((online_board_batch, online_pieces_batch, online_b2b_combo_batch), training=True)
 
         # Value loss
         value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
@@ -308,10 +322,10 @@ def main(argv):
     print("Restored checkpoints", flush=True)
 
     p_model.build(
-        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, max_len)]
+        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2), (None, max_len)]
     )
 
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2)])
+    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
     print("Built models", flush=True)
 
     p_model.summary()
@@ -370,12 +384,15 @@ def main(argv):
         (
             all_boards,
             all_pieces,
+            all_b2b_combo,
             all_actions,
             all_log_probs,
             all_masks,
             all_values,
             all_attacks,
             all_clears,
+            all_b2b_reward,
+            all_combo_reward,
             all_height_penalty,
             all_hole_penalty,
             all_skyline_penalty,
@@ -390,8 +407,10 @@ def main(argv):
 
         # NO LONGER GIVING CLEAR REWARD. REMEMBER TO EDIT ENVIRONMENT IF REVERTED
         all_rewards = (
-            all_attacks ** 2
+            all_attacks
             + all_efficiency_bonus
+            + all_b2b_reward
+            + all_combo_reward
             + all_death_penalty
             + all_height_penalty
             + all_hole_penalty
@@ -416,6 +435,7 @@ def main(argv):
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
+        b2b_combo_flat = tf.reshape(all_b2b_combo, (-1, 2))
         actions_flat = tf.reshape(all_actions, (-1, max_len))
         log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
         masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
@@ -429,6 +449,7 @@ def main(argv):
                 {
                     "boards": boards_flat,
                     "pieces": pieces_flat,
+                    "b2b_combo": b2b_combo_flat,
                     "actions": actions_flat,
                     "old_log_probs": log_probs_flat,
                     "masks": masks_flat,
@@ -490,6 +511,8 @@ def main(argv):
             tf.reduce_sum(all_efficiency_bonus, axis=0)
         )
         avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
+        avg_b2b_reward = tf.reduce_mean(tf.reduce_sum(all_b2b_reward, axis=0))
+        avg_combo_reward = tf.reduce_mean(tf.reduce_sum(all_combo_reward, axis=0))
         avg_height_penalty = tf.reduce_mean(tf.reduce_sum(all_height_penalty, axis=0))
         avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
         avg_skyline_penalty = tf.reduce_mean(tf.reduce_sum(all_skyline_penalty, axis=0))
@@ -519,6 +542,8 @@ def main(argv):
                 "avg_attacks": avg_attacks,
                 "avg_efficiency_bonus": avg_efficiency_bonus,
                 "avg_clears": avg_clears,
+                "avg_b2b_reward": avg_b2b_reward,
+                "avg_combo_reward": avg_combo_reward,
                 "avg_height_penalty": avg_height_penalty,
                 "avg_hole_penalty": avg_hole_penalty,
                 "avg_skyline_penalty": avg_skyline_penalty,
