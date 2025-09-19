@@ -218,10 +218,13 @@ class PolicyModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._b2b_combo_dense = keras.Sequential([
-            layers.Dense(depth // 2, activation="relu"),
-            layers.Dense(depth, activation="relu"),
-        ], name="b2b_combo_dense")
+        self._b2b_combo_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="b2b_combo_dense",
+        )
 
         self.key_embedding = layers.Embedding(
             input_dim=key_dim,
@@ -304,7 +307,9 @@ class PolicyModel(keras.Model):
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo, keys = inputs
 
-        piece_dec, piece_scores = self.process_obs((board, piece, b2b_combo), training=training)
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=training
+        )
 
         output, key_scores = self.process_keys((piece_dec, keys), training=training)
 
@@ -486,10 +491,13 @@ class ValueModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._b2b_combo_dense = keras.Sequential([
-            layers.Dense(depth // 2, activation="relu"),
-            layers.Dense(depth, activation="relu"),
-        ], name="b2b_combo_dense")
+        self._b2b_combo_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="b2b_combo_dense",
+        )
 
         self.trunk = keras.Sequential(
             [
@@ -534,7 +542,9 @@ class ValueModel(keras.Model):
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo = inputs
 
-        piece_dec, piece_scores = self.process_obs((board, piece, b2b_combo), training=training)
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=training
+        )
 
         trunk_out = self.trunk(piece_dec, training=training)
 
@@ -549,7 +559,9 @@ class ValueModel(keras.Model):
     def predict(self, inputs):
         board, piece, b2b_combo = inputs
 
-        piece_dec, piece_scores = self.process_obs((board, piece, b2b_combo), training=False)
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=False
+        )
 
         trunk_out = self.trunk(piece_dec, training=False)
 

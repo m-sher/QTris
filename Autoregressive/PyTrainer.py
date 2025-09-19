@@ -125,7 +125,12 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model(
-            (online_board_batch, online_pieces_batch, online_b2b_combo_batch, input_actions_batch),
+            (
+                online_board_batch,
+                online_pieces_batch,
+                online_b2b_combo_batch,
+                input_actions_batch,
+            ),
             training=True,
             return_scores=True,
         )
@@ -199,7 +204,10 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
 
     with tf.GradientTape() as v_tape:
-        values = v_model((online_board_batch, online_pieces_batch, online_b2b_combo_batch), training=True)
+        values = v_model(
+            (online_board_batch, online_pieces_batch, online_b2b_combo_batch),
+            training=True,
+        )
 
         # Value loss
         value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
@@ -227,14 +235,10 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     )
 
 
-def train_on_dataset(
-    p_model, v_model, online_dataset, num_epochs, entropy_coef
-):
+def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
-            step_out = train_step(
-                p_model, v_model, online_batch, entropy_coef
-            )
+            step_out = train_step(p_model, v_model, online_batch, entropy_coef)
 
         approx_kl = step_out[2]
         if approx_kl >= 1.5 * target_kl:
@@ -289,7 +293,12 @@ def main(argv):
     print("Restored checkpoints", flush=True)
 
     p_model.build(
-        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2), (None, max_len)]
+        input_shape=[
+            (None, 24, 10, 1),
+            (None, queue_size + 2),
+            (None, 2),
+            (None, max_len),
+        ]
     )
 
     v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
