@@ -62,7 +62,9 @@ env = TFPyEnvironment(py_env)
 
 # Initialize pygame
 pygame.init()
-screen = pygame.display.set_mode((670, 800))  # Increased height to accommodate text below board
+screen = pygame.display.set_mode(
+    (670, 800)
+)  # Increased height to accommodate text below board
 pygame.display.set_caption("Tetris")
 font = pygame.font.Font(None, 30)
 
@@ -130,7 +132,7 @@ for t in range(num_steps):
     skyline_penalty = time_step.reward["skyline_penalty"].numpy()[0]
     bumpy_penalty = time_step.reward["bumpy_penalty"].numpy()[0]
     death_penalty = time_step.reward["death_penalty"].numpy()[0]
-    
+
     # Get current b2b and combo values from environment
     current_b2b_val = py_env._scorer._b2b
     current_combo_val = py_env._scorer._combo
@@ -155,18 +157,28 @@ for t in range(num_steps):
 
     # Compute dominant piece for each board patch based on attention scores
     # scores is list of tensors (num_layers, batch_size, seq_len, num_pieces, num_patches)
-    piece_attention = tf.reduce_sum(scores, axis=[0, 2])  # Sum over layers and seq positions, keep pieces and patches
-    dominant_pieces = tf.argmax(piece_attention[0], axis=0)  # Find dominant piece for each patch (shape: 60)
+    piece_attention = tf.reduce_sum(
+        scores, axis=[0, 2]
+    )  # Sum over layers and seq positions, keep pieces and patches
+    dominant_pieces = tf.argmax(
+        piece_attention[0], axis=0
+    )  # Find dominant piece for each patch (shape: 60)
     dominant_grid = tf.reshape(dominant_pieces, (12, 5))  # Reshape to (12, 5) grid
 
     # Extract attention intensities for dominant pieces
-    dominant_attention = tf.reduce_max(piece_attention[0], axis=0)  # Get attention value for dominant piece (shape: 60)
-    dominant_attention_grid = tf.reshape(dominant_attention, (12, 5))  # Reshape to (12, 5) grid
+    dominant_attention = tf.reduce_max(
+        piece_attention[0], axis=0
+    )  # Get attention value for dominant piece (shape: 60)
+    dominant_attention_grid = tf.reshape(
+        dominant_attention, (12, 5)
+    )  # Reshape to (12, 5) grid
 
     # Normalize attention intensities for brightness modulation
     attention_min = tf.reduce_min(dominant_attention_grid)
     attention_max = tf.reduce_max(dominant_attention_grid)
-    attention_normalized = (dominant_attention_grid - attention_min) / (attention_max - attention_min + 1e-8)
+    attention_normalized = (dominant_attention_grid - attention_min) / (
+        attention_max - attention_min + 1e-8
+    )
 
     # Colorize the scores display based on dominant pieces with intensity modulation
     all_piece_colors = piece_colors[pieces_array]  # Colors for all 7 pieces
@@ -178,7 +190,9 @@ for t in range(num_steps):
         for c in range(5):  # 5 columns
             piece_idx = dominant_grid_np[r, c]
             intensity = attention_np[r, c]
-            colored_scores[r, c] = (all_piece_colors[piece_idx] * intensity).astype(np.uint8)
+            colored_scores[r, c] = (all_piece_colors[piece_idx] * intensity).astype(
+                np.uint8
+            )
 
     # Get piece display for all 7 pieces
     piece_sidebar = piece_display[pieces_array].reshape((28, 5))
@@ -189,14 +203,18 @@ for t in range(num_steps):
     for i in range(7):  # 7 pieces: active, hold, 5 queue
         for r in range(4 * i, 4 * i + 4):  # 4 rows per piece
             for c in range(5):  # 5 columns
-                colored_sidebar[r, c] = (piece_type_colors[i] * piece_sidebar[r, c]).astype(np.uint8)
+                colored_sidebar[r, c] = (
+                    piece_type_colors[i] * piece_sidebar[r, c]
+                ).astype(np.uint8)
 
     # Create garbage queue visualization
     garbage_queue = py_env._garbage_queue
     garbage_bar_width = 10  # Thinner width in pixels for the garbage bar
     garbage_bar_height = 24  # Height matches board height
-    garbage_surface = np.zeros((garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8)
-    
+    garbage_surface = np.zeros(
+        (garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8
+    )
+
     # Draw garbage sections (bottom to top, with bottom being next to push)
     current_row = garbage_bar_height - 1  # Start from bottom
     for i, (num_rows, empty_column) in enumerate(garbage_queue):
@@ -205,9 +223,11 @@ for t in range(num_steps):
         for row in range(start_row, current_row + 1):
             if row >= 0 and row < garbage_bar_height:
                 garbage_surface[row, :] = [255, 0, 0]  # Red color
-        
+
         # Add separator line (1 pixel gap) between sections
-        if i < len(garbage_queue) - 1 and start_row > 0:  # Not the last section and not at top
+        if (
+            i < len(garbage_queue) - 1 and start_row > 0
+        ):  # Not the last section and not at top
             current_row = start_row - 2  # Leave 1 pixel gap (black)
         else:
             current_row = start_row - 1
@@ -234,7 +254,9 @@ for t in range(num_steps):
     board_surf = pygame.transform.scale(board_surf, (250, 600))
     piece_surf = pygame.transform.scale(piece_surf, (125, 600))
     scores_surf = pygame.transform.scale(scores_surf, (250, 600))
-    garbage_surf = pygame.transform.scale(garbage_surf, (25, 600))  # Thinner garbage bar
+    garbage_surf = pygame.transform.scale(
+        garbage_surf, (25, 600)
+    )  # Thinner garbage bar
 
     # Create board with border
     board_with_border = pygame.Surface((254, 604))  # 2 pixels border on each side
@@ -242,12 +264,12 @@ for t in range(num_steps):
     board_with_border.blit(board_surf, (2, 2))  # Blit board with 2px offset for border
 
     screen.blit(garbage_surf, (0, 0))  # Garbage bar on the left
-    screen.blit(board_with_border, (25, 0))   # Board with border, shifted right less
+    screen.blit(board_with_border, (25, 0))  # Board with border, shifted right less
     screen.blit(piece_surf, (285, 0))  # Piece sidebar adjusted position
-    screen.blit(scores_surf, (415, 0)) # Scores adjusted position
-    
+    screen.blit(scores_surf, (415, 0))  # Scores adjusted position
+
     # Add step counter in top left with black background (moved down to avoid slider collision)
-    step_text = font.render(f"Step: {t+1}/{num_steps}", True, (255, 255, 255))
+    step_text = font.render(f"Step: {t + 1}/{num_steps}", True, (255, 255, 255))
     step_rect = step_text.get_rect()
     step_rect.topleft = (10, 25)
     # Create black background for step counter
@@ -277,26 +299,40 @@ for t in range(num_steps):
     death_penalties.append(death_penalty)
 
     time_step = env.step(key_sequence)
-    
+
     # Create black background for text area to prevent overlap
     text_bg_rect = pygame.Rect(0, 610, 670, 190)  # Black background for text area
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
-    
+
     # Draw white dividing line in the middle
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
-    
+
     # Render text below board with white color
     base_y = 615  # Start below the board area
-    
+
     # LEFT HALF: Reward Information (single column)
-    b2b_reward_text = font.render(f"B2B Reward: {b2b_reward:0.2f}", True, (255, 255, 255))
-    combo_reward_text = font.render(f"Combo Reward: {combo_reward:0.2f}", True, (255, 255, 255))
-    height_pen_text = font.render(f"Height Penalty: {height_penalty:0.2f}", True, (255, 255, 255))
-    hole_pen_text = font.render(f"Hole Penalty: {hole_penalty:0.2f}", True, (255, 255, 255))
-    skyline_pen_text = font.render(f"Skyline Penalty: {skyline_penalty:0.2f}", True, (255, 255, 255))
-    bumpy_pen_text = font.render(f"Bumpy Penalty: {bumpy_penalty:0.2f}", True, (255, 255, 255))
-    death_pen_text = font.render(f"Death Penalty: {death_penalty:0.2f}", True, (255, 255, 255))
-    
+    b2b_reward_text = font.render(
+        f"B2B Reward: {b2b_reward:0.2f}", True, (255, 255, 255)
+    )
+    combo_reward_text = font.render(
+        f"Combo Reward: {combo_reward:0.2f}", True, (255, 255, 255)
+    )
+    height_pen_text = font.render(
+        f"Height Penalty: {height_penalty:0.2f}", True, (255, 255, 255)
+    )
+    hole_pen_text = font.render(
+        f"Hole Penalty: {hole_penalty:0.2f}", True, (255, 255, 255)
+    )
+    skyline_pen_text = font.render(
+        f"Skyline Penalty: {skyline_penalty:0.2f}", True, (255, 255, 255)
+    )
+    bumpy_pen_text = font.render(
+        f"Bumpy Penalty: {bumpy_penalty:0.2f}", True, (255, 255, 255)
+    )
+    death_pen_text = font.render(
+        f"Death Penalty: {death_penalty:0.2f}", True, (255, 255, 255)
+    )
+
     # Position reward texts in left half (single column)
     screen.blit(b2b_reward_text, (10, base_y))
     screen.blit(combo_reward_text, (10, base_y + 20))
@@ -305,15 +341,19 @@ for t in range(num_steps):
     screen.blit(skyline_pen_text, (10, base_y + 80))
     screen.blit(bumpy_pen_text, (10, base_y + 100))
     screen.blit(death_pen_text, (10, base_y + 120))
-    
+
     # RIGHT HALF: Current State Information (single column)
     attack_text = font.render(f"Attack: {int(attacks[-1])}", True, (255, 255, 255))
     app_text = font.render(f"APP: {apps[-1]:0.2f}", True, (255, 255, 255))
     clear_text = font.render(f"Clear: {int(clears[-1])}", True, (255, 255, 255))
-    current_b2b_text = font.render(f"Current B2B: {current_b2b_val}", True, (255, 255, 255))
-    current_combo_text = font.render(f"Current Combo: {current_combo_val}", True, (255, 255, 255))
+    current_b2b_text = font.render(
+        f"Current B2B: {current_b2b_val}", True, (255, 255, 255)
+    )
+    current_combo_text = font.render(
+        f"Current Combo: {current_combo_val}", True, (255, 255, 255)
+    )
     action_text = font.render(f"Action: {actions[-1]}", True, (255, 255, 255))
-    
+
     # Position state texts in right half (single column)
     screen.blit(attack_text, (345, base_y))
     screen.blit(app_text, (345, base_y + 20))
@@ -332,7 +372,7 @@ print(f"Time taken: {time_taken:3.2f} seconds")
 print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
 if input("Save? ").lower() == "y":
     actual_fps = 5
-    writer = imageio.get_writer('Demo.mp4', fps=30)
+    writer = imageio.get_writer("Demo.mp4", fps=30)
     for frame in frames:
         for _ in range(30 // actual_fps):
             writer.append_data(frame)
@@ -388,36 +428,50 @@ while True:
     frame = frames[ind]
 
     pygame.surfarray.blit_array(screen, frame.swapaxes(0, 1))
-    
+
     # Add step counter in top left for replay with black background (moved down to avoid slider collision)
-    step_text = font.render(f"Step: {ind+1}/{num_steps}", True, (255, 255, 255))
+    step_text = font.render(f"Step: {ind + 1}/{num_steps}", True, (255, 255, 255))
     step_rect = step_text.get_rect()
     step_rect.topleft = (10, 25)
     # Create black background for step counter
     pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
     screen.blit(step_text, (10, 25))
-    
+
     pygame_widgets.update(events)
-    
+
     # Create black background for text area in replay mode to prevent overlap
     text_bg_rect = pygame.Rect(0, 610, 670, 190)  # Black background for text area
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
-    
+
     # Draw white dividing line in the middle
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
-    
+
     # Render text below board for replay with white color
     base_y = 615  # Start below the board area
-    
+
     # LEFT HALF: Reward Information (single column)
-    b2b_reward_text = font.render(f"B2B Reward: {b2b_rewards[ind]:0.2f}", True, (255, 255, 255))
-    combo_reward_text = font.render(f"Combo Reward: {combo_rewards[ind]:0.2f}", True, (255, 255, 255))
-    height_pen_text = font.render(f"Height Penalty: {height_penalties[ind]:0.2f}", True, (255, 255, 255))
-    hole_pen_text = font.render(f"Hole Penalty: {hole_penalties[ind]:0.2f}", True, (255, 255, 255))
-    skyline_pen_text = font.render(f"Skyline Penalty: {skyline_penalties[ind]:0.2f}", True, (255, 255, 255))
-    bumpy_pen_text = font.render(f"Bumpy Penalty: {bumpy_penalties[ind]:0.2f}", True, (255, 255, 255))
-    death_pen_text = font.render(f"Death Penalty: {death_penalties[ind]:0.2f}", True, (255, 255, 255))
-    
+    b2b_reward_text = font.render(
+        f"B2B Reward: {b2b_rewards[ind]:0.2f}", True, (255, 255, 255)
+    )
+    combo_reward_text = font.render(
+        f"Combo Reward: {combo_rewards[ind]:0.2f}", True, (255, 255, 255)
+    )
+    height_pen_text = font.render(
+        f"Height Penalty: {height_penalties[ind]:0.2f}", True, (255, 255, 255)
+    )
+    hole_pen_text = font.render(
+        f"Hole Penalty: {hole_penalties[ind]:0.2f}", True, (255, 255, 255)
+    )
+    skyline_pen_text = font.render(
+        f"Skyline Penalty: {skyline_penalties[ind]:0.2f}", True, (255, 255, 255)
+    )
+    bumpy_pen_text = font.render(
+        f"Bumpy Penalty: {bumpy_penalties[ind]:0.2f}", True, (255, 255, 255)
+    )
+    death_pen_text = font.render(
+        f"Death Penalty: {death_penalties[ind]:0.2f}", True, (255, 255, 255)
+    )
+
     # Position reward texts in left half (single column)
     screen.blit(b2b_reward_text, (10, base_y))
     screen.blit(combo_reward_text, (10, base_y + 20))
@@ -426,15 +480,19 @@ while True:
     screen.blit(skyline_pen_text, (10, base_y + 80))
     screen.blit(bumpy_pen_text, (10, base_y + 100))
     screen.blit(death_pen_text, (10, base_y + 120))
-    
+
     # RIGHT HALF: Current State Information (single column)
     attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))
     app_text = font.render(f"APP: {apps[ind]:0.2f}", True, (255, 255, 255))
     clear_text = font.render(f"Clear: {int(clears[ind])}", True, (255, 255, 255))
-    current_b2b_text = font.render(f"Current B2B: {current_b2b[ind]}", True, (255, 255, 255))
-    current_combo_text = font.render(f"Current Combo: {current_combo[ind]}", True, (255, 255, 255))
+    current_b2b_text = font.render(
+        f"Current B2B: {current_b2b[ind]}", True, (255, 255, 255)
+    )
+    current_combo_text = font.render(
+        f"Current Combo: {current_combo[ind]}", True, (255, 255, 255)
+    )
     action_text = font.render(f"Action: {actions[ind]}", True, (255, 255, 255))
-    
+
     # Position state texts in right half (single column)
     screen.blit(attack_text, (345, base_y))
     screen.blit(app_text, (345, base_y + 20))
