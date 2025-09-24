@@ -23,7 +23,7 @@ num_envs = 64
 num_collection_steps = 64
 queue_size = 5
 max_holes = 50
-max_height = 20
+max_height = 18
 max_steps = 500
 garbage_chance_min = 0.0
 garbage_chance_max = 0.1
@@ -31,13 +31,13 @@ garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
-mini_batch_size = 512
-num_epochs = 10
+mini_batch_size = 1024
+num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
-ppo_clip = 0.2
+ppo_clip = 0.1
 value_clip = 0.5
 entropy_coef = 0.04
 
@@ -289,7 +289,7 @@ def main(argv):
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
     p_model.build(
@@ -361,7 +361,7 @@ def main(argv):
             all_bumpy_penalty,
             all_death_penalty,
             all_dones,
-        ) = runner.collect_trajectory(render=True)
+        ) = runner.collect_trajectory(render=False)
 
         all_efficiency_bonus = tf.where(
             all_clears != 0, tf.math.divide_no_nan(all_attacks, all_clears), all_clears
