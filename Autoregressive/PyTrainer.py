@@ -15,7 +15,7 @@ depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.05
-max_len = 9
+max_len = 15 
 
 # Environment params
 generations = 1000000
@@ -289,7 +289,7 @@ def main(argv):
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
     p_model.build(

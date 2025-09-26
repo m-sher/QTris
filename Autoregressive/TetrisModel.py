@@ -233,7 +233,7 @@ class PolicyModel(keras.Model):
 
         self.key_pos_encoding = PosEncoding(
             depth=depth,
-            max_length=9,
+            max_length=max_len,
         )
 
         self.key_decoder_layers = [

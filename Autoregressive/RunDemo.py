@@ -18,7 +18,7 @@ depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.1
-max_len = 9
+max_len = 15
 
 num_steps = 500
 queue_size = 5
@@ -39,11 +39,11 @@ p_model = PolicyModel(
 
 p_checkpoint = tf.train.Checkpoint(model=p_model)
 p_checkpoint_manager = tf.train.CheckpointManager(
-    p_checkpoint, "./checkpoints/policy_checkpoints", max_to_keep=3
+    p_checkpoint, "./policy_checkpoints", max_to_keep=3
 )
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
-p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, max_len)])
+p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2), (None, max_len)])
 
 p_model.summary()
 
@@ -122,6 +122,7 @@ start = time.time()
 for t in range(num_steps):
     board = time_step.observation["board"]
     vis_board = time_step.observation.get("vis_board", None)
+    b2b_combo = time_step.observation["b2b_combo"]
     pieces = time_step.observation["pieces"]
     attack = time_step.reward["attack"].numpy()[0]
     clear = time_step.reward["clear"].numpy()[0]
@@ -147,7 +148,7 @@ for t in range(num_steps):
             pygame.quit()
 
     key_sequence, log_probs, masks, scores = p_model.predict(
-        (board, pieces), greedy=True
+        (board, pieces, b2b_combo), greedy=True
     )
 
     # Handle pieces tensor shape (remove batch dimension if present)
