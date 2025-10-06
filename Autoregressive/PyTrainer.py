@@ -26,9 +26,9 @@ max_holes = 50
 max_height = 18
 max_steps = 500
 garbage_chance_min = 0.0
-garbage_chance_max = 0.1
+garbage_chance_max = 0.2
 garbage_rows_min = 1
-garbage_rows_max = 4
+garbage_rows_max = 6
 
 # Training params
 mini_batch_size = 1024
@@ -378,7 +378,7 @@ def main(argv):
             + all_hole_penalty
             + all_skyline_penalty
             + all_bumpy_penalty
-        )
+        ) * 0.1
 
         all_rewards = tf.ensure_shape(
             all_rewards[..., None], (num_collection_steps, num_envs, 1)
