@@ -1,6 +1,6 @@
 import tensorflow as tf
 from TetrisModel import PolicyModel
-from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets

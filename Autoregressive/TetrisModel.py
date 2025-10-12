@@ -2,7 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisEnvs.TFTetrisEnv.TFMoves import TFConvert
+from TetrisEnv.Moves import Convert
 
 
 @tf.function(jit_compile=True)
@@ -325,11 +325,11 @@ class PolicyModel(keras.Model):
         def generate_mask(ind, stacked_key_sequence):
             matching_sequence = tf.reduce_all(
                 stacked_key_sequence[:, None, :ind]
-                == TFConvert.to_sequence[None, :, :ind],
+                == Convert.tf_to_sequence[None, :, :ind],
                 axis=-1,
             )[..., None]
             next_keys = tf.tile(
-                TFConvert.to_sequence[None, :, ind], (self._batch_size, 1)
+                Convert.tf_to_sequence[None, :, ind], (self._batch_size, 1)
             )[..., None]
             possible_keys = tf.range(self._key_dim, dtype=tf.int64)[None, None, ...]
             valid = tf.reduce_any(

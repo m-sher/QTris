@@ -1,5 +1,5 @@
-from TetrisEnvs.PyTetrisEnv.PyTetrisRunner import PyTetrisRunner
-from TetrisEnvs.PyTetrisEnv.Moves import Keys
+from TetrisEnv.PyTetrisRunner import PyTetrisRunner
+from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
 import tensorflow as tf
 from tensorflow_probability import distributions
