@@ -1,6 +1,6 @@
-from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnvs.PyTetrisEnv.Moves import Moves, Convert
-from TetrisEnvs.PyTetrisEnv.Pieces import PieceType
+from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.Moves import Moves, Convert
+from TetrisEnv.Pieces import PieceType
 from TetrisModel import PolicyModel
 import multiprocessing
 import tensorflow as tf
