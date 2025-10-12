@@ -26,9 +26,9 @@ max_holes = 50
 max_height = 18
 max_steps = 500
 garbage_chance_min = 0.0
-garbage_chance_max = 0.2
+garbage_chance_max = 0.15
 garbage_rows_min = 1
-garbage_rows_max = 6
+garbage_rows_max = 4
 
 # Training params
 mini_batch_size = 1024
@@ -41,7 +41,7 @@ ppo_clip = 0.1
 value_clip = 0.5
 entropy_coef = 0.04
 
-target_kl = 0.04  # Higher for more iterations
+target_kl = 0.04
 
 config = {
     "num_envs": num_envs,
@@ -191,7 +191,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         entropy = tf.reduce_sum(entropy, axis=1) / seq_lengths
         entropy = tf.reduce_mean(entropy)
 
-        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+        approx_kl = tf.reduce_mean(tf.reduce_sum(old_log_probs - new_log_probs, axis=1))
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -200,7 +200,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+    clipped_frac = tf.reduce_mean(tf.cast(tf.reduce_any(ratio != clipped_ratio, axis=1), tf.float32))
     avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
 
     with tf.GradientTape() as v_tape:
@@ -223,6 +223,10 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
 
+    ret_var = tf.math.reduce_variance(returns_batch)
+    res_var = tf.math.reduce_variance(returns_batch - values)
+    explained_var = tf.reduce_mean(1.0 - tf.math.divide_no_nan(res_var, ret_var))
+
     return (
         ppo_loss,
         entropy,
@@ -230,6 +234,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         clipped_frac,
         avg_probs,
         value_loss,
+        explained_var,
         online_board_batch[0],
         piece_scores,
     )
@@ -460,6 +465,7 @@ def main(argv):
             clipped_frac,
             avg_probs,
             value_loss,
+            explained_var,
             board,
             scores,
         ) = train_out
@@ -495,6 +501,7 @@ def main(argv):
                 "approx_kl": approx_kl,
                 "clipped_frac": clipped_frac,
                 "value_loss": value_loss,
+                "explained_var": explained_var,
                 "avg_probs": avg_probs,
                 "avg_reward": avg_reward,
                 "avg_attacks": avg_attacks,
