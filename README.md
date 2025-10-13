@@ -1,29 +1,6 @@
 | Demo | Description |
 | ----------- | ----------- |
-| <img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="200"> | <p>The gif to the left is a 500 piece demo of the model playing. The set of pieces in the middle represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice quite a few T-spins. </p><p>The version playing in the example is only able to "see" the board, the active piece, the hold piece, and the queue of the next 5 pieces. It had no way to consider Combo, Back-to-Back (B2B), or Garbage Queue, but a version with such capabilities is currently training.</p><p>The model processes the available information as follows:</p>
-<ol>
-  <li>Convolution layers to make board patches</li>
-  <li>Embed each piece as a vector</li>
-  <li>Run decoder steps on board patches and piece vectors:</li>
-  <ol>
-    <li>Perform self-attention on the sequence of board patches</li>
-    <li>Perform cross-attention between piece vectors and board patches to update board patches</li>
-    <li>Perform self-attention on the sequence of piece vectors</li>
-    <li>Perform cross-attention between board patches and piece vectors to update piece vectors</li>
-    <li>Repeat decoder steps</li>
-  </ol>
-  <li>Autoregressively generate key presses:</li>
-  <ol>
-    <li>Embed each key press as a vector (just START key initially)</li>
-    <li>Run decoder steps on latent state representation (final piece vectors) and key vectors</li>
-    <ol>
-      <li>Perform self-attention of sequence of key vectors</li>
-      <li>Perform cross-attention between latent state representation and key vectors</li>
-    </ol>
-    <li>Pass final key vector sequence through densely connected layers to generate next-key distribution</li>
-    <li>Sample from next-key distribution and append result to key sequence</li>
-  </ol>
-</ol>
+| <img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="200"> | <p>The gif to the left is a 500 piece demo of the model playing. The set of pieces in the middle represent, in order, the active piece, the currently held piece, and the next five pieces. It is apparent that the model still requires substantial training to be competitive, but the keen eye will notice quite a few T-spins. </p><p>The version playing in the example is only able to "see" the board, the active piece, the hold piece, and the queue of the next 5 pieces. It had no way to consider Combo, Back-to-Back (B2B), or Garbage Queue, but a version with such capabilities is currently training.</p><p>The model processes the available information as follows:</p><ol><li>Convolution layers to make board patches</li><li>Embed each piece as a vector</li><li>Run decoder steps on board patches and piece vectors:</li><ol><li>Perform self-attention on the sequence of board patches</li><li>Perform cross-attention between piece vectors and board patches to update board patches</li><li>Perform self-attention on the sequence of piece vectors</li><li>Perform cross-attention between board patches and piece vectors to update piece vectors</li><li>Repeat decoder steps</li></ol><li>Autoregressively generate key presses:</li><ol><li>Embed each key press as a vector (just START key initially)</li><li>Run decoder steps on latent state representation (final piece vectors) and key vectors</li><ol><li>Perform self-attention of sequence of key vectors</li><li>Perform cross-attention between latent state representation and key vectors</li></ol><li>Pass final key vector sequence through densely connected layers to generate next-key distribution</li><li>Sample from next-key distribution and append result to key sequence</li></ol></ol>
 
 # Todo Section: #
 
