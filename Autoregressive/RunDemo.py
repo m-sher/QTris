@@ -43,7 +43,9 @@ p_checkpoint_manager = tf.train.CheckpointManager(
 )
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
-p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2), (None, max_len)])
+p_model.build(
+    input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2), (None, max_len)]
+)
 
 p_model.summary()
 
