@@ -15,7 +15,7 @@ depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.05
-max_len = 15 
+max_len = 15
 
 # Environment params
 generations = 1000000
@@ -37,9 +37,9 @@ num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
-ppo_clip = 0.1
-value_clip = 0.5
-entropy_coef = 0.04
+ppo_clip = 0.2
+value_clip = 0.2
+entropy_coef = 0.06
 
 target_kl = 0.04
 
@@ -200,7 +200,9 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(tf.cast(tf.reduce_any(ratio != clipped_ratio, axis=1), tf.float32))
+    clipped_frac = tf.reduce_mean(
+        tf.cast(tf.reduce_any(ratio != clipped_ratio, axis=1), tf.float32)
+    )
     avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
 
     with tf.GradientTape() as v_tape:
