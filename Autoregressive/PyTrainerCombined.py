@@ -1,5 +1,5 @@
-from Runner import PyTetrisRunner
-from TetrisEnv.Moves import Moves
+from TetrisEnv.PyTetrisRunner import PyTetrisRunner
+from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
 import tensorflow as tf
 from tensorflow_probability import distributions
@@ -10,11 +10,12 @@ import time
 
 # Model params
 piece_dim = 8
+key_dim = 12
 depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.05
-output_dims = [len(Moves._holds), len(Moves._standards), len(Moves._spins)]
+max_len = 15
 
 # Environment params
 generations = 1000000
@@ -92,57 +93,73 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     online_b2b_combo_batch = tf.ensure_shape(
         online_batch["b2b_combo"], (mini_batch_size, 2)
     )
-    online_hold_actions_batch = tf.ensure_shape(
-        online_batch["hold_actions"], (mini_batch_size)
+    online_actions_batch = tf.ensure_shape(
+        online_batch["actions"], (mini_batch_size, max_len)
     )
-    online_standard_actions_batch = tf.ensure_shape(
-        online_batch["standard_actions"], (mini_batch_size)
+
+    log_probs_batch = tf.ensure_shape(
+        online_batch["old_log_probs"][:, 1:], (mini_batch_size, max_len - 1)
     )
-    online_spin_actions_batch = tf.ensure_shape(
-        online_batch["spin_actions"], (mini_batch_size)
-    )
-    old_log_probs_batch = tf.ensure_shape(
-        online_batch["old_log_probs"], (mini_batch_size, 1)
+    mask_batch = tf.ensure_shape(
+        online_batch["masks"], (mini_batch_size, max_len, key_dim)
     )
 
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
+    invalid_mask = mask_batch[:, 1:, :]  # batch, max_len - 1, key_dim
+    pad_mask = tf.cast(
+        online_actions_batch[:, 1:] != Keys.PAD, tf.float32
+    )  # batch, max_len - 1
+    seq_lengths = tf.ensure_shape(
+        tf.reduce_sum(pad_mask, axis=-1, keepdims=True), (mini_batch_size, 1)
+    )
+
+    input_actions_batch = online_actions_batch[:, :-1]
+    target_actions = online_actions_batch[:, 1:]
+
     advantages_batch = (advantages_batch - tf.reduce_mean(advantages_batch)) / (
         tf.math.reduce_std(advantages_batch) + 1e-8
     )
 
     with tf.GradientTape() as p_tape:
-        hold_logits, standard_logits, spin_logits, piece_scores = p_model(
+        logits, piece_scores, key_scores = p_model(
             (
                 online_board_batch,
                 online_pieces_batch,
-                online_b2b_combo_batch
+                online_b2b_combo_batch,
+                input_actions_batch,
             ),
             training=True,
             return_scores=True,
         )
 
-        hold_dist = distributions.Categorical(logits=hold_logits, dtype=tf.int64)
-        standard_dist = distributions.Categorical(logits=standard_logits, dtype=tf.int64)
-        spin_dist = distributions.Categorical(logits=spin_logits, dtype=tf.int64)
+        logits = tf.ensure_shape(
+            logits, (mini_batch_size, max_len - 1, key_dim)
+        )  # batch, max_len - 1, num_actions
 
-        new_hold_log_probs = tf.ensure_shape(
-            hold_dist.log_prob(online_hold_actions_batch), (mini_batch_size,)
-        )
-        new_standard_log_probs = tf.ensure_shape(
-            standard_dist.log_prob(online_standard_actions_batch), (mini_batch_size,)
-        )
-        new_spin_log_probs = tf.ensure_shape(
-            spin_dist.log_prob(online_spin_actions_batch), (mini_batch_size,)
+        masked_logits = tf.where(
+            invalid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+        )  # batch, max_len - 1, num_actions
+
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        new_log_probs = tf.ensure_shape(
+            dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
-            (new_hold_log_probs + new_standard_log_probs + new_spin_log_probs)[..., None], (mini_batch_size, 1)
+            (new_log_probs * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
+        )
+        new_log_probs = tf.ensure_shape(
+            tf.reduce_sum(new_log_probs, axis=1) / seq_lengths, (mini_batch_size, 1)
         )
 
         old_log_probs = tf.ensure_shape(
-            old_log_probs_batch, (mini_batch_size, 1)
+            (log_probs_batch * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
+        )
+        old_log_probs = tf.ensure_shape(
+            tf.reduce_sum(old_log_probs, axis=1) / seq_lengths, (mini_batch_size, 1)
         )
 
         # PPO loss
@@ -154,18 +171,27 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
             (mini_batch_size, 1),
         )
 
-        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
+        surr1 = tf.ensure_shape(
+            ratio * advantages_batch, (mini_batch_size, 1)
+        )
         surr2 = tf.ensure_shape(
             clipped_ratio * advantages_batch,
             (mini_batch_size, 1),
         )
 
-        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+        ppo_loss = -tf.reduce_mean(
+            tf.minimum(surr1, surr2)
+        )
 
         # Compute bonus/penalty
-        entropy = tf.ensure_shape((hold_dist.entropy() + standard_dist.entropy() + spin_dist.entropy())[..., None], (mini_batch_size, 1))
+        entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
+        entropy = tf.ensure_shape(
+            (entropy * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
+        )
+        entropy = tf.reduce_sum(entropy, axis=1) / seq_lengths
+        entropy = tf.reduce_mean(entropy)
 
-        approx_kl = tf.reduce_mean(new_log_probs - old_log_probs)
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -231,12 +257,15 @@ def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef)
 def main(argv):
     # Initialize model and optimizer
     p_model = PolicyModel(
+        batch_size=num_envs,
         piece_dim=piece_dim,
+        key_dim=key_dim,
         depth=depth,
+        max_len=max_len,
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dims=output_dims,
+        output_dim=key_dim,
     )
 
     v_model = ValueModel(
@@ -274,7 +303,8 @@ def main(argv):
         input_shape=[
             (None, 24, 10, 1),
             (None, queue_size + 2),
-            (None, 2)
+            (None, 2),
+            (None, max_len),
         ]
     )
 
@@ -290,6 +320,8 @@ def main(argv):
         max_holes=max_holes,
         max_height=max_height,
         max_steps=max_steps,
+        max_len=max_len,
+        key_dim=key_dim,
         num_steps=num_collection_steps,
         num_envs=num_envs,
         garbage_chance_min=garbage_chance_min,
@@ -322,10 +354,9 @@ def main(argv):
             all_boards,
             all_pieces,
             all_b2b_combo,
-            all_hold_actions,
-            all_standard_actions,
-            all_spin_actions,
+            all_actions,
             all_log_probs,
+            all_masks,
             all_values,
             all_attacks,
             all_clears,
@@ -370,10 +401,9 @@ def main(argv):
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
         b2b_combo_flat = tf.reshape(all_b2b_combo, (-1, 2))
-        hold_actions_flat = tf.reshape(all_hold_actions, (-1,))
-        standard_actions_flat = tf.reshape(all_standard_actions, (-1,))
-        spin_actions_flat = tf.reshape(all_spin_actions, (-1,))
-        log_probs_flat = tf.reshape(all_log_probs, (-1, 1))
+        actions_flat = tf.reshape(all_actions, (-1, max_len))
+        log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
+        masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))
         values_flat = tf.reshape(all_values, (-1, 1))
@@ -385,10 +415,9 @@ def main(argv):
                     "boards": boards_flat,
                     "pieces": pieces_flat,
                     "b2b_combo": b2b_combo_flat,
-                    "hold_actions": hold_actions_flat,
-                    "standard_actions": standard_actions_flat,
-                    "spin_actions": spin_actions_flat,
+                    "actions": actions_flat,
                     "old_log_probs": log_probs_flat,
+                    "masks": masks_flat,
                     "advantages": advantages_flat,
                     "returns": returns_flat,
                     "old_values": values_flat,

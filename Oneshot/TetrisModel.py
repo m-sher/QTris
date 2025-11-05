@@ -2,6 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
+from TetrisEnv.Moves import Convert
 
 
 @tf.function(jit_compile=True)
@@ -133,15 +134,20 @@ class DecoderLayer(layers.Layer):
         return out_seq, attn_scores
 
 
-class TetrisModel(keras.Model):
+class PolicyModel(keras.Model):
     def __init__(
-        self, piece_dim, depth, num_heads, num_layers, dropout_rate, output_dim
+        self,
+        piece_dim,
+        depth,
+        num_heads,
+        num_layers,
+        dropout_rate,
+        output_dims,
     ):
         super().__init__()
 
         self._depth = depth
-        self._output_dim = output_dim
-        self._num_layers = num_layers
+        self._output_dims = output_dims
 
         self.make_patches = keras.Sequential(
             [
@@ -175,12 +181,13 @@ class TetrisModel(keras.Model):
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
 
-        self.board_encoder_layers = [
-            EncoderLayer(
+        self.board_decoder_layers = [
+            DecoderLayer(
                 units=depth,
+                causal=False,
                 num_heads=num_heads,
                 dropout_rate=dropout_rate,
-                name=f"board_enc_{i}",
+                name=f"board_dec_{i}",
             )
             for i in range(num_layers)
         ]
@@ -206,11 +213,204 @@ class TetrisModel(keras.Model):
             for i in range(num_layers)
         ]
 
+        self._b2b_combo_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="b2b_combo_dense",
+        )
+
         self.trunk = keras.Sequential(
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
-                layers.Dense(depth * 4, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+                layers.Dense(depth // 2, activation="relu"),
+            ],
+            name="trunk",
+        )
+
+        self.top = layers.Dense(sum(output_dims))
+
+    @tf.function(jit_compile=True)
+    def process_obs(self, inputs, training=False):
+        board, piece, b2b_combo = inputs
+
+        piece_scores = []
+        patches = self.make_patches(board, training=training)
+        board_dec = self.patch_pos_encoding(patches)
+
+        piece_embedding = self.piece_embedding(piece, training=training)
+        piece_dec = self.piece_pos_encoding(piece_embedding)
+
+        b2b_combo_embedding = self._b2b_combo_dense(b2b_combo, training=training)
+        piece_dec += b2b_combo_embedding[:, None, :]
+
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
+            )
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
+
+        return piece_dec, piece_scores
+
+    @tf.function(jit_compile=True)
+    def call(self, inputs, training=False, return_scores=False):
+        piece_dec, piece_scores = self.process_obs(inputs, training=training)
+
+        trunk_out = self.trunk(piece_dec, training=training)
+
+        hold_logits, standard_logits, spin_logits = tf.split(
+            self.top(trunk_out, training=training), self._output_dims, axis=-1
+        )
+
+        if return_scores:
+            return hold_logits, standard_logits, spin_logits, piece_scores
+        else:
+            return hold_logits, standard_logits, spin_logits
+
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=None, dtype=tf.bool),
+        ],
+    )
+    def predict(self, inputs, greedy=False):
+        piece_dec, piece_scores = self.process_obs(inputs, training=False)
+
+        trunk_out = self.trunk(piece_dec, training=False)
+
+        hold_logits, standard_logits, spin_logits = tf.split(
+            self.top(trunk_out, training=False), self._output_dims, axis=-1
+        )
+
+        hold_dist = distributions.Categorical(logits=hold_logits, dtype=tf.int64)
+        standard_dist = distributions.Categorical(
+            logits=standard_logits, dtype=tf.int64
+        )
+        spin_dist = distributions.Categorical(logits=spin_logits, dtype=tf.int64)
+
+        if greedy:
+            hold_action = tf.argmax(hold_logits, axis=-1, output_type=tf.int64)
+            standard_action = tf.argmax(standard_logits, axis=-1, output_type=tf.int64)
+            spin_action = tf.argmax(spin_logits, axis=-1, output_type=tf.int64)
+        else:
+            hold_action = hold_dist.sample()
+            standard_action = standard_dist.sample()
+            spin_action = spin_dist.sample()
+
+        hold_log_prob = hold_dist.log_prob(hold_action)
+        standard_log_prob = standard_dist.log_prob(standard_action)
+        spin_log_prob = spin_dist.log_prob(spin_action)
+
+        return (
+            hold_action,
+            standard_action,
+            spin_action,
+            hold_log_prob,
+            standard_log_prob,
+            spin_log_prob,
+            piece_scores,
+        )
+
+
+class ValueModel(keras.Model):
+    def __init__(
+        self, piece_dim, depth, num_heads, num_layers, dropout_rate, output_dim
+    ):
+        super().__init__()
+
+        self._depth = depth
+
+        self.make_patches = keras.Sequential(
+            [
+                keras.Input(shape=(24, 10, 1)),
+                layers.Rescaling(scale=2.0, offset=-1.0),
+                layers.Conv2D(
+                    filters=depth // 2,
+                    kernel_size=3,
+                    strides=1,
+                    padding="same",
+                    activation="relu",
+                ),
+                layers.Conv2D(
+                    filters=depth,
+                    kernel_size=3,
+                    strides=1,
+                    padding="same",
+                    activation="relu",
+                ),
+                layers.Conv2D(
+                    filters=depth,
+                    kernel_size=2,
+                    strides=2,
+                    padding="valid",
+                    activation="relu",
+                ),
+                layers.Reshape((-1, depth)),
+            ]
+        )
+
+        num_patches = self.make_patches.output_shape[1]
+        self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
+
+        self.board_decoder_layers = [
+            DecoderLayer(
+                units=depth,
+                causal=False,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"board_dec_{i}",
+            )
+            for i in range(num_layers)
+        ]
+
+        self.piece_embedding = layers.Embedding(
+            input_dim=piece_dim,
+            output_dim=depth,
+        )
+
+        self.piece_pos_encoding = PosEncoding(
+            depth=depth,
+            max_length=7,
+        )
+
+        self.piece_decoder_layers = [
+            DecoderLayer(
+                units=depth,
+                causal=False,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"piece_dec_{i}",
+            )
+            for i in range(num_layers)
+        ]
+
+        self._b2b_combo_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="b2b_combo_dense",
+        )
+
+        self.trunk = keras.Sequential(
+            [
+                layers.Flatten(),
+                layers.Dropout(dropout_rate),
+                layers.Dense(depth, activation="relu"),
+                layers.Dense(depth // 2, activation="relu"),
             ],
             name="trunk",
         )
@@ -219,31 +419,38 @@ class TetrisModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def process_obs(self, inputs, training=False):
-        board, piece = inputs
+        board, piece, b2b_combo = inputs
 
         piece_scores = []
         patches = self.make_patches(board, training=training)
-        board_enc = self.patch_pos_encoding(patches)
-
-        for board_enc_layer in self.board_encoder_layers:
-            board_enc = board_enc_layer(board_enc, training=training)
+        board_dec = self.patch_pos_encoding(patches)
 
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        for piece_dec_layer in self.piece_decoder_layers:
-            piece_dec, last_attn = piece_dec_layer(
-                [board_enc, piece_dec], training=training
+        b2b_combo_embedding = self._b2b_combo_dense(b2b_combo, training=training)
+        piece_dec += b2b_combo_embedding[:, None, :]
+
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
             )
-            piece_scores.append(last_attn)
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
 
         return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
-        board, piece = inputs
+        board, piece, b2b_combo = inputs
 
-        piece_dec, piece_scores = self.process_obs((board, piece), training=training)
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=training
+        )
 
         trunk_out = self.trunk(piece_dec, training=training)
 
@@ -255,31 +462,15 @@ class TetrisModel(keras.Model):
             return output
 
     @tf.function(jit_compile=True)
-    def predict(self, inputs, return_scores=False, greedy=False):
-        board, piece = inputs
+    def predict(self, inputs):
+        board, piece, b2b_combo = inputs
 
-        piece_dec, piece_scores = self.process_obs((board, piece), training=False)
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=False
+        )
 
         trunk_out = self.trunk(piece_dec, training=False)
 
         output = self.top(trunk_out, training=False)
 
-        if self._output_dim > 1:
-            dist = distributions.Categorical(logits=output, dtype=tf.int64)
-
-            if greedy:
-                action = tf.argmax(output, axis=-1, output_type=tf.int64)
-            else:
-                action = dist.sample()
-
-            log_prob = dist.log_prob(action)
-
-            if return_scores:
-                return action, log_prob, piece_scores
-            else:
-                return action, log_prob
-        else:
-            if return_scores:
-                return output, piece_scores
-            else:
-                return output
+        return output
