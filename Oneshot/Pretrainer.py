@@ -1,7 +1,7 @@
-from TetrisEnvs.PyTetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnvs.PyTetrisEnv.Moves import Moves, Convert
-from TetrisEnvs.PyTetrisEnv.Pieces import PieceType
-from TetrisModel import TetrisModel
+from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.Moves import Moves, Convert
+from TetrisEnv.Pieces import PieceType
+from TetrisModel import PolicyModel
 import multiprocessing
 import tensorflow as tf
 from tensorflow import keras
@@ -32,7 +32,7 @@ class Pretrainer:
         """
         raw_data = [[], []]
         for file in glob.glob(
-            "E:\\MisaMino-Tetrio\\MisaMino\\tetris_ai\\logs\\game*.txt"
+            "/mnt/e/MisaMino-Tetrio/MisaMino/tetris_ai/logs/game*.txt"
         ):
             with open(file) as f:
                 contents = f.readlines()
@@ -180,12 +180,13 @@ class Pretrainer:
         # Checking non-spins first to avoid unnecessary keypresses with spins
         for spin in range(len(Moves._spins)):
             for standard in range(len(Moves._standards)):
-                action = {"hold": hold, "standard": standard, "spin": spin}
+                action_ind = Convert.to_ind[hold, standard, spin]
+                key_sequence = Convert.to_sequence[action_ind]
                 active_piece = test_env._spawn_piece(PieceType(piece_seq[0]))
                 hold_piece = PieceType(piece_seq[1])
                 queue = [PieceType(piece) for piece in piece_seq[2:]]
-                _, _, sim_board, _, _, _ = test_env._execute_action(
-                    board, active_piece, hold_piece, queue, action
+                _, _, _, sim_board, _, _, _, _ = test_env._execute_action(
+                    board, board, active_piece, hold_piece, queue, key_sequence
                 )
                 if np.array_equal(sim_board, next_board):
                     return board, piece_seq, (hold, standard, spin)
@@ -202,7 +203,9 @@ class Pretrainer:
         """
 
         # Initialize test environment
-        self.test_env = PyTetrisEnv(queue_size=5, max_holes=100, seed=123, idx=0)
+        self.test_env = PyTetrisEnv(
+            queue_size=5, max_holes=100, max_height=20, max_steps=100, seed=0, idx=0
+        )
 
         # Load transitions
         raw_data = self._load_raw_data()
@@ -233,10 +236,10 @@ class Pretrainer:
 
         return dataset
 
-    @tf.function
-    def _get_action_ind(self, separate_action):
-        action = tf.gather_nd(Convert.to_ind, separate_action)
-        return action
+    # @tf.function
+    # def _get_action_ind(self, separate_action):
+    #     action = tf.gather_nd(Convert.to_ind, separate_action)
+    #     return action
 
     def _load_dataset(self, batch_size: int | None = 1024) -> tf.data.Dataset:
         """
@@ -266,7 +269,8 @@ class Pretrainer:
                 lambda board, piece_seq, separate_action: {
                     "boards": tf.cast(board[..., None], tf.float32),
                     "pieces": tf.cast(piece_seq, tf.int64),
-                    "actions": tf.cast(self._get_action_ind(separate_action), tf.int64),
+                    "actions": tf.cast(separate_action, tf.int64),
+                    # "actions": tf.cast(self._get_action_ind(separate_action), tf.int64),
                 },
                 num_parallel_calls=tf.data.AUTOTUNE,
                 deterministic=False,
@@ -296,9 +300,16 @@ class Pretrainer:
 
         with tf.GradientTape() as tape:
             # Forward pass
-            logits = model((board, piece_seq), training=True)
+            hold_logits, standard_logits, spin_logits, _ = model(
+                (board, piece_seq, tf.zeros((tf.shape(board)[0], 2), dtype=tf.float32)),
+                training=True,
+                return_scores=True,
+            )
             # Compute loss
-            loss = self.scc(target_action, logits)
+            hold_loss = self.scc(target_action[:, 0], hold_logits)
+            standard_loss = self.scc(target_action[:, 1], standard_logits)
+            spin_loss = self.scc(target_action[:, 2], spin_logits)
+            loss = hold_loss + standard_loss + spin_loss
         # Compute and apply gradients
         gradients = tape.gradient(loss, model.trainable_variables)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
@@ -306,7 +317,17 @@ class Pretrainer:
         # Compute accuracy
         accuracy = tf.reduce_mean(
             tf.cast(
-                tf.argmax(logits, axis=-1, output_type=tf.int64) == target_action,
+                tf.stack(
+                    [
+                        tf.argmax(hold_logits, axis=-1, output_type=tf.int64)
+                        == target_action[:, 0],
+                        tf.argmax(standard_logits, axis=-1, output_type=tf.int64)
+                        == target_action[:, 1],
+                        tf.argmax(spin_logits, axis=-1, output_type=tf.int64)
+                        == target_action[:, 2],
+                    ],
+                    axis=-1,
+                ),
                 tf.float32,
             )
         )
@@ -346,30 +367,30 @@ class Pretrainer:
 def main():
     # Model params
     piece_dim = 8
-    num_actions = 560
     depth = 64
     num_heads = 4
     num_layers = 6
     dropout_rate = 0.1
+    output_dims = [len(Moves._holds), len(Moves._standards), len(Moves._spins)]
     batch_size = 256
 
     queue_size = 5
 
     # Initialize model and optimizer
-    model = TetrisModel(
+    model = PolicyModel(
         piece_dim=piece_dim,
         depth=depth,
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dim=num_actions,
+        output_dims=output_dims,
     )
 
-    optimizer = keras.optimizers.Adam(1e-4)
+    optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
     model.compile(optimizer=optimizer, jit_compile=True)
     print("Initialized model and optimizer.", flush=True)
 
-    model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2)])
+    model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
 
     model.summary()
     input()

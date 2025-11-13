@@ -2,7 +2,6 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisEnv.Moves import Convert
 
 
 @tf.function(jit_compile=True)
@@ -142,12 +141,12 @@ class PolicyModel(keras.Model):
         num_heads,
         num_layers,
         dropout_rate,
-        output_dims,
+        output_dim,
     ):
         super().__init__()
 
         self._depth = depth
-        self._output_dims = output_dims
+        self._output_dim = output_dim
 
         self.make_patches = keras.Sequential(
             [
@@ -225,13 +224,12 @@ class PolicyModel(keras.Model):
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
-                layers.Dense(depth, activation="relu"),
-                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth * 2, activation="relu"),
             ],
             name="trunk",
         )
 
-        self.top = layers.Dense(sum(output_dims))
+        self.top = layers.Dense(output_dim)
 
     @tf.function(jit_compile=True)
     def process_obs(self, inputs, training=False):
@@ -266,14 +264,12 @@ class PolicyModel(keras.Model):
 
         trunk_out = self.trunk(piece_dec, training=training)
 
-        hold_logits, standard_logits, spin_logits = tf.split(
-            self.top(trunk_out, training=training), self._output_dims, axis=-1
-        )
+        logits = self.top(trunk_out, training=training)
 
         if return_scores:
-            return hold_logits, standard_logits, spin_logits, piece_scores
+            return logits, piece_scores
         else:
-            return hold_logits, standard_logits, spin_logits
+            return logits
 
     @tf.function(
         jit_compile=True,
@@ -282,45 +278,37 @@ class PolicyModel(keras.Model):
                 tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
                 tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
                 tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1600), dtype=tf.bool),
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
         ],
     )
     def predict(self, inputs, greedy=False):
-        piece_dec, piece_scores = self.process_obs(inputs, training=False)
+        board, piece, b2b_combo, action_mask = inputs
+
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo), training=False
+        )
 
         trunk_out = self.trunk(piece_dec, training=False)
 
-        hold_logits, standard_logits, spin_logits = tf.split(
-            self.top(trunk_out, training=False), self._output_dims, axis=-1
+        logits = self.top(trunk_out, training=False)
+        masked_logits = tf.where(
+            action_mask, logits, tf.constant(-1e9, dtype=tf.float32)
         )
 
-        hold_dist = distributions.Categorical(logits=hold_logits, dtype=tf.int64)
-        standard_dist = distributions.Categorical(
-            logits=standard_logits, dtype=tf.int64
-        )
-        spin_dist = distributions.Categorical(logits=spin_logits, dtype=tf.int64)
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
         if greedy:
-            hold_action = tf.argmax(hold_logits, axis=-1, output_type=tf.int64)
-            standard_action = tf.argmax(standard_logits, axis=-1, output_type=tf.int64)
-            spin_action = tf.argmax(spin_logits, axis=-1, output_type=tf.int64)
+            action = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
         else:
-            hold_action = hold_dist.sample()
-            standard_action = standard_dist.sample()
-            spin_action = spin_dist.sample()
+            action = dist.sample()
 
-        hold_log_prob = hold_dist.log_prob(hold_action)
-        standard_log_prob = standard_dist.log_prob(standard_action)
-        spin_log_prob = spin_dist.log_prob(spin_action)
+        log_prob = dist.log_prob(action)
 
         return (
-            hold_action,
-            standard_action,
-            spin_action,
-            hold_log_prob,
-            standard_log_prob,
-            spin_log_prob,
+            action,
+            log_prob,
             piece_scores,
         )
 
