@@ -14,7 +14,7 @@ depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.05
-output_dims = [len(Moves._holds), len(Moves._standards), len(Moves._spins)]
+output_dim = 1600
 
 # Environment params
 generations = 1000000
@@ -24,13 +24,14 @@ queue_size = 5
 max_holes = 50
 max_height = 18
 max_steps = 500
+max_len = 10
 garbage_chance_min = 0.0
 garbage_chance_max = 0.15
 garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
@@ -92,15 +93,8 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     online_b2b_combo_batch = tf.ensure_shape(
         online_batch["b2b_combo"], (mini_batch_size, 2)
     )
-    online_hold_actions_batch = tf.ensure_shape(
-        online_batch["hold_actions"], (mini_batch_size)
-    )
-    online_standard_actions_batch = tf.ensure_shape(
-        online_batch["standard_actions"], (mini_batch_size)
-    )
-    online_spin_actions_batch = tf.ensure_shape(
-        online_batch["spin_actions"], (mini_batch_size)
-    )
+    online_actions_batch = tf.ensure_shape(online_batch["actions"], (mini_batch_size))
+    online_masks_batch = tf.ensure_shape(online_batch["masks"], (mini_batch_size, 1600))
     old_log_probs_batch = tf.ensure_shape(
         online_batch["old_log_probs"], (mini_batch_size, 1)
     )
@@ -114,36 +108,23 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     )
 
     with tf.GradientTape() as p_tape:
-        hold_logits, standard_logits, spin_logits, piece_scores = p_model(
-            (
-                online_board_batch,
-                online_pieces_batch,
-                online_b2b_combo_batch
-            ),
+        logits, piece_scores = p_model(
+            (online_board_batch, online_pieces_batch, online_b2b_combo_batch),
             training=True,
             return_scores=True,
         )
+        masked_logits = tf.where(
+            online_masks_batch, logits, tf.constant(-1e9, dtype=tf.float32)
+        )
 
-        hold_dist = distributions.Categorical(logits=hold_logits, dtype=tf.int64)
-        standard_dist = distributions.Categorical(logits=standard_logits, dtype=tf.int64)
-        spin_dist = distributions.Categorical(logits=spin_logits, dtype=tf.int64)
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
-        new_hold_log_probs = tf.ensure_shape(
-            hold_dist.log_prob(online_hold_actions_batch), (mini_batch_size,)
-        )
-        new_standard_log_probs = tf.ensure_shape(
-            standard_dist.log_prob(online_standard_actions_batch), (mini_batch_size,)
-        )
-        new_spin_log_probs = tf.ensure_shape(
-            spin_dist.log_prob(online_spin_actions_batch), (mini_batch_size,)
-        )
         new_log_probs = tf.ensure_shape(
-            (new_hold_log_probs + new_standard_log_probs + new_spin_log_probs)[..., None], (mini_batch_size, 1)
+            dist.log_prob(online_actions_batch)[..., None],
+            (mini_batch_size, 1),
         )
 
-        old_log_probs = tf.ensure_shape(
-            old_log_probs_batch, (mini_batch_size, 1)
-        )
+        old_log_probs = tf.ensure_shape(old_log_probs_batch, (mini_batch_size, 1))
 
         # PPO loss
         ratio = tf.ensure_shape(
@@ -163,7 +144,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
         # Compute bonus/penalty
-        entropy = tf.ensure_shape((hold_dist.entropy() + standard_dist.entropy() + spin_dist.entropy())[..., None], (mini_batch_size, 1))
+        entropy = tf.ensure_shape(dist.entropy()[..., None], (mini_batch_size, 1))
 
         approx_kl = tf.reduce_mean(new_log_probs - old_log_probs)
 
@@ -174,9 +155,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(
-        tf.cast(ratio != clipped_ratio, tf.float32)
-    )
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
     avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
 
     with tf.GradientTape() as v_tape:
@@ -236,7 +215,7 @@ def main(argv):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dims=output_dims,
+        output_dim=output_dim,
     )
 
     v_model = ValueModel(
@@ -261,22 +240,16 @@ def main(argv):
     p_checkpoint_manager = tf.train.CheckpointManager(
         p_checkpoint, "./policy_checkpoints", max_to_keep=3
     )
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
-    p_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 2)
-        ]
-    )
+    p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
 
     v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
     print("Built models", flush=True)
@@ -290,6 +263,7 @@ def main(argv):
         max_holes=max_holes,
         max_height=max_height,
         max_steps=max_steps,
+        max_len=max_len,
         num_steps=num_collection_steps,
         num_envs=num_envs,
         garbage_chance_min=garbage_chance_min,
@@ -298,7 +272,6 @@ def main(argv):
         garbage_rows_max=garbage_rows_max,
         p_model=p_model,
         v_model=v_model,
-        seed=None,
     )
 
     print("Initialized runner", flush=True)
@@ -322,9 +295,8 @@ def main(argv):
             all_boards,
             all_pieces,
             all_b2b_combo,
-            all_hold_actions,
-            all_standard_actions,
-            all_spin_actions,
+            all_actions,
+            all_masks,
             all_log_probs,
             all_values,
             all_attacks,
@@ -338,7 +310,7 @@ def main(argv):
             all_bumpy_penalty,
             all_death_penalty,
             all_dones,
-        ) = runner.collect_trajectory(render=False)
+        ) = runner.collect_trajectory(render=True)
 
         all_rewards = (
             all_attacks
@@ -370,9 +342,8 @@ def main(argv):
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
         b2b_combo_flat = tf.reshape(all_b2b_combo, (-1, 2))
-        hold_actions_flat = tf.reshape(all_hold_actions, (-1,))
-        standard_actions_flat = tf.reshape(all_standard_actions, (-1,))
-        spin_actions_flat = tf.reshape(all_spin_actions, (-1,))
+        actions_flat = tf.reshape(all_actions, (-1,))
+        masks_flat = tf.reshape(all_masks, (-1, 1600))
         log_probs_flat = tf.reshape(all_log_probs, (-1, 1))
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))
@@ -385,9 +356,8 @@ def main(argv):
                     "boards": boards_flat,
                     "pieces": pieces_flat,
                     "b2b_combo": b2b_combo_flat,
-                    "hold_actions": hold_actions_flat,
-                    "standard_actions": standard_actions_flat,
-                    "spin_actions": spin_actions_flat,
+                    "actions": actions_flat,
+                    "masks": masks_flat,
                     "old_log_probs": log_probs_flat,
                     "advantages": advantages_flat,
                     "returns": returns_flat,

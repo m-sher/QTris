@@ -1,5 +1,5 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Convert
+from TetrisEnv.Moves import Convert, Keys
 import tensorflow as tf
 from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
@@ -14,6 +14,7 @@ class PyTetrisRunner:
         max_holes: Optional[int],
         max_height: int,
         max_steps: int,
+        max_len: int,
         num_steps: int,
         num_envs: int,
         garbage_chance_min: float,
@@ -27,7 +28,7 @@ class PyTetrisRunner:
         self._queue_size = queue_size
         self._num_steps = num_steps
         self._num_envs = num_envs
-
+        self._max_len = max_len
         self.p_model = p_model
         self.v_model = v_model
 
@@ -43,6 +44,7 @@ class PyTetrisRunner:
                 max_holes=max_holes,
                 max_height=max_height,
                 max_steps=max_steps,
+                max_len=max_len,
                 seed=seed,
                 idx=idx,
                 garbage_chance=garbage_chances[idx],
@@ -96,23 +98,17 @@ class PyTetrisRunner:
             dynamic_size=False,
             element_shape=(self._num_envs, 2),
         )
-        all_hold_actions = tf.TensorArray(
+        all_actions = tf.TensorArray(
             dtype=tf.int64,
             size=self._num_steps,
             dynamic_size=False,
             element_shape=(self._num_envs,),
         )
-        all_standard_actions = tf.TensorArray(
-            dtype=tf.int64,
+        all_masks = tf.TensorArray(
+            dtype=tf.bool,
             size=self._num_steps,
             dynamic_size=False,
-            element_shape=(self._num_envs,),
-        )
-        all_spin_actions = tf.TensorArray(
-            dtype=tf.int64,
-            size=self._num_steps,
-            dynamic_size=False,
-            element_shape=(self._num_envs,),
+            element_shape=(self._num_envs, 1600),
         )
         all_log_probs = tf.TensorArray(
             dtype=tf.float32,
@@ -207,6 +203,11 @@ class PyTetrisRunner:
             board = time_step.observation["board"]
             pieces = time_step.observation["pieces"]
             b2b_combo = time_step.observation["b2b_combo"]
+            non_hold_sequences = time_step.observation["non_hold_sequences"]
+            hold_sequences = time_step.observation["hold_sequences"]
+            non_hold_mask = tf.reduce_any(non_hold_sequences != Keys.PAD, axis=-1)
+            hold_mask = tf.reduce_any(hold_sequences != Keys.PAD, axis=-1)
+            action_mask = tf.concat([non_hold_mask, hold_mask], axis=-1)
 
             # Render the frame
             if render:
@@ -223,14 +224,15 @@ class PyTetrisRunner:
                 screen.blit(board_surf, (0, 0))
                 pygame.display.update()
 
-            hold_action, standard_action, spin_action, hold_log_prob, standard_log_prob, spin_log_prob, _ = self.p_model.predict(
-                (board, pieces, b2b_combo)
-            )
+            (
+                action,
+                log_prob,
+                _,
+            ) = self.p_model.predict((board, pieces, b2b_combo, action_mask))
             values = self.v_model.predict((board, pieces, b2b_combo))
 
-            combined_actions = tf.stack([hold_action, standard_action, spin_action], axis=-1)
-            sequence_ind = tf.gather_nd(Convert.to_ind, combined_actions)
-            key_sequence = tf.gather(Convert.to_sequence, sequence_ind)
+            key_sequence = tf.gather(Convert.to_sequence, action)
+
             time_step = self.env.step(key_sequence)
 
             reward = time_step.reward
@@ -251,10 +253,9 @@ class PyTetrisRunner:
             all_boards = all_boards.write(t, board)
             all_pieces = all_pieces.write(t, pieces)
             all_b2b_combo = all_b2b_combo.write(t, b2b_combo)
-            all_hold_actions = all_hold_actions.write(t, hold_action)
-            all_standard_actions = all_standard_actions.write(t, standard_action)
-            all_spin_actions = all_spin_actions.write(t, spin_action)
-            all_log_probs = all_log_probs.write(t, hold_log_prob + standard_log_prob + spin_log_prob)
+            all_actions = all_actions.write(t, action)
+            all_masks = all_masks.write(t, action_mask)
+            all_log_probs = all_log_probs.write(t, log_prob)
             all_values = all_values.write(t, values)
 
             # Store the penalties and rewards
@@ -274,9 +275,8 @@ class PyTetrisRunner:
         all_boards = all_boards.stack()
         all_pieces = all_pieces.stack()
         all_b2b_combo = all_b2b_combo.stack()
-        all_hold_actions = all_hold_actions.stack()
-        all_standard_actions = all_standard_actions.stack()
-        all_spin_actions = all_spin_actions.stack()
+        all_actions = all_actions.stack()
+        all_masks = all_masks.stack()
         all_log_probs = all_log_probs.stack()
         all_values = all_values.stack()
         all_attacks = all_attacks.stack()
@@ -295,9 +295,8 @@ class PyTetrisRunner:
             all_boards,
             all_pieces,
             all_b2b_combo,
-            all_hold_actions,
-            all_standard_actions,
-            all_spin_actions,
+            all_actions,
+            all_masks,
             all_log_probs,
             all_values,
             all_attacks,
