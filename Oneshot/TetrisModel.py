@@ -224,7 +224,7 @@ class PolicyModel(keras.Model):
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
-                layers.Dense(depth * 2, activation="relu"),
+                layers.Dense(depth * 4, activation="relu"),
             ],
             name="trunk",
         )
@@ -397,8 +397,8 @@ class ValueModel(keras.Model):
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
+                layers.Dense(depth * 4, activation="relu"),
                 layers.Dense(depth, activation="relu"),
-                layers.Dense(depth // 2, activation="relu"),
             ],
             name="trunk",
         )

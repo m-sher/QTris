@@ -31,7 +31,7 @@ garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
-mini_batch_size = 512
+mini_batch_size = 1024
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
@@ -41,7 +41,7 @@ ppo_clip = 0.2
 value_clip = 0.5
 entropy_coef = 0.03
 
-target_kl = 0.04
+target_kl = 0.03
 
 config = {
     "num_envs": num_envs,
@@ -144,9 +144,9 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
         # Compute bonus/penalty
-        entropy = tf.ensure_shape(dist.entropy()[..., None], (mini_batch_size, 1))
+        entropy = tf.reduce_mean(dist.entropy())
 
-        approx_kl = tf.reduce_mean(new_log_probs - old_log_probs)
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -156,7 +156,6 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
-    avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
 
     with tf.GradientTape() as v_tape:
         values = v_model(
@@ -187,7 +186,6 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         entropy,
         approx_kl,
         clipped_frac,
-        avg_probs,
         value_loss,
         explained_var,
         online_board_batch[0],
@@ -229,10 +227,10 @@ def main(argv):
 
     print("Initialized models", flush=True)
 
-    p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
+    p_optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    v_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
+    v_optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
     v_model.compile(optimizer=v_optimizer, jit_compile=True)
 
     # Initialize checkpoint manager
@@ -310,7 +308,7 @@ def main(argv):
             all_bumpy_penalty,
             all_death_penalty,
             all_dones,
-        ) = runner.collect_trajectory(render=True)
+        ) = runner.collect_trajectory(render=False)
 
         all_rewards = (
             all_attacks
@@ -402,7 +400,6 @@ def main(argv):
             entropy,
             approx_kl,
             clipped_frac,
-            avg_probs,
             value_loss,
             explained_var,
             board,
@@ -425,7 +422,8 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-
+        avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
+        avg_valid_actions = tf.reduce_mean(tf.reduce_sum(tf.cast(all_masks, tf.float32), axis=-1))
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
@@ -440,6 +438,7 @@ def main(argv):
                 "value_loss": value_loss,
                 "explained_var": explained_var,
                 "avg_probs": avg_probs,
+                "avg_valid_actions": avg_valid_actions,
                 "avg_reward": avg_reward,
                 "avg_attacks": avg_attacks,
                 "avg_clears": avg_clears,
