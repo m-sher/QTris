@@ -45,7 +45,7 @@ class PyTetrisRunner:
                 max_height=max_height,
                 max_steps=max_steps,
                 max_len=max_len,
-                seed=seed,
+                seed=seed * i + i,  # Remember this
                 idx=idx,
                 garbage_chance=garbage_chances[idx],
                 garbage_min=garbage_rows_min,
