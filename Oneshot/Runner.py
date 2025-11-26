@@ -23,7 +23,7 @@ class PyTetrisRunner:
         garbage_rows_max: int,
         p_model: Any,
         v_model: Any,
-        seed: int = 123,
+        seed: int | None = None,
     ) -> None:
         self._queue_size = queue_size
         self._num_steps = num_steps
@@ -45,7 +45,7 @@ class PyTetrisRunner:
                 max_height=max_height,
                 max_steps=max_steps,
                 max_len=max_len,
-                seed=seed * i + i,  # Remember this
+                seed=seed,
                 idx=idx,
                 garbage_chance=garbage_chances[idx],
                 garbage_min=garbage_rows_min,
@@ -108,7 +108,7 @@ class PyTetrisRunner:
             dtype=tf.bool,
             size=self._num_steps,
             dynamic_size=False,
-            element_shape=(self._num_envs, 1600),
+            element_shape=(self._num_envs, 160),
         )
         all_log_probs = tf.TensorArray(
             dtype=tf.float32,
@@ -203,11 +203,8 @@ class PyTetrisRunner:
             board = time_step.observation["board"]
             pieces = time_step.observation["pieces"]
             b2b_combo = time_step.observation["b2b_combo"]
-            non_hold_sequences = time_step.observation["non_hold_sequences"]
-            hold_sequences = time_step.observation["hold_sequences"]
-            non_hold_mask = tf.reduce_any(non_hold_sequences != Keys.PAD, axis=-1)
-            hold_mask = tf.reduce_any(hold_sequences != Keys.PAD, axis=-1)
-            action_mask = tf.concat([non_hold_mask, hold_mask], axis=-1)
+            sequences = time_step.observation["sequences"]
+            action_mask = tf.reduce_any(sequences != Keys.PAD, axis=-1)
 
             # Render the frame
             if render:
@@ -231,7 +228,7 @@ class PyTetrisRunner:
             ) = self.p_model.predict((board, pieces, b2b_combo, action_mask))
             values = self.v_model.predict((board, pieces, b2b_combo))
 
-            key_sequence = tf.gather(Convert.to_sequence, action)
+            key_sequence = tf.gather(sequences, action, batch_dims=1)
 
             time_step = self.env.step(key_sequence)
 
