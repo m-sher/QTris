@@ -14,17 +14,17 @@ depth = 64
 num_heads = 4
 num_layers = 4
 dropout_rate = 0.05
-output_dim = 1600
+output_dim = 160
 
 # Environment params
-generations = 1000000
-num_envs = 64
-num_collection_steps = 64
+generations = 1_000_000
+num_envs = 32
+num_collection_steps = 128
 queue_size = 5
 max_holes = 50
 max_height = 18
 max_steps = 500
-max_len = 10
+max_len = 15
 garbage_chance_min = 0.0
 garbage_chance_max = 0.15
 garbage_rows_min = 1
@@ -39,9 +39,9 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
+entropy_coef = 0.02
 
-target_kl = 0.03
+target_kl = 0.01
 
 config = {
     "num_envs": num_envs,
@@ -94,7 +94,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         online_batch["b2b_combo"], (mini_batch_size, 2)
     )
     online_actions_batch = tf.ensure_shape(online_batch["actions"], (mini_batch_size))
-    online_masks_batch = tf.ensure_shape(online_batch["masks"], (mini_batch_size, 1600))
+    online_masks_batch = tf.ensure_shape(online_batch["masks"], (mini_batch_size, 160))
     old_log_probs_batch = tf.ensure_shape(
         online_batch["old_log_probs"], (mini_batch_size, 1)
     )
@@ -238,13 +238,13 @@ def main(argv):
     p_checkpoint_manager = tf.train.CheckpointManager(
         p_checkpoint, "./policy_checkpoints", max_to_keep=3
     )
-    # p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    # v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
     p_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
@@ -341,7 +341,7 @@ def main(argv):
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
         b2b_combo_flat = tf.reshape(all_b2b_combo, (-1, 2))
         actions_flat = tf.reshape(all_actions, (-1,))
-        masks_flat = tf.reshape(all_masks, (-1, 1600))
+        masks_flat = tf.reshape(all_masks, (-1, 160))
         log_probs_flat = tf.reshape(all_log_probs, (-1, 1))
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))

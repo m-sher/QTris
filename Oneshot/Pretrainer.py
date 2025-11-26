@@ -1,283 +1,79 @@
-from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Moves, Convert
-from TetrisEnv.Pieces import PieceType
 from TetrisModel import PolicyModel
-import multiprocessing
+from pathlib import Path
+
 import tensorflow as tf
 from tensorflow import keras
-import numpy as np
-import glob
-from tqdm import tqdm
-import time
-import os
 
 
 class Pretrainer:
-    def __init__(self):
-        self._new_pieces = {
-            0: PieceType.N.value,
-            1: PieceType.I.value,
-            2: PieceType.T.value,
-            3: PieceType.L.value,
-            4: PieceType.J.value,
-            5: PieceType.Z.value,
-            6: PieceType.S.value,
-            7: PieceType.O.value,
-        }
+    def __init__(
+        self,
+        dataset_root: str | Path = "../autoregressive_expert_dataset",
+        board_cols: int = 10,
+    ):
+        self._dataset_root = Path(dataset_root)
+        self._board_cols = board_cols
+        self._rotations = 4
+        self._kick_states = 2
+        self._per_hold = self._board_cols * self._rotations * self._kick_states
         self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
-    def _load_raw_data(self):
-        """
-        Loads the raw game data from text files.
-        """
-        raw_data = [[], []]
-        for file in glob.glob(
-            "/mnt/e/MisaMino-Tetrio/MisaMino/tetris_ai/logs/game*.txt"
-        ):
-            with open(file) as f:
-                contents = f.readlines()
-                for line in contents:
-                    raw_data[int(line[0])].append(line[2:])
-            print(f"Loaded {len(contents)} lines from {file}", flush=True)
-        return raw_data
-
-    def _process_into_transitions(
-        self, raw_data: list[list[str]]
-    ) -> list[tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]]:
-        """
-        Process the raw game data into transitions of ((state), (next_state)).
-        Raw game data has the following fields in order, separated by '#':
-        1. Player ID (removed by `_load_raw_data`)
-        2. Active piece
-        3. Hold piece
-        4. Queue of next pieces
-        5. Board (represented by a list of integers where each integer is
-                  equivalent to a binary representation of the corresponding row)
-        """
-        transitions = []
-        transitions_checked = 0
-        last_time = time.time()
-        for player_data in raw_data:
-            for i in range(len(player_data) - 1):
-                # Parse state
-                split_results = player_data[i].strip().split("#")
-                active = int(split_results[0])
-                hold = int(split_results[1])
-                queue = [int(piece) for piece in split_results[2].split(",")[:5]]
-                piece_seq = np.array(
-                    [self._new_pieces[piece] for piece in [active] + [hold] + queue],
-                    dtype=np.int32,
-                )
-                board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                state = (board, piece_seq)
-
-                # Parse next_state
-                next_split_results = player_data[i + 1].strip().split("#")
-                next_active = int(next_split_results[0])
-                next_hold = int(next_split_results[1])
-                next_queue = [
-                    int(piece) for piece in next_split_results[2].split(",")[:5]
-                ]
-                next_piece_seq = np.array(
-                    [
-                        self._new_pieces[piece]
-                        for piece in [next_active] + [next_hold] + next_queue
-                    ],
-                    dtype=np.int32,
-                )
-                next_board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in next_split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                next_state = (next_board, next_piece_seq)
-
-                transitions_checked += 1
-
-                if self._is_candidate(state, next_state):
-                    transitions.append((state, next_state))
-
-                if time.time() - last_time > 5:
-                    print(
-                        f"\rtransitions checked: {transitions_checked} | Valid transitions: {len(transitions)}",
-                        end="",
-                        flush=True,
-                    )
-                    last_time = time.time()
-
-        print(
-            f"\rTotal transitions checked: {transitions_checked} | Total valid transitions: {len(transitions)}",
-            flush=True,
-        )
-
-        return transitions
-
-    def _is_candidate(
-        self,
-        state: tuple[np.ndarray, np.ndarray],
-        next_state: tuple[np.ndarray, np.ndarray],
-    ) -> bool:
-        """
-        Determine if the transition from board_t to board_t1 is a candidate for training.
-        This removes transitions between two episodes and transitions that accept garbage.
-        """
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
-
-        # Check that the queue cycles as expected
-        # Piece sequence is [active, hold, next1, next2, next3, next4, next5]
-        if not (
-            np.array_equal(piece_seq[3:], next_piece_seq[2:-1])  # Queue cycled once
-            or (
-                piece_seq[1] == 0  # Hold started empty
-                and next_piece_seq[1] != 0  # Hold is now occupied
-                and np.array_equal(piece_seq[4:], next_piece_seq[2:-2])
+    def _list_shards(self) -> list[str]:
+        if not tf.io.gfile.isdir(self._dataset_root.as_posix()):
+            raise FileNotFoundError(
+                f"Dataset root `{self._dataset_root}` not found. "
+                "Run OneshotPretrainGen.py to generate expert shards."
             )
-        ):  # Queue cycled twice
-            return False
-
-        # Check that the board changes in an expected way
-        cell_count_diff = np.sum(next_board) - np.sum(board)
-        if not (
-            cell_count_diff == 4  # Placed a piece without clearing lines
-            or cell_count_diff == 4 - 10  # Placed a piece and cleared one line
-            or cell_count_diff == 4 - 20  # Placed a piece and cleared two lines
-            or cell_count_diff == 4 - 30  # Placed a piece and cleared three lines
-            or cell_count_diff == 4 - 40
-        ):  # Placed a piece and cleared four lines
-            return False
-
-        return True
-
-    def _find_action(
-        self,
-        transition: tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
-        test_env: PyTetrisEnv,
-    ) -> tuple[int, int, int]:
-        """
-        Determine the action taken to transition from state_t to state_t1.
-        """
-        state, next_state = transition
-
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
-
-        # Determine whether hold was used
-        if piece_seq[1] != next_piece_seq[1]:
-            hold = 1
-        else:
-            hold = 0
-
-        # Determine the action(s) that cause the transition
-        # Checking non-spins first to avoid unnecessary keypresses with spins
-        for spin in range(len(Moves._spins)):
-            for standard in range(len(Moves._standards)):
-                action_ind = Convert.to_ind[hold, standard, spin]
-                key_sequence = Convert.to_sequence[action_ind]
-                active_piece = test_env._spawn_piece(PieceType(piece_seq[0]))
-                hold_piece = PieceType(piece_seq[1])
-                queue = [PieceType(piece) for piece in piece_seq[2:]]
-                _, _, _, sim_board, _, _, _, _ = test_env._execute_action(
-                    board, board, active_piece, hold_piece, queue, key_sequence
-                )
-                if np.array_equal(sim_board, next_board):
-                    return board, piece_seq, (hold, standard, spin)
-
-        # If no action is found, return action to filter
-        return board, piece_seq, (-1, -1, -1)
-
-    def process_single_transition(self, transition):
-        return self._find_action(transition, self.test_env)
-
-    def _generate_dataset(self) -> tf.data.Dataset:
-        """
-        Generate a dataset of transitions from the raw game data.
-        """
-
-        # Initialize test environment
-        self.test_env = PyTetrisEnv(
-            queue_size=5, max_holes=100, max_height=20, max_steps=100, seed=0, idx=0
+        shard_paths = sorted(
+            [
+                (self._dataset_root / shard_name).as_posix()
+                for shard_name in tf.io.gfile.listdir(self._dataset_root.as_posix())
+                if shard_name.startswith("shard_")
+            ]
         )
-
-        # Load transitions
-        raw_data = self._load_raw_data()
-        transition_df = self._process_into_transitions(raw_data)
-
-        with multiprocessing.Pool(processes=multiprocessing.cpu_count() - 1) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(
-                        self.process_single_transition, transition_df, chunksize=512
-                    ),
-                    total=len(transition_df),
-                    desc="Processing transitions",
-                )
+        if not shard_paths:
+            raise FileNotFoundError(
+                f"No dataset shards found under `{self._dataset_root}`."
             )
+        return shard_paths
 
-        # Convert results from list of tuples to tuple of lists
-        repacked = tuple(map(list, zip(*results)))
+    def _compose_action_index(
+        self, hold: tf.Tensor, column: tf.Tensor, rotation: tf.Tensor, is_kick: tf.Tensor
+    ) -> tf.Tensor:
+        hold = tf.cast(hold, tf.int64)
+        column = tf.cast(column, tf.int64)
+        rotation = tf.cast(rotation, tf.int64)
+        is_kick = tf.cast(is_kick, tf.int64)
 
-        # Create dataset
-        dataset = tf.data.Dataset.from_tensor_slices(repacked).filter(
-            lambda board, piece_seq, action: tf.reduce_all(action[1] != (-1, -1, -1))
+        per_rotation = self._board_cols * self._kick_states
+        return hold * self._per_hold + rotation * per_rotation + column * self._kick_states + is_kick
+
+    def _prepare_example(self, example: dict[str, tf.Tensor]) -> dict[str, tf.Tensor]:
+        action = self._compose_action_index(
+            example["hold"], example["column"], example["rotation"], example["is_kick"]
         )
-
-        # Save dataset and ensure it can be loaded
-        dataset.save("../tetris_expert_dataset")
-        dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-
-        return dataset
-
-    # @tf.function
-    # def _get_action_ind(self, separate_action):
-    #     action = tf.gather_nd(Convert.to_ind, separate_action)
-    #     return action
+        return {
+            "boards": tf.cast(example["board"], tf.float32),
+            "pieces": tf.cast(example["pieces"], tf.int64),
+            "b2b_combo": tf.cast(example["b2b_combo"], tf.float32),
+            "actions": action,
+        }
 
     def _load_dataset(self, batch_size: int | None = 1024) -> tf.data.Dataset:
         """
-        Load the dataset from disk if it exists, otherwise generate it.
+        Load the autoregressive expert shards produced by OneshotPretrainGen.
         """
 
-        # Check if dataset exists
-        if not os.path.exists("../tetris_expert_dataset"):
-            if input("Dataset not found. Generate? (y/n)") == "y":
-                # Generate dataset
-                dataset = self._generate_dataset()
-            else:
-                raise FileNotFoundError(
-                    "Dataset not found and user did not want to generate it."
-                )
-        else:
-            try:
-                dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-                print("Dataset loaded successfully.", flush=True)
-            except Exception:
-                print("Dataset loading failed. Generating dataset...", flush=True)
-                # Generate dataset
-                dataset = self._generate_dataset()
+        shard_paths = self._list_shards()
+        dataset = tf.data.Dataset.load(shard_paths[0])
+        for shard_path in shard_paths[1:]:
+            dataset = dataset.concatenate(tf.data.Dataset.load(shard_path))
 
-        dataset = (
-            dataset.map(
-                lambda board, piece_seq, separate_action: {
-                    "boards": tf.cast(board[..., None], tf.float32),
-                    "pieces": tf.cast(piece_seq, tf.int64),
-                    "actions": tf.cast(separate_action, tf.int64),
-                    # "actions": tf.cast(self._get_action_ind(separate_action), tf.int64),
-                },
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
-            )
-            .cache()
-            .shuffle(1000000)
-        )
+        dataset = dataset.map(
+            self._prepare_example,
+            num_parallel_calls=tf.data.AUTOTUNE,
+            deterministic=False,
+        ).cache().shuffle(1_000_000)
 
         if batch_size:
             dataset = dataset.batch(
@@ -296,20 +92,16 @@ class Pretrainer:
         """
         board = batch["boards"]
         piece_seq = batch["pieces"]
+        b2b_combo = batch["b2b_combo"]
         target_action = batch["actions"]
 
         with tf.GradientTape() as tape:
-            # Forward pass
-            hold_logits, standard_logits, spin_logits, _ = model(
-                (board, piece_seq, tf.zeros((tf.shape(board)[0], 2), dtype=tf.float32)),
+            logits, _ = model(
+                (board, piece_seq, b2b_combo),
                 training=True,
                 return_scores=True,
             )
-            # Compute loss
-            hold_loss = self.scc(target_action[:, 0], hold_logits)
-            standard_loss = self.scc(target_action[:, 1], standard_logits)
-            spin_loss = self.scc(target_action[:, 2], spin_logits)
-            loss = hold_loss + standard_loss + spin_loss
+            loss = self.scc(target_action, logits)
         # Compute and apply gradients
         gradients = tape.gradient(loss, model.trainable_variables)
         model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
@@ -317,16 +109,8 @@ class Pretrainer:
         # Compute accuracy
         accuracy = tf.reduce_mean(
             tf.cast(
-                tf.stack(
-                    [
-                        tf.argmax(hold_logits, axis=-1, output_type=tf.int64)
-                        == target_action[:, 0],
-                        tf.argmax(standard_logits, axis=-1, output_type=tf.int64)
-                        == target_action[:, 1],
-                        tf.argmax(spin_logits, axis=-1, output_type=tf.int64)
-                        == target_action[:, 2],
-                    ],
-                    axis=-1,
+                tf.equal(
+                    tf.argmax(logits, axis=-1, output_type=tf.int64), target_action
                 ),
                 tf.float32,
             )
@@ -369,12 +153,12 @@ def main():
     piece_dim = 8
     depth = 64
     num_heads = 4
-    num_layers = 6
+    num_layers = 4
     dropout_rate = 0.1
-    output_dims = [len(Moves._holds), len(Moves._standards), len(Moves._spins)]
-    batch_size = 256
+    batch_size = 1024
 
     queue_size = 5
+    action_dim = 160
 
     # Initialize model and optimizer
     model = PolicyModel(
@@ -383,24 +167,23 @@ def main():
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dims=output_dims,
+        output_dim=action_dim,
     )
 
-    optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
+    optimizer = keras.optimizers.Adam(3e-4, clipnorm=0.5)
     model.compile(optimizer=optimizer, jit_compile=True)
     print("Initialized model and optimizer.", flush=True)
 
     model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
 
     model.summary()
-    input()
+    
     # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint, "./pretrained_checkpoints", max_to_keep=3
     )
-    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, '../checkpoints/pretrained_checkpoints', max_to_keep=3)
+    checkpoint.restore(checkpoint_manager.latest_checkpoint)
     print("Initialized checkpoint manager.", flush=True)
 
     pretrainer = Pretrainer()

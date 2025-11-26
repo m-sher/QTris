@@ -278,7 +278,7 @@ class PolicyModel(keras.Model):
                 tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
                 tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
                 tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, 1600), dtype=tf.bool),
+                tf.TensorSpec(shape=(None, 160), dtype=tf.bool),
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
         ],
