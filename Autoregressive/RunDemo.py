@@ -54,7 +54,9 @@ py_env = PyTetrisEnv(
     max_holes=max_holes,
     max_height=max_height,
     max_steps=num_steps,
-    garbage_chance=0.1,
+    max_len=max_len,
+    pathfinding=True,
+    garbage_chance=0.15,
     garbage_min=1,
     garbage_max=4,
     seed=0,
@@ -126,6 +128,7 @@ for t in range(num_steps):
     vis_board = time_step.observation.get("vis_board", None)
     b2b_combo = time_step.observation["b2b_combo"]
     pieces = time_step.observation["pieces"]
+    valid_sequences = time_step.observation["sequences"]
     attack = time_step.reward["attack"].numpy()[0]
     clear = time_step.reward["clear"].numpy()[0]
     b2b_reward = time_step.reward["b2b_reward"].numpy()[0]
@@ -150,7 +153,9 @@ for t in range(num_steps):
             pygame.quit()
 
     key_sequence, log_probs, masks, scores = p_model.predict(
-        (board, pieces, b2b_combo), greedy=True
+        (board, pieces, b2b_combo),
+        greedy=True,
+        valid_sequences=valid_sequences,
     )
 
     # Handle pieces tensor shape (remove batch dimension if present)
