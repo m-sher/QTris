@@ -18,7 +18,7 @@ dropout_rate = 0.05
 max_len = 15
 
 # Environment params
-generations = 1000000
+generations = 1_000_000
 num_envs = 64
 num_collection_steps = 64
 queue_size = 5
@@ -39,7 +39,7 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
+entropy_coef = 0.04
 
 target_kl = 0.04
 
@@ -112,9 +112,6 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     pad_mask = tf.cast(
         online_actions_batch[:, 1:] != Keys.PAD, tf.float32
     )  # batch, max_len - 1
-    seq_lengths = tf.ensure_shape(
-        tf.reduce_sum(pad_mask, axis=-1, keepdims=True), (mini_batch_size, 1)
-    )
 
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
@@ -149,17 +146,13 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
             dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
-            (new_log_probs * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
-        )
-        new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(new_log_probs, axis=1) / seq_lengths, (mini_batch_size, 1)
+            tf.reduce_sum(new_log_probs * pad_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
 
         old_log_probs = tf.ensure_shape(
-            (log_probs_batch * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
-        )
-        old_log_probs = tf.ensure_shape(
-            tf.reduce_sum(old_log_probs, axis=1) / seq_lengths, (mini_batch_size, 1)
+            tf.reduce_sum(log_probs_batch * pad_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
 
         # PPO loss
@@ -171,24 +164,19 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
             (mini_batch_size, 1),
         )
 
-        surr1 = tf.ensure_shape(
-            ratio * advantages_batch, (mini_batch_size, 1)
-        )
+        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
         surr2 = tf.ensure_shape(
             clipped_ratio * advantages_batch,
             (mini_batch_size, 1),
         )
 
-        ppo_loss = -tf.reduce_mean(
-            tf.minimum(surr1, surr2)
-        )
+        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
         # Compute bonus/penalty
         entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
         entropy = tf.ensure_shape(
-            (entropy * pad_mask)[..., None], (mini_batch_size, max_len - 1, 1)
+            tf.reduce_sum(entropy * pad_mask, axis=-1)[..., None], (mini_batch_size, 1)
         )
-        entropy = tf.reduce_sum(entropy, axis=1) / seq_lengths
         entropy = tf.reduce_mean(entropy)
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
@@ -200,10 +188,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(
-        tf.cast(ratio != clipped_ratio, tf.float32)
-    )
-    avg_probs = tf.reduce_mean(tf.exp(old_log_probs))
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
     with tf.GradientTape() as v_tape:
         values = v_model(
@@ -234,7 +219,6 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         entropy,
         approx_kl,
         clipped_frac,
-        avg_probs,
         value_loss,
         explained_var,
         online_board_batch[0],
@@ -320,6 +304,7 @@ def main(argv):
         max_holes=max_holes,
         max_height=max_height,
         max_steps=max_steps,
+        pathfinding=True,
         max_len=max_len,
         key_dim=key_dim,
         num_steps=num_collection_steps,
@@ -363,6 +348,7 @@ def main(argv):
             all_b2b_reward,
             all_combo_reward,
             all_spin_reward,
+            all_easy_clear_penalty,
             all_height_penalty,
             all_hole_penalty,
             all_skyline_penalty,
@@ -372,10 +358,11 @@ def main(argv):
         ) = runner.collect_trajectory(render=False)
 
         all_rewards = (
-            all_attacks
+            2.0 * all_attacks
             + all_b2b_reward
             + all_combo_reward
             + all_spin_reward
+            + all_easy_clear_penalty
             + all_death_penalty
             + all_height_penalty
             + all_hole_penalty
@@ -461,7 +448,6 @@ def main(argv):
             entropy,
             approx_kl,
             clipped_frac,
-            avg_probs,
             value_loss,
             explained_var,
             board,
@@ -475,6 +461,7 @@ def main(argv):
         avg_b2b_reward = tf.reduce_mean(tf.reduce_sum(all_b2b_reward, axis=0))
         avg_combo_reward = tf.reduce_mean(tf.reduce_sum(all_combo_reward, axis=0))
         avg_spin_reward = tf.reduce_mean(tf.reduce_sum(all_spin_reward, axis=0))
+        avg_easy_clear_penalty = tf.reduce_mean(tf.reduce_sum(all_easy_clear_penalty, axis=0))
         avg_height_penalty = tf.reduce_mean(tf.reduce_sum(all_height_penalty, axis=0))
         avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
         avg_skyline_penalty = tf.reduce_mean(tf.reduce_sum(all_skyline_penalty, axis=0))
@@ -484,7 +471,7 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-
+        avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
@@ -505,6 +492,7 @@ def main(argv):
                 "avg_b2b_reward": avg_b2b_reward,
                 "avg_combo_reward": avg_combo_reward,
                 "avg_spin_reward": avg_spin_reward,
+                "avg_easy_clear_penalty": avg_easy_clear_penalty,
                 "avg_height_penalty": avg_height_penalty,
                 "avg_hole_penalty": avg_hole_penalty,
                 "avg_skyline_penalty": avg_skyline_penalty,

@@ -320,17 +320,21 @@ class PolicyModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def _generate_next_key(
-        self, ind, piece_dec, key_sequence, log_probs, masks, greedy=False
+        self,
+        ind,
+        piece_dec,
+        key_sequence,
+        log_probs,
+        masks,
+        valid_sequences,
+        greedy=False,
     ):
-        def generate_mask(ind, stacked_key_sequence):
+        def generate_mask(ind, stacked_key_sequence, sequences):
             matching_sequence = tf.reduce_all(
-                stacked_key_sequence[:, None, :ind]
-                == Convert.tf_to_sequence[None, :, :ind],
+                stacked_key_sequence[:, None, :ind] == sequences[:, :, :ind],
                 axis=-1,
             )[..., None]
-            next_keys = tf.tile(
-                Convert.tf_to_sequence[None, :, ind], (self._batch_size, 1)
-            )[..., None]
+            next_keys = sequences[:, :, ind][..., None]
             possible_keys = tf.range(self._key_dim, dtype=tf.int64)[None, None, ...]
             valid = tf.reduce_any(
                 tf.logical_and(matching_sequence, next_keys == possible_keys), axis=1
@@ -340,7 +344,7 @@ class PolicyModel(keras.Model):
         stacked_key_sequence = tf.transpose(
             key_sequence.stack(), perm=[1, 0]
         )  # len, batch -> batch, len
-        mask = generate_mask(ind, stacked_key_sequence)
+        mask = generate_mask(ind, stacked_key_sequence, valid_sequences)
         logits, _ = self.process_keys((piece_dec, stacked_key_sequence), training=False)
 
         masked_logits = tf.where(
@@ -371,10 +375,12 @@ class PolicyModel(keras.Model):
                 tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
+            tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
         ],
     )
-    def predict(self, inputs, greedy=False):
+    def predict(self, inputs, greedy=False, valid_sequences=None):
         piece_dec, piece_scores = self.process_obs(inputs, training=False)
+        valid_sequences = tf.convert_to_tensor(valid_sequences, dtype=tf.int64)
 
         key_sequence = tf.TensorArray(
             dtype=tf.int64,
@@ -400,7 +406,7 @@ class PolicyModel(keras.Model):
         ind, key_sequence, log_probs, masks = tf.while_loop(
             lambda i, ks, lp, m: tf.less(i, self._max_len),
             lambda i, ks, lp, m: self._generate_next_key(
-                i, piece_dec, ks, lp, m, greedy
+                i, piece_dec, ks, lp, m, valid_sequences, greedy
             ),
             [ind, key_sequence, log_probs, masks],
             parallel_iterations=1,
