@@ -401,8 +401,7 @@ class PolicyModel(keras.Model):
             element_shape=(self._batch_size, self._key_dim),
         )
 
-        # Ind starts at 1 because 0 is the START key
-        ind = tf.constant(1, dtype=tf.int32)
+        ind = tf.constant(0, dtype=tf.int32)
         ind, key_sequence, log_probs, masks = tf.while_loop(
             lambda i, ks, lp, m: tf.less(i, self._max_len),
             lambda i, ks, lp, m: self._generate_next_key(
