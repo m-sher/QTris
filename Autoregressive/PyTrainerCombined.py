@@ -24,22 +24,23 @@ num_collection_steps = 64
 queue_size = 5
 max_holes = 50
 max_height = 18
-max_steps = 500
-garbage_chance_min = 0.0
+max_steps = 24
+garbage_chance_min = 0.15
 garbage_chance_max = 0.15
 garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
 mini_batch_size = 1024
-num_epochs = 4
+num_epochs = 10
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.04
+entropy_coef = 0.03
+temperature = 1.0
 
 target_kl = 0.04
 
@@ -58,13 +59,13 @@ config = {
 
 
 @tf.function(jit_compile=True)
-def compute_gae_and_returns(values, rewards, dones, gamma, lam):
+def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     advantages = tf.TensorArray(
         dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
     )
 
     last_adv = tf.zeros(advantages.element_shape, dtype=tf.float32)
-    last_val = values[-1]
+    last_val = last_values
 
     for t in tf.range(num_collection_steps - 1, -1, -1):
         mask = 1.0 - dones[t]
@@ -116,10 +117,6 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
 
-    advantages_batch = (advantages_batch - tf.reduce_mean(advantages_batch)) / (
-        tf.math.reduce_std(advantages_batch) + 1e-8
-    )
-
     with tf.GradientTape() as p_tape:
         logits, piece_scores, key_scores = p_model(
             (
@@ -136,14 +133,16 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
             logits, (mini_batch_size, max_len - 1, key_dim)
         )  # batch, max_len - 1, num_actions
 
+        temp_adjusted_logits = logits / temperature
+
         masked_logits = tf.where(
-            invalid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+            invalid_mask, temp_adjusted_logits, tf.constant(-1e9, dtype=tf.float32)
         )  # batch, max_len - 1, num_actions
 
-        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+        masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
         new_log_probs = tf.ensure_shape(
-            dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
+            masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
             tf.reduce_sum(new_log_probs * pad_mask, axis=-1)[..., None],
@@ -173,10 +172,8 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
         # Compute bonus/penalty
-        entropy = tf.ensure_shape(dist.entropy(), (mini_batch_size, max_len - 1))
-        entropy = tf.ensure_shape(
-            tf.reduce_sum(entropy * pad_mask, axis=-1)[..., None], (mini_batch_size, 1)
-        )
+        entropy = tf.ensure_shape(masked_dist.entropy(), (mini_batch_size, max_len - 1))
+        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1) / tf.reduce_sum(pad_mask, axis=-1)
         entropy = tf.reduce_mean(entropy)
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
@@ -198,13 +195,14 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         # Value loss
         value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
-        clipped_values = old_values_batch + tf.clip_by_value(
-            values - old_values_batch, -value_clip, value_clip
-        )
-        clipped_value_error = clipped_values - returns_batch
-        value_loss = tf.reduce_mean(
-            tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
-        )
+        # clipped_values = old_values_batch + tf.clip_by_value(
+        #     values - old_values_batch, -value_clip, value_clip
+        # )
+        # clipped_value_error = clipped_values - returns_batch
+        # value_loss = tf.reduce_mean(
+        #     tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
+        # )
+        value_loss = tf.reduce_mean(tf.square(value_error))
 
     # Apply value gradients
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
@@ -214,25 +212,26 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     res_var = tf.math.reduce_variance(returns_batch - values)
     explained_var = tf.reduce_mean(1.0 - tf.math.divide_no_nan(res_var, ret_var))
 
-    return (
-        ppo_loss,
-        entropy,
-        approx_kl,
-        clipped_frac,
-        value_loss,
-        explained_var,
-        online_board_batch[0],
-        piece_scores,
-    )
+    return {
+        "ppo_loss": ppo_loss,
+        "entropy": entropy,
+        "approx_kl": approx_kl,
+        "clipped_frac": clipped_frac,
+        "value_loss": value_loss,
+        "explained_var": explained_var,
+        "board": online_board_batch[0],
+        "scores": piece_scores,
+    }
 
 
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
+        kls = []
         for online_batch in online_dataset:
             step_out = train_step(p_model, v_model, online_batch, entropy_coef)
+            kls.append(step_out["approx_kl"])
 
-        approx_kl = step_out[2]
-        if approx_kl >= 1.5 * target_kl:
+        if tf.reduce_mean(kls) >= 1.5 * target_kl:
             break
 
     return step_out
@@ -315,6 +314,7 @@ def main(argv):
         garbage_rows_max=garbage_rows_max,
         p_model=p_model,
         v_model=v_model,
+        temperature=temperature,
         seed=None,
     )
 
@@ -343,8 +343,10 @@ def main(argv):
             all_log_probs,
             all_masks,
             all_values,
+            all_last_values,
             all_attacks,
             all_clears,
+            all_attack_reward,
             all_b2b_reward,
             all_combo_reward,
             all_spin_reward,
@@ -358,7 +360,7 @@ def main(argv):
         ) = runner.collect_trajectory(render=False)
 
         all_rewards = (
-            2.0 * all_attacks
+            all_attack_reward
             + all_b2b_reward
             + all_combo_reward
             + all_spin_reward
@@ -368,7 +370,7 @@ def main(argv):
             + all_hole_penalty
             + all_skyline_penalty
             + all_bumpy_penalty
-        ) * 0.1
+        )
 
         all_rewards = tf.ensure_shape(
             all_rewards[..., None], (num_collection_steps, num_envs, 1)
@@ -381,7 +383,11 @@ def main(argv):
         last_time = time.time()
         # Compute advantages and returns
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_rewards, all_dones, gamma, lam
+            all_values, all_last_values, all_rewards, all_dones, gamma, lam
+        )
+
+        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
+            tf.math.reduce_std(all_advantages) + 1e-8
         )
 
         # Flatten data
@@ -443,21 +449,20 @@ def main(argv):
         last_time = time.time()
 
         # Unpack metrics
-        (
-            ppo_loss,
-            entropy,
-            approx_kl,
-            clipped_frac,
-            value_loss,
-            explained_var,
-            board,
-            scores,
-        ) = train_out
+        ppo_loss = train_out["ppo_loss"]
+        entropy = train_out["entropy"]
+        approx_kl = train_out["approx_kl"]
+        clipped_frac = train_out["clipped_frac"]
+        value_loss = train_out["value_loss"]
+        explained_var = train_out["explained_var"]
+        board = train_out["board"]
+        scores = train_out["scores"]
 
         # Compute more metrics
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
+        avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
         avg_b2b_reward = tf.reduce_mean(tf.reduce_sum(all_b2b_reward, axis=0))
         avg_combo_reward = tf.reduce_mean(tf.reduce_sum(all_combo_reward, axis=0))
         avg_spin_reward = tf.reduce_mean(tf.reduce_sum(all_spin_reward, axis=0))
@@ -471,41 +476,41 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-        avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
+        avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
 
-        wandb.log(
-            {
-                "ppo_loss": ppo_loss,
-                "entropy": entropy,
-                "approx_kl": approx_kl,
-                "clipped_frac": clipped_frac,
-                "value_loss": value_loss,
-                "explained_var": explained_var,
-                "avg_probs": avg_probs,
-                "avg_reward": avg_reward,
-                "avg_attacks": avg_attacks,
-                "avg_clears": avg_clears,
-                "avg_b2b_reward": avg_b2b_reward,
-                "avg_combo_reward": avg_combo_reward,
-                "avg_spin_reward": avg_spin_reward,
-                "avg_easy_clear_penalty": avg_easy_clear_penalty,
-                "avg_height_penalty": avg_height_penalty,
-                "avg_hole_penalty": avg_hole_penalty,
-                "avg_skyline_penalty": avg_skyline_penalty,
-                "avg_bumpy_penalty": avg_bumpy_penalty,
-                "avg_death_penalty": avg_death_penalty,
-                "avg_deaths": avg_deaths,
-                "avg_pieces": avg_pieces,
-                "policy_learning_rate": p_optimizer.learning_rate,
-                "value_learning_rate": v_optimizer.learning_rate,
-                "board": wandb.Image(board[..., 0]),
-                "scores": wandb.Image(norm_c_scores),
-            }
-        )
+        if gen % 10 == 0:
+            wandb.log(
+                {
+                    "ppo_loss": ppo_loss,
+                    "entropy": entropy,
+                    "approx_kl": approx_kl,
+                    "clipped_frac": clipped_frac,
+                    "value_loss": value_loss,
+                    "explained_var": explained_var,
+                    "avg_probs": avg_probs,
+                    "avg_reward": avg_reward,
+                    "avg_attacks": avg_attacks,
+                    "avg_clears": avg_clears,
+                    "avg_attack_reward": avg_attack_reward,
+                    "avg_b2b_reward": avg_b2b_reward,
+                    "avg_combo_reward": avg_combo_reward,
+                    "avg_spin_reward": avg_spin_reward,
+                    "avg_easy_clear_penalty": avg_easy_clear_penalty,
+                    "avg_height_penalty": avg_height_penalty,
+                    "avg_hole_penalty": avg_hole_penalty,
+                    "avg_skyline_penalty": avg_skyline_penalty,
+                    "avg_bumpy_penalty": avg_bumpy_penalty,
+                    "avg_death_penalty": avg_death_penalty,
+                    "avg_deaths": avg_deaths,
+                    "avg_pieces": avg_pieces,
+                    "board": wandb.Image(board[..., 0]),
+                    "scores": wandb.Image(norm_c_scores),
+                }
+            )
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
