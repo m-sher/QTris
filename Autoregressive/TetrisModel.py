@@ -327,6 +327,7 @@ class PolicyModel(keras.Model):
         log_probs,
         masks,
         valid_sequences,
+        temperature,
         greedy=False,
     ):
         def generate_mask(ind, stacked_key_sequence, sequences):
@@ -347,8 +348,10 @@ class PolicyModel(keras.Model):
         mask = generate_mask(ind, stacked_key_sequence, valid_sequences)
         logits, _ = self.process_keys((piece_dec, stacked_key_sequence), training=False)
 
+        temp_adjusted_logits = logits / temperature
+
         masked_logits = tf.where(
-            mask, logits[:, ind - 1, :], tf.constant(-1e9, dtype=tf.float32)
+            mask, temp_adjusted_logits[:, ind - 1, :], tf.constant(-1e9, dtype=tf.float32)
         )
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
@@ -376,9 +379,10 @@ class PolicyModel(keras.Model):
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
             tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
+            tf.TensorSpec(shape=None, dtype=tf.float32)
         ],
     )
-    def predict(self, inputs, greedy=False, valid_sequences=None):
+    def predict(self, inputs, greedy=False, valid_sequences=None, temperature=1.0):
         piece_dec, piece_scores = self.process_obs(inputs, training=False)
         valid_sequences = tf.convert_to_tensor(valid_sequences, dtype=tf.int64)
 
@@ -406,7 +410,7 @@ class PolicyModel(keras.Model):
         ind, key_sequence, log_probs, masks = tf.while_loop(
             lambda i, ks, lp, m: tf.less(i, self._max_len),
             lambda i, ks, lp, m: self._generate_next_key(
-                i, piece_dec, ks, lp, m, valid_sequences, greedy
+                i, piece_dec, ks, lp, m, valid_sequences, temperature, greedy
             ),
             [ind, key_sequence, log_probs, masks],
             parallel_iterations=1,
