@@ -380,7 +380,10 @@ def main(argv):
         )
 
         # Scale rewards by running return std
-        scaled_rewards = all_rewards / (tf.sqrt(return_var) + 1e-8)
+        scaled_rewards = tf.clip_by_value(
+            all_rewards / (tf.sqrt(return_var) + 1e-8),
+            -10.0, 10.0
+        )
 
         print(
             f"{time.time() - last_time:2.2f} | Collected. Creating dataset...",
