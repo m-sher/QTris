@@ -91,8 +91,8 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     online_pieces_batch = tf.ensure_shape(
         online_batch["pieces"], (mini_batch_size, queue_size + 2)
     )
-    online_b2b_combo_batch = tf.ensure_shape(
-        online_batch["b2b_combo"], (mini_batch_size, 2)
+    online_b2b_combo_garbage_batch = tf.ensure_shape(
+        online_batch["b2b_combo_garbage"], (mini_batch_size, 3)
     )
     online_actions_batch = tf.ensure_shape(
         online_batch["actions"], (mini_batch_size, max_len)
@@ -122,7 +122,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
             (
                 online_board_batch,
                 online_pieces_batch,
-                online_b2b_combo_batch,
+                online_b2b_combo_garbage_batch,
                 input_actions_batch,
             ),
             training=True,
@@ -189,20 +189,19 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
     with tf.GradientTape() as v_tape:
         values = v_model(
-            (online_board_batch, online_pieces_batch, online_b2b_combo_batch),
+            (online_board_batch, online_pieces_batch, online_b2b_combo_garbage_batch),
             training=True,
         )
 
         # Value loss
         value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
-        # clipped_values = old_values_batch + tf.clip_by_value(
-        #     values - old_values_batch, -value_clip, value_clip
-        # )
-        # clipped_value_error = clipped_values - returns_batch
-        # value_loss = tf.reduce_mean(
-        #     tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
-        # )
-        value_loss = tf.reduce_mean(tf.square(value_error))
+        clipped_values = old_values_batch + tf.clip_by_value(
+            values - old_values_batch, -value_clip, value_clip
+        )
+        clipped_value_error = clipped_values - returns_batch
+        value_loss = tf.reduce_mean(
+            tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
+        )
 
     # Apply value gradients
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
@@ -286,12 +285,12 @@ def main(argv):
         input_shape=[
             (None, 24, 10, 1),
             (None, queue_size + 2),
-            (None, 2),
+            (None, 3),
             (None, max_len),
         ]
     )
 
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 2)])
+    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
     print("Built models", flush=True)
 
     p_model.summary()
@@ -329,6 +328,10 @@ def main(argv):
         config=config,
     )
 
+    # Initialize running return statistics for reward scaling
+    return_var = 1.0
+    return_count = 1e-4
+
     # Collect trajectories and train
     for gen in range(generations):
         # Collect trajectory
@@ -338,7 +341,7 @@ def main(argv):
         (
             all_boards,
             all_pieces,
-            all_b2b_combo,
+            all_b2b_combo_garbage,
             all_actions,
             all_log_probs,
             all_masks,
@@ -376,6 +379,9 @@ def main(argv):
             all_rewards[..., None], (num_collection_steps, num_envs, 1)
         )
 
+        # Scale rewards by running return std
+        scaled_rewards = all_rewards / (tf.sqrt(return_var) + 1e-8)
+
         print(
             f"{time.time() - last_time:2.2f} | Collected. Creating dataset...",
             flush=True,
@@ -383,8 +389,14 @@ def main(argv):
         last_time = time.time()
         # Compute advantages and returns
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, all_rewards, all_dones, gamma, lam
+            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam
         )
+
+        batch_var = tf.math.reduce_variance(all_returns)
+        batch_count = tf.cast(tf.size(all_returns), tf.float32)
+        new_count = return_count + batch_count
+        return_var = (return_var * return_count + batch_var * batch_count) / new_count
+        return_count = new_count
 
         all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
             tf.math.reduce_std(all_advantages) + 1e-8
@@ -393,7 +405,7 @@ def main(argv):
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
-        b2b_combo_flat = tf.reshape(all_b2b_combo, (-1, 2))
+        b2b_combo_garbage_flat = tf.reshape(all_b2b_combo_garbage, (-1, 3))
         actions_flat = tf.reshape(all_actions, (-1, max_len))
         log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
         masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
@@ -407,7 +419,7 @@ def main(argv):
                 {
                     "boards": boards_flat,
                     "pieces": pieces_flat,
-                    "b2b_combo": b2b_combo_flat,
+                    "b2b_combo_garbage": b2b_combo_garbage_flat,
                     "actions": actions_flat,
                     "old_log_probs": log_probs_flat,
                     "masks": masks_flat,

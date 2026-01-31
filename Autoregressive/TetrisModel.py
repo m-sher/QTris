@@ -218,12 +218,12 @@ class PolicyModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._b2b_combo_dense = keras.Sequential(
+        self._bcg_dense = keras.Sequential(
             [
                 layers.Dense(depth // 2, activation="relu"),
                 layers.Dense(depth, activation="relu"),
             ],
-            name="b2b_combo_dense",
+            name="bcg_dense",
         )
 
         self.key_embedding = layers.Embedding(
@@ -260,7 +260,7 @@ class PolicyModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo = inputs
+        board, piece, b2b_combo_garbage = inputs
 
         piece_scores = []
         patches = self.make_patches(board, training=training)
@@ -269,8 +269,8 @@ class PolicyModel(keras.Model):
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        b2b_combo_embedding = self._b2b_combo_dense(b2b_combo, training=training)
-        piece_dec += b2b_combo_embedding[:, None, :]
+        bcg_embedding = self._bcg_dense(b2b_combo_garbage, training=training)
+        piece_dec += bcg_embedding[:, None, :]
 
         for board_dec_layer, piece_dec_layer in zip(
             self.board_decoder_layers, self.piece_decoder_layers
@@ -305,10 +305,10 @@ class PolicyModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
-        board, piece, b2b_combo, keys = inputs
+        board, piece, b2b_combo_garbage, keys = inputs
 
         piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo), training=training
+            (board, piece, b2b_combo_garbage), training=training
         )
 
         output, key_scores = self.process_keys((piece_dec, keys), training=training)
@@ -375,7 +375,7 @@ class PolicyModel(keras.Model):
             (
                 tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
                 tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 2), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
             tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
@@ -501,12 +501,12 @@ class ValueModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._b2b_combo_dense = keras.Sequential(
+        self._bcg_dense = keras.Sequential(
             [
                 layers.Dense(depth // 2, activation="relu"),
                 layers.Dense(depth, activation="relu"),
             ],
-            name="b2b_combo_dense",
+            name="bcg_dense",
         )
 
         self.trunk = keras.Sequential(
@@ -523,7 +523,7 @@ class ValueModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo = inputs
+        board, piece, b2b_combo_garbage = inputs
 
         piece_scores = []
         patches = self.make_patches(board, training=training)
@@ -532,8 +532,8 @@ class ValueModel(keras.Model):
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        b2b_combo_embedding = self._b2b_combo_dense(b2b_combo, training=training)
-        piece_dec += b2b_combo_embedding[:, None, :]
+        bcg_embedding = self._bcg_dense(b2b_combo_garbage, training=training)
+        piece_dec += bcg_embedding[:, None, :]
 
         for board_dec_layer, piece_dec_layer in zip(
             self.board_decoder_layers, self.piece_decoder_layers
@@ -550,10 +550,10 @@ class ValueModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
-        board, piece, b2b_combo = inputs
+        board, piece, b2b_combo_garbage = inputs
 
         piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo), training=training
+            (board, piece, b2b_combo_garbage), training=training
         )
 
         trunk_out = self.trunk(piece_dec, training=training)
@@ -567,10 +567,10 @@ class ValueModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def predict(self, inputs):
-        board, piece, b2b_combo = inputs
+        board, piece, b2b_combo_garbage = inputs
 
         piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo), training=False
+            (board, piece, b2b_combo_garbage), training=False
         )
 
         trunk_out = self.trunk(piece_dec, training=False)
