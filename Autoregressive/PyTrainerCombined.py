@@ -328,9 +328,9 @@ def main(argv):
         config=config,
     )
 
-    # Initialize running return statistics for reward scaling
+    # Initialize running return variance for reward scaling (EMA)
     return_var = 1.0
-    return_count = 1e-4
+    return_var_decay = 0.99
 
     # Collect trajectories and train
     for gen in range(generations):
@@ -392,11 +392,9 @@ def main(argv):
             all_values, all_last_values, scaled_rewards, all_dones, gamma, lam
         )
 
+        # Update running return variance (EMA)
         batch_var = tf.math.reduce_variance(all_returns)
-        batch_count = tf.cast(tf.size(all_returns), tf.float32)
-        new_count = return_count + batch_count
-        return_var = (return_var * return_count + batch_var * batch_count) / new_count
-        return_count = new_count
+        return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 
         all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
             tf.math.reduce_std(all_advantages) + 1e-8
