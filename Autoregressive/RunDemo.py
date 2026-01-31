@@ -1,6 +1,7 @@
 import tensorflow as tf
 from TetrisModel import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.Moves import Convert
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -9,6 +10,8 @@ from pygame_widgets.button import Button
 import imageio
 import numpy as np
 import time
+
+pathfinding = True
 
 # Model params
 num_envs = 1
@@ -23,7 +26,7 @@ max_len = 15
 num_steps = 500
 queue_size = 5
 max_holes = 100
-max_height = 20
+max_height = 18
 
 p_model = PolicyModel(
     batch_size=num_envs,
@@ -39,7 +42,7 @@ p_model = PolicyModel(
 
 p_checkpoint = tf.train.Checkpoint(model=p_model)
 p_checkpoint_manager = tf.train.CheckpointManager(
-    p_checkpoint, "./policy_checkpoints", max_to_keep=3
+    p_checkpoint, "./checkpoints/policy_checkpoints_304k", max_to_keep=3
 )
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
@@ -55,7 +58,7 @@ py_env = PyTetrisEnv(
     max_height=max_height,
     max_steps=num_steps,
     max_len=max_len,
-    pathfinding=True,
+    pathfinding=pathfinding,
     garbage_chance=0.15,
     garbage_min=1,
     garbage_max=4,
@@ -152,10 +155,14 @@ for t in range(num_steps):
         if event.type == pygame.QUIT:
             pygame.quit()
 
+    if not pathfinding:
+        valid_sequences = Convert.tf_to_sequence[None, ...]
+
     key_sequence, log_probs, masks, scores = p_model.predict(
         (board, pieces, b2b_combo),
-        greedy=True,
+        greedy=False,
         valid_sequences=valid_sequences,
+        temperature=1.0
     )
 
     # Handle pieces tensor shape (remove batch dimension if present)
