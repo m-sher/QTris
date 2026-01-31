@@ -20,11 +20,11 @@ max_len = 15
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 64
+num_collection_steps = 128
 queue_size = 5
 max_holes = 50
 max_height = 18
-max_steps = 24
+max_steps = 512
 garbage_chance_min = 0.15
 garbage_chance_max = 0.15
 garbage_rows_min = 1
@@ -501,6 +501,7 @@ def main(argv):
                     "clipped_frac": clipped_frac,
                     "value_loss": value_loss,
                     "explained_var": explained_var,
+                    "return_var": return_var,
                     "avg_probs": avg_probs,
                     "avg_reward": avg_reward,
                     "avg_attacks": avg_attacks,
