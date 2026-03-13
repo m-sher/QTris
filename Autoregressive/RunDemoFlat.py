@@ -17,7 +17,8 @@ num_heads = 4
 num_layers = 4
 dropout_rate = 0.1
 max_len = 15
-num_sequences = 160
+num_row_tiers = 1
+num_sequences = 160 * num_row_tiers
 
 num_steps = 500
 queue_size = 5
@@ -58,6 +59,7 @@ py_env = PyTetrisEnv(
     garbage_max=4,
     seed=0,
     idx=0,
+    num_row_tiers=num_row_tiers,
 )
 env = TFPyEnvironment(py_env)
 
