@@ -6,7 +6,6 @@ from TetrisModel import PosEncoding, DecoderLayer, ValueModel
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
-NUM_SEQUENCES = 160
 
 
 class FlatPolicyModel(keras.Model):
@@ -18,7 +17,7 @@ class FlatPolicyModel(keras.Model):
         num_heads,
         num_layers,
         dropout_rate,
-        num_sequences=NUM_SEQUENCES,
+        num_sequences=160,
     ):
         super().__init__()
 

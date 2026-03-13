@@ -2,6 +2,7 @@ from PyTetrisRunnerFlat import PyTetrisRunnerFlat
 from TetrisModelFlat import FlatPolicyModel, ValueModel
 from TetrisEnv.Moves import Keys
 from RewardNormalizer import RewardNormalizer
+from ExpertDataset import ExpertDataset
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -19,12 +20,13 @@ num_heads = 4
 num_layers = 4
 dropout_rate = 0.0
 max_len = 15
-num_sequences = 160
+num_row_tiers = 2
+num_sequences = 160 * num_row_tiers
 
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 128
+num_collection_steps = 64
 queue_size = 5
 max_holes = 50
 max_height = 18
@@ -44,6 +46,7 @@ lam = 0.95
 epsilon = 0.2
 value_clip = 0.5
 entropy_coef = 0.03
+expert_coef = 0.1
 temperature = 1.0
 
 target_kl = 0.04
@@ -91,7 +94,7 @@ def compute_gae_and_returns(values, last_values, rewards, dones, garbage_pushed,
 
 
 @tf.function()
-def train_step(p_model, v_model, online_batch, entropy_coef):
+def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -114,6 +117,22 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
+
+    expert_boards = tf.ensure_shape(
+        expert_batch["boards"], (mini_batch_size, 24, 10, 1)
+    )
+    expert_pieces = tf.ensure_shape(
+        expert_batch["pieces"], (mini_batch_size, queue_size + 2)
+    )
+    expert_bcg = tf.ensure_shape(
+        expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)
+    )
+    expert_valid_masks = tf.ensure_shape(
+        expert_batch["valid_masks"], (mini_batch_size, num_sequences)
+    )
+    expert_action_indices = tf.ensure_shape(
+        expert_batch["action_indices"], (mini_batch_size,)
+    )
 
     valid_mask = tf.reduce_any(
         tf.equal(
@@ -164,10 +183,28 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
 
-        total_policy_loss = ppo_loss - entropy_coef * entropy
+        expert_logits = p_model(
+            (expert_boards, expert_pieces, expert_bcg),
+            training=True,
+        )
+        expert_masked_logits = tf.where(
+            expert_valid_masks, expert_logits, tf.constant(-1e9, dtype=tf.float32)
+        )
+        expert_loss = tf.reduce_mean(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=expert_action_indices, logits=expert_masked_logits
+            )
+        )
+
+        total_policy_loss = ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
 
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
+
+    expert_predicted = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
+    expert_accuracy = tf.reduce_mean(
+        tf.cast(tf.equal(expert_predicted, expert_action_indices), tf.float32)
+    )
 
     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
@@ -200,16 +237,18 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         "clipped_frac": clipped_frac,
         "value_loss": value_loss,
         "explained_var": explained_var,
+        "expert_loss": expert_loss,
+        "expert_accuracy": expert_accuracy,
         "board": online_board_batch[0],
         "scores": piece_scores,
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
+def train_on_dataset(p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
         kls = []
-        for online_batch in online_dataset:
-            step_out = train_step(p_model, v_model, online_batch, entropy_coef)
+        for online_batch, expert_batch in tf.data.Dataset.zip((online_dataset, expert_dataset)):
+            step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef)
             kls.append(step_out["approx_kl"])
 
         if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
@@ -286,6 +325,10 @@ def main(argv):
     p_model.summary()
     v_model.summary()
 
+    expert_dataset_loader = ExpertDataset(max_len=max_len, queue_size=queue_size, mini_batch_size=mini_batch_size, num_row_tiers=num_row_tiers)
+    expert_dataset, num_expert = expert_dataset_loader.load_expert_data()
+    print(f"Expert dataset ready ({num_expert} samples)", flush=True)
+
     runner = PyTetrisRunnerFlat(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -303,6 +346,7 @@ def main(argv):
         temperature=temperature,
         seed=None,
         num_sequences=num_sequences,
+        num_row_tiers=num_row_tiers,
     )
 
     print("Initialized runner", flush=True)
@@ -314,7 +358,7 @@ def main(argv):
     )
 
     reward_normalizer = RewardNormalizer(
-        num_envs=num_envs, gamma=gamma, initial_var=975.0, decay=0.99
+        num_envs=num_envs, gamma=gamma, initial_var=1200.0, decay=0.99
     )
 
     for gen in range(generations):
@@ -403,7 +447,7 @@ def main(argv):
         last_time = time.time()
 
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, num_epochs, entropy_coef
+            p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef
         )
 
         if gen % 5 == 0:
@@ -422,6 +466,8 @@ def main(argv):
         clipped_frac = train_out["clipped_frac"]
         value_loss = train_out["value_loss"]
         explained_var = train_out["explained_var"]
+        expert_loss = train_out["expert_loss"]
+        expert_accuracy = train_out["expert_accuracy"]
         board = train_out["board"]
         scores = train_out["scores"]
 
@@ -449,6 +495,8 @@ def main(argv):
                     "clipped_frac": clipped_frac,
                     "value_loss": value_loss,
                     "explained_var": explained_var,
+                    "expert_loss": expert_loss,
+                    "expert_accuracy": expert_accuracy,
                     "return_var": reward_normalizer.return_var,
                     "avg_probs": avg_probs,
                     "avg_reward": avg_reward,

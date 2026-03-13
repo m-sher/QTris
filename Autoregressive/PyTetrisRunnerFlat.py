@@ -5,8 +5,6 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 from typing import Optional, Tuple, Any
 
-NUM_SEQUENCES = 160
-
 
 class PyTetrisRunnerFlat:
     def __init__(
@@ -26,7 +24,8 @@ class PyTetrisRunnerFlat:
         v_model: Any,
         temperature: float = 1.0,
         seed: int = 123,
-        num_sequences: int = NUM_SEQUENCES,
+        num_sequences: int = 160,
+        num_row_tiers: int = 1,
     ) -> None:
         self._queue_size = queue_size
         self._max_len = max_len
@@ -57,6 +56,7 @@ class PyTetrisRunnerFlat:
                 garbage_chance=garbage_chances[idx],
                 garbage_min=garbage_rows_min,
                 garbage_max=garbage_rows_max,
+                num_row_tiers=num_row_tiers,
             )
             for i in range(num_envs)
         ]
