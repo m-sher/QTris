@@ -29,7 +29,7 @@ garbage_chance_max = 0.15
 garbage_rows_min = 1
 garbage_rows_max = 4
 
-mini_batch_size = 1024
+mini_batch_size = 64
 num_epochs = 5
 learning_rate = 1e-4
 temperature = 1.0
