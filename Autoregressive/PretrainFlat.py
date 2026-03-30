@@ -6,6 +6,8 @@ from tqdm import tqdm
 import tf_agents
 import wandb
 import time
+import json
+import multiprocessing
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -39,6 +41,8 @@ total_samples = num_collection_steps * num_envs
 batches_per_epoch = total_samples // mini_batch_size
 
 save_freq = 1
+DATA_DIR = "./pretrain_data"
+METRICS_PATH = "./pretrain_metrics.json"
 
 @tf.function(jit_compile=True)
 def train_step(flat_model, batch):
@@ -191,14 +195,38 @@ def collect_data():
     )
     action_indices_flat = tf.reshape(all_action_indices, (-1,))
 
-    dataset = (
-        tf.data.Dataset.from_tensor_slices({
-            "boards": boards_flat,
-            "pieces": pieces_flat,
-            "b2b_combo_garbage": b2b_combo_garbage_flat,
-            "valid_sequences": valid_sequences_flat,
-            "action_indices": action_indices_flat,
-        })
+    dataset = tf.data.Dataset.from_tensor_slices({
+        "boards": boards_flat,
+        "pieces": pieces_flat,
+        "b2b_combo_garbage": b2b_combo_garbage_flat,
+        "valid_sequences": valid_sequences_flat,
+        "action_indices": action_indices_flat,
+    })
+    tf.data.Dataset.save(dataset, DATA_DIR)
+
+    env_metrics = {
+        "avg_attacks": avg_attacks,
+        "avg_reward": avg_reward,
+        "avg_deaths": avg_deaths,
+        "avg_pieces": avg_pieces,
+    }
+
+    runner.env.close()
+
+    with open(METRICS_PATH, "w") as f:
+        json.dump(env_metrics, f)
+
+
+def load_dataset():
+    element_spec = {
+        "boards": tf.TensorSpec(shape=(24, 10, 1), dtype=tf.float32),
+        "pieces": tf.TensorSpec(shape=(queue_size + 2,), dtype=tf.int64),
+        "b2b_combo_garbage": tf.TensorSpec(shape=(3,), dtype=tf.float32),
+        "valid_sequences": tf.TensorSpec(shape=(num_sequences, max_len), dtype=tf.int64),
+        "action_indices": tf.TensorSpec(shape=(), dtype=tf.int64),
+    }
+    return (
+        tf.data.Dataset.load(DATA_DIR, element_spec=element_spec)
         .cache()
         .shuffle(buffer_size=total_samples)
         .batch(
@@ -210,22 +238,13 @@ def collect_data():
         .prefetch(tf.data.AUTOTUNE)
     )
 
-    env_metrics = {
-        "avg_attacks": avg_attacks,
-        "avg_reward": avg_reward,
-        "avg_deaths": avg_deaths,
-        "avg_pieces": avg_pieces,
-    }
 
-    runner.env.close()
-    del old_model, v_model, runner
-    tf.keras.backend.clear_session()
-
-    return dataset, env_metrics
-
-
-def train(dataset, env_metrics):
+def train():
     from TetrisModelFlat import FlatPolicyModel
+
+    dataset = load_dataset()
+    with open(METRICS_PATH) as f:
+        env_metrics = json.load(f)
 
     flat_model = FlatPolicyModel(
         batch_size=num_envs,
@@ -337,8 +356,11 @@ def train(dataset, env_metrics):
 
 
 def main(argv):
-    dataset, env_metrics = collect_data()
-    train(dataset, env_metrics)
+    p = multiprocessing.Process(target=collect_data)
+    p.start()
+    p.join()
+
+    train()
 
 
 if __name__ == "__main__":
