@@ -8,6 +8,41 @@ from TetrisEnv.Moves import Keys
 HARD_DROP_ID = Keys.HARD_DROP
 
 
+class ActionDecoderLayer(layers.Layer):
+    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="ActionDecoder"):
+        super().__init__(name=name)
+
+        self.cross_attention = layers.MultiHeadAttention(
+            num_heads=num_heads, key_dim=units, dropout=dropout_rate
+        )
+        self.add = layers.Add()
+        self.layernorm = layers.LayerNormalization()
+
+        self.ff = keras.Sequential(
+            [
+                layers.Dense(units=2 * units, activation="relu"),
+                layers.Dense(units=units),
+                layers.Dropout(rate=dropout_rate),
+            ]
+        )
+        self.ff_layernorm = layers.LayerNormalization()
+
+    @tf.function(jit_compile=True)
+    def call(self, inputs, training=False):
+        context, queries = inputs
+
+        attn, attn_scores = self.cross_attention(
+            query=queries, value=context, return_attention_scores=True, training=training
+        )
+        queries = self.add([queries, attn])
+        queries = self.layernorm(queries, training=training)
+
+        queries = queries + self.ff(queries, training=training)
+        queries = self.ff_layernorm(queries, training=training)
+
+        return queries, attn_scores
+
+
 class FlatPolicyModel(keras.Model):
     def __init__(
         self,
@@ -97,15 +132,22 @@ class FlatPolicyModel(keras.Model):
             name="bcg_dense",
         )
 
-        self.action_head = keras.Sequential(
-            [
-                layers.Flatten(),
-                layers.Dense(depth * 4, activation="relu"),
-                layers.Dense(depth * 2, activation="relu"),
-                layers.Dense(num_sequences),
-            ],
-            name="action_head",
+        self.action_embedding = layers.Embedding(
+            input_dim=num_sequences,
+            output_dim=depth,
         )
+
+        self.action_decoder_layers = [
+            ActionDecoderLayer(
+                units=depth,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"action_dec_{i}",
+            )
+            for i in range(num_layers)
+        ]
+
+        self.action_proj = layers.Dense(1, name="action_proj")
 
     @tf.function(jit_compile=True)
     def process_obs(self, inputs, training=False):
@@ -135,6 +177,25 @@ class FlatPolicyModel(keras.Model):
         return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
+    def score_actions(self, piece_dec, training=False):
+        batch_size = tf.shape(piece_dec)[0]
+        action_ids = tf.broadcast_to(
+            tf.range(self._num_sequences, dtype=tf.int64)[None, :],
+            [batch_size, self._num_sequences],
+        )
+        action_dec = self.action_embedding(action_ids, training=training)
+
+        for action_dec_layer in self.action_decoder_layers:
+            action_dec, _ = action_dec_layer(
+                [piece_dec, action_dec], training=training
+            )
+
+        logits = tf.squeeze(
+            self.action_proj(action_dec, training=training), axis=-1
+        )
+        return logits
+
+    @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo_garbage = inputs
 
@@ -142,7 +203,7 @@ class FlatPolicyModel(keras.Model):
             (board, piece, b2b_combo_garbage), training=training
         )
 
-        logits = self.action_head(piece_dec, training=training)
+        logits = self.score_actions(piece_dec, training=training)
 
         if return_scores:
             return logits, piece_scores
@@ -165,7 +226,7 @@ class FlatPolicyModel(keras.Model):
     def predict(self, inputs, greedy=False, valid_sequences=None, temperature=1.0):
         piece_dec, piece_scores = self.process_obs(inputs, training=False)
 
-        logits = self.action_head(piece_dec, training=False)
+        logits = self.score_actions(piece_dec, training=False)
 
         valid_mask = tf.reduce_any(
             tf.equal(valid_sequences, tf.constant(HARD_DROP_ID, dtype=tf.int64)),
