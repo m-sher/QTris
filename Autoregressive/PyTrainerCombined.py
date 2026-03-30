@@ -29,11 +29,14 @@ garbage_chance_min = 0.15
 garbage_chance_max = 0.15
 garbage_rows_min = 1
 garbage_rows_max = 4
+num_row_tiers = 2
+num_sequences = 160 * num_row_tiers
 
 # Training params
 mini_batch_size = 1024
 num_epochs = 10
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
+early_stopping = False
 
 gamma = 0.99
 lam = 0.95
@@ -230,7 +233,7 @@ def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef)
             step_out = train_step(p_model, v_model, online_batch, entropy_coef)
             kls.append(step_out["approx_kl"])
 
-        if tf.reduce_mean(kls) >= 1.5 * target_kl:
+        if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
             break
 
     return step_out
@@ -315,6 +318,8 @@ def main(argv):
         v_model=v_model,
         temperature=temperature,
         seed=None,
+        num_sequences=num_sequences,
+        num_row_tiers=num_row_tiers,
     )
 
     print("Initialized runner", flush=True)
@@ -345,38 +350,20 @@ def main(argv):
             all_actions,
             all_log_probs,
             all_masks,
+            all_valid_sequences,
+            all_action_indices,
             all_values,
             all_last_values,
             all_attacks,
             all_clears,
             all_attack_reward,
-            all_b2b_reward,
-            all_combo_reward,
-            all_spin_reward,
-            all_easy_clear_penalty,
-            all_height_penalty,
-            all_hole_penalty,
-            all_skyline_penalty,
-            all_bumpy_penalty,
-            all_death_penalty,
+            all_total_reward,
             all_dones,
+            all_garbage_pushed,
         ) = runner.collect_trajectory(render=False)
 
-        all_rewards = (
-            all_attack_reward
-            + all_b2b_reward
-            + all_combo_reward
-            + all_spin_reward
-            + all_easy_clear_penalty
-            + all_death_penalty
-            + all_height_penalty
-            + all_hole_penalty
-            + all_skyline_penalty
-            + all_bumpy_penalty
-        )
-
         all_rewards = tf.ensure_shape(
-            all_rewards[..., None], (num_collection_steps, num_envs, 1)
+            all_total_reward[..., None], (num_collection_steps, num_envs, 1)
         )
 
         # Scale rewards by running return std
@@ -476,15 +463,8 @@ def main(argv):
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
         avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
-        avg_b2b_reward = tf.reduce_mean(tf.reduce_sum(all_b2b_reward, axis=0))
-        avg_combo_reward = tf.reduce_mean(tf.reduce_sum(all_combo_reward, axis=0))
-        avg_spin_reward = tf.reduce_mean(tf.reduce_sum(all_spin_reward, axis=0))
-        avg_easy_clear_penalty = tf.reduce_mean(tf.reduce_sum(all_easy_clear_penalty, axis=0))
-        avg_height_penalty = tf.reduce_mean(tf.reduce_sum(all_height_penalty, axis=0))
-        avg_hole_penalty = tf.reduce_mean(tf.reduce_sum(all_hole_penalty, axis=0))
-        avg_skyline_penalty = tf.reduce_mean(tf.reduce_sum(all_skyline_penalty, axis=0))
-        avg_bumpy_penalty = tf.reduce_mean(tf.reduce_sum(all_bumpy_penalty, axis=0))
-        avg_death_penalty = tf.reduce_mean(tf.reduce_sum(all_death_penalty, axis=0))
+        avg_total_reward = tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0))
+        avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
         avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
@@ -510,15 +490,8 @@ def main(argv):
                     "avg_attacks": avg_attacks,
                     "avg_clears": avg_clears,
                     "avg_attack_reward": avg_attack_reward,
-                    "avg_b2b_reward": avg_b2b_reward,
-                    "avg_combo_reward": avg_combo_reward,
-                    "avg_spin_reward": avg_spin_reward,
-                    "avg_easy_clear_penalty": avg_easy_clear_penalty,
-                    "avg_height_penalty": avg_height_penalty,
-                    "avg_hole_penalty": avg_hole_penalty,
-                    "avg_skyline_penalty": avg_skyline_penalty,
-                    "avg_bumpy_penalty": avg_bumpy_penalty,
-                    "avg_death_penalty": avg_death_penalty,
+                    "avg_total_reward": avg_total_reward,
+                    "avg_garbage_pushed": avg_garbage_pushed,
                     "avg_deaths": avg_deaths,
                     "avg_pieces": avg_pieces,
                     "board": wandb.Image(board[..., 0]),
