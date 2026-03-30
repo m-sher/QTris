@@ -16,7 +16,8 @@ num_heads = 4
 num_layers = 4
 dropout_rate = 0.0
 max_len = 15
-num_sequences = 160
+num_row_tiers = 2
+num_sequences = 160 * num_row_tiers
 
 num_envs = 64
 num_collection_steps = 4196
@@ -39,7 +40,7 @@ batches_per_epoch = total_samples // mini_batch_size
 
 save_freq = 1
 
-@tf.function()
+@tf.function(jit_compile=True)
 def train_step(flat_model, batch):
     boards = tf.ensure_shape(batch["boards"], (mini_batch_size, 24, 10, 1))
     pieces = tf.ensure_shape(batch["pieces"], (mini_batch_size, queue_size + 2))
@@ -147,6 +148,7 @@ def collect_data():
         temperature=temperature,
         seed=None,
         num_sequences=num_sequences,
+        num_row_tiers=num_row_tiers,
     )
 
     print(f"Collecting {num_collection_steps} steps x {num_envs} envs...", flush=True)
