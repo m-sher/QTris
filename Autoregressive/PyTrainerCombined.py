@@ -14,7 +14,7 @@ key_dim = 12
 depth = 64
 num_heads = 4
 num_layers = 4
-dropout_rate = 0.05
+dropout_rate = 0.00
 max_len = 15
 
 # Environment params
