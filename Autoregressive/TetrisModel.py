@@ -578,3 +578,215 @@ class ValueModel(keras.Model):
         output = self.top(trunk_out, training=False)
 
         return output
+
+
+class AsymmetricValueModel(keras.Model):
+    """Value model that sees both the training player's and opponent's board state.
+
+    Own board processing is identical to ValueModel (conv → cross-attention decoders).
+    Opponent board is processed through the shared conv encoder, a separate bcg encoder,
+    and a lightweight self-attention encoder, then mean-pooled to a fixed-size vector.
+    The two representations are concatenated and fed to a larger trunk.
+    """
+
+    def __init__(
+        self, piece_dim, depth, num_heads, num_layers, dropout_rate, output_dim
+    ):
+        super().__init__()
+
+        self._depth = depth
+
+        # === Shared board conv encoder (used for both own and opponent boards) ===
+        self.make_patches = keras.Sequential(
+            [
+                keras.Input(shape=(24, 10, 1)),
+                layers.Rescaling(scale=2.0, offset=-1.0),
+                layers.Conv2D(
+                    filters=depth // 2,
+                    kernel_size=3,
+                    strides=1,
+                    padding="same",
+                    activation="relu",
+                ),
+                layers.Conv2D(
+                    filters=depth,
+                    kernel_size=3,
+                    strides=1,
+                    padding="same",
+                    activation="relu",
+                ),
+                layers.Conv2D(
+                    filters=depth,
+                    kernel_size=2,
+                    strides=2,
+                    padding="valid",
+                    activation="relu",
+                ),
+                layers.Reshape((-1, depth)),
+            ]
+        )
+
+        num_patches = self.make_patches.output_shape[1]
+        self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
+
+        # === Own board processing (same as ValueModel) ===
+        self.board_decoder_layers = [
+            DecoderLayer(
+                units=depth,
+                causal=False,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"board_dec_{i}",
+            )
+            for i in range(num_layers)
+        ]
+
+        self.piece_embedding = layers.Embedding(
+            input_dim=piece_dim,
+            output_dim=depth,
+        )
+
+        self.piece_pos_encoding = PosEncoding(
+            depth=depth,
+            max_length=7,
+        )
+
+        self.piece_decoder_layers = [
+            DecoderLayer(
+                units=depth,
+                causal=False,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"piece_dec_{i}",
+            )
+            for i in range(num_layers)
+        ]
+
+        self._bcg_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="bcg_dense",
+        )
+
+        # === Opponent processing ===
+        self._opp_bcg_dense = keras.Sequential(
+            [
+                layers.Dense(depth // 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="opp_bcg_dense",
+        )
+
+        self.opp_encoder_layers = [
+            EncoderLayer(
+                units=depth,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"opp_enc_{i}",
+            )
+            for i in range(max(1, num_layers // 2))
+        ]
+
+        # === Combined trunk ===
+        self.trunk = keras.Sequential(
+            [
+                layers.Dropout(dropout_rate),
+                layers.Dense(depth * 2, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="trunk",
+        )
+
+        self.top = layers.Dense(output_dim)
+
+    @tf.function(jit_compile=True)
+    def process_obs(self, inputs, training=False):
+        """Process own board state. Identical to ValueModel.process_obs."""
+        board, piece, b2b_combo_garbage = inputs
+
+        piece_scores = []
+        patches = self.make_patches(board, training=training)
+        board_dec = self.patch_pos_encoding(patches)
+
+        piece_embedding = self.piece_embedding(piece, training=training)
+        piece_dec = self.piece_pos_encoding(piece_embedding)
+
+        bcg_embedding = self._bcg_dense(b2b_combo_garbage, training=training)
+        piece_dec += bcg_embedding[:, None, :]
+
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
+            )
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
+
+        return piece_dec, piece_scores
+
+    @tf.function(jit_compile=True)
+    def process_opp(self, opp_board, opp_b2b_combo_garbage, training=False):
+        """Process opponent board into a fixed-size representation."""
+        # Shared conv encoder
+        opp_patches = self.make_patches(opp_board, training=training)
+        opp_enc = self.patch_pos_encoding(opp_patches)
+
+        # Add opponent state info
+        opp_bcg = self._opp_bcg_dense(opp_b2b_combo_garbage, training=training)
+        opp_enc += opp_bcg[:, None, :]
+
+        # Self-attention for spatial reasoning
+        for enc_layer in self.opp_encoder_layers:
+            opp_enc = enc_layer(opp_enc, training=training)
+
+        # Pool to fixed size
+        return tf.reduce_mean(opp_enc, axis=1)  # (batch, depth)
+
+    @tf.function(jit_compile=True)
+    def call(self, inputs, training=False, return_scores=False):
+        board, piece, b2b_combo_garbage, opp_board, opp_b2b_combo_garbage = inputs
+
+        piece_dec, piece_scores = self.process_obs(
+            (board, piece, b2b_combo_garbage), training=training
+        )
+
+        opp_repr = self.process_opp(
+            opp_board, opp_b2b_combo_garbage, training=training
+        )
+
+        # Flatten own representation and concat with opponent
+        own_flat = tf.reshape(piece_dec, (tf.shape(piece_dec)[0], -1))
+        combined = tf.concat([own_flat, opp_repr], axis=-1)
+
+        trunk_out = self.trunk(combined, training=training)
+        output = self.top(trunk_out, training=training)
+
+        if return_scores:
+            return output, piece_scores
+        else:
+            return output
+
+    @tf.function(jit_compile=True)
+    def predict(self, inputs):
+        board, piece, b2b_combo_garbage, opp_board, opp_b2b_combo_garbage = inputs
+
+        piece_dec, _ = self.process_obs(
+            (board, piece, b2b_combo_garbage), training=False
+        )
+
+        opp_repr = self.process_opp(
+            opp_board, opp_b2b_combo_garbage, training=False
+        )
+
+        own_flat = tf.reshape(piece_dec, (tf.shape(piece_dec)[0], -1))
+        combined = tf.concat([own_flat, opp_repr], axis=-1)
+
+        trunk_out = self.trunk(combined, training=False)
+        output = self.top(trunk_out, training=False)
+
+        return output
