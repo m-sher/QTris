@@ -340,7 +340,21 @@ def main(argv):
     p_checkpoint_manager = tf.train.CheckpointManager(
         p_checkpoint, "./1v1_policy_checkpoints", max_to_keep=3
     )
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+
+    if p_checkpoint_manager.latest_checkpoint:
+        p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+        print("Restored policy from 1v1 checkpoint", flush=True)
+    else:
+        # Bootstrap from solo trainer's policy checkpoint
+        solo_p_checkpoint = tf.train.Checkpoint(model=p_model)
+        solo_p_manager = tf.train.CheckpointManager(
+            solo_p_checkpoint, "./policy_checkpoints", max_to_keep=1
+        )
+        if solo_p_manager.latest_checkpoint:
+            solo_p_checkpoint.restore(solo_p_manager.latest_checkpoint).expect_partial()
+            print("Bootstrapped policy from solo trainer checkpoint", flush=True)
+        else:
+            print("No policy checkpoints found, starting from scratch", flush=True)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(
@@ -442,6 +456,7 @@ def main(argv):
             all_total_reward,
             all_dones,
             all_garbage_pushed,
+            all_wins,
             all_opp_boards,
             all_opp_b2b_combo_garbage,
         ) = runner.collect_trajectory(render=False)
@@ -569,6 +584,12 @@ def main(argv):
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
 
+        # 1v1 metrics
+        total_wins = tf.reduce_sum(all_wins)
+        total_episodes = tf.reduce_sum(all_dones)
+        total_losses = total_episodes - total_wins
+        win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
+
         if gen % 10 == 0:
             wandb.log(
                 {
@@ -588,13 +609,16 @@ def main(argv):
                     "avg_garbage_pushed": avg_garbage_pushed,
                     "avg_deaths": avg_deaths,
                     "avg_pieces": avg_pieces,
+                    "win_rate": win_rate,
+                    "total_wins": total_wins,
+                    "total_losses": total_losses,
                     "board": wandb.Image(board[..., 0]),
                     "scores": wandb.Image(norm_c_scores),
                 }
             )
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | WR: {win_rate:.2f}",
             flush=True,
         )
         last_time = time.time()
