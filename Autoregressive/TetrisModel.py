@@ -760,7 +760,8 @@ class AsymmetricValueModel(keras.Model):
         )
 
         # Flatten own representation and concat with opponent
-        own_flat = tf.reshape(piece_dec, (tf.shape(piece_dec)[0], -1))
+        # piece_dec is (batch, 7, depth) — use static size so Dense layers trace correctly
+        own_flat = tf.reshape(piece_dec, (-1, 7 * self._depth))
         combined = tf.concat([own_flat, opp_repr], axis=-1)
 
         trunk_out = self.trunk(combined, training=training)
@@ -783,7 +784,7 @@ class AsymmetricValueModel(keras.Model):
             opp_board, opp_b2b_combo_garbage, training=False
         )
 
-        own_flat = tf.reshape(piece_dec, (tf.shape(piece_dec)[0], -1))
+        own_flat = tf.reshape(piece_dec, (-1, 7 * self._depth))
         combined = tf.concat([own_flat, opp_repr], axis=-1)
 
         trunk_out = self.trunk(combined, training=False)
