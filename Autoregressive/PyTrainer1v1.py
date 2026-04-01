@@ -33,7 +33,7 @@ num_sequences = 160 * num_row_tiers
 
 # Training params
 mini_batch_size = 1024
-num_epochs = 10
+num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = False
 
@@ -190,7 +190,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         # Compute bonus/penalty
         entropy = tf.ensure_shape(masked_dist.entropy(), (mini_batch_size, max_len - 1))
-        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1) / tf.reduce_sum(pad_mask, axis=-1)
+        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1)
         entropy = tf.reduce_mean(entropy)
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
@@ -590,32 +590,31 @@ def main(argv):
         total_losses = total_episodes - total_wins
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
 
-        if gen % 10 == 0:
-            wandb.log(
-                {
-                    "ppo_loss": ppo_loss,
-                    "entropy": entropy,
-                    "approx_kl": approx_kl,
-                    "clipped_frac": clipped_frac,
-                    "value_loss": value_loss,
-                    "explained_var": explained_var,
-                    "return_var": return_var,
-                    "avg_probs": avg_probs,
-                    "avg_reward": avg_reward,
-                    "avg_attacks": avg_attacks,
-                    "avg_clears": avg_clears,
-                    "avg_attack_reward": avg_attack_reward,
-                    "avg_total_reward": avg_total_reward,
-                    "avg_garbage_pushed": avg_garbage_pushed,
-                    "avg_deaths": avg_deaths,
-                    "avg_pieces": avg_pieces,
-                    "win_rate": win_rate,
-                    "total_wins": total_wins,
-                    "total_losses": total_losses,
-                    "board": wandb.Image(board[..., 0]),
-                    "scores": wandb.Image(norm_c_scores),
-                }
-            )
+        wandb.log(
+            {
+                "ppo_loss": ppo_loss,
+                "entropy": entropy,
+                "approx_kl": approx_kl,
+                "clipped_frac": clipped_frac,
+                "value_loss": value_loss,
+                "explained_var": explained_var,
+                "return_var": return_var,
+                "avg_probs": avg_probs,
+                "avg_reward": avg_reward,
+                "avg_attacks": avg_attacks,
+                "avg_clears": avg_clears,
+                "avg_attack_reward": avg_attack_reward,
+                "avg_total_reward": avg_total_reward,
+                "avg_garbage_pushed": avg_garbage_pushed,
+                "avg_deaths": avg_deaths,
+                "avg_pieces": avg_pieces,
+                "win_rate": win_rate,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "board": wandb.Image(board[..., 0]),
+                "scores": wandb.Image(norm_c_scores),
+            }
+        )
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | WR: {win_rate:.2f}",
