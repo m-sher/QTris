@@ -545,13 +545,6 @@ def main(argv):
         p_checkpoint_manager.save()
         v_checkpoint_manager.save()
 
-        # Save to opponent pool only when winning every game, then load a new challenger
-        if gen % pool_save_interval == 0 and total_episodes > 0 and total_losses == 0:
-            save_pool_checkpoint(p_model, gen)
-            print(f"Saved to opponent pool at gen {gen} (100% win rate)", flush=True)
-            if not load_pool_opponent(opp_model):
-                opp_model.set_weights(p_model.get_weights())
-
         print(
             f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...",
             flush=True,
@@ -593,6 +586,13 @@ def main(argv):
         total_episodes = tf.reduce_sum(all_dones)
         total_losses = total_episodes - total_wins
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
+
+        # Save to opponent pool only when winning every game, then load a new challenger
+        if gen % pool_save_interval == 0 and total_episodes > 0 and total_losses == 0:
+            save_pool_checkpoint(p_model, gen)
+            print(f"Saved to opponent pool at gen {gen} (100% win rate)", flush=True)
+            if not load_pool_opponent(opp_model):
+                opp_model.set_weights(p_model.get_weights())
 
         wandb.log(
             {
