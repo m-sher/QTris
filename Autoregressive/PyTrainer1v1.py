@@ -35,16 +35,16 @@ num_sequences = 160 * num_row_tiers
 mini_batch_size = 1024
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
-early_stopping = False
+early_stopping = True
 
 gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
+entropy_coef = 0.01
 temperature = 1.0
 
-target_kl = 0.04
+target_kl = 0.02
 
 # Opponent pool params
 pool_save_interval = 25
@@ -545,10 +545,12 @@ def main(argv):
         p_checkpoint_manager.save()
         v_checkpoint_manager.save()
 
-        # Save to opponent pool and refresh opponent periodically
-        if gen % pool_save_interval == 0:
+        # Save to opponent pool only when winning every game, then load a new challenger
+        if gen % pool_save_interval == 0 and total_episodes > 0 and total_losses == 0:
             save_pool_checkpoint(p_model, gen)
-            load_pool_opponent(opp_model)
+            print(f"Saved to opponent pool at gen {gen} (100% win rate)", flush=True)
+            if not load_pool_opponent(opp_model):
+                opp_model.set_weights(p_model.get_weights())
 
         print(
             f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...",
