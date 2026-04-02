@@ -158,42 +158,39 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
+        # Per-token log probs: (batch, max_len - 1)
         new_log_probs = tf.ensure_shape(
             masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
-        new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(new_log_probs * pad_mask, axis=-1)[..., None],
-            (mini_batch_size, 1),
+
+        old_log_probs = log_probs_batch  # (batch, max_len - 1)
+
+        # Total valid tokens for averaging
+        num_valid_tokens = tf.reduce_sum(pad_mask)
+
+        # Per-token PPO ratio and clipping: (batch, max_len - 1)
+        per_token_ratio = tf.exp(new_log_probs - old_log_probs)  # (batch, max_len - 1)
+        per_token_clipped = tf.clip_by_value(
+            per_token_ratio, 1 - ppo_clip, 1 + ppo_clip
         )
 
-        old_log_probs = tf.ensure_shape(
-            tf.reduce_sum(log_probs_batch * pad_mask, axis=-1)[..., None],
-            (mini_batch_size, 1),
+        surr1 = per_token_ratio * advantages_batch  # broadcasts (batch, 1) -> (batch, max_len - 1)
+        surr2 = per_token_clipped * advantages_batch
+
+        # Mask out PAD tokens and average over valid tokens only
+        per_token_loss = tf.minimum(surr1, surr2) * pad_mask  # zero out PAD positions
+        ppo_loss = -tf.reduce_sum(per_token_loss) / num_valid_tokens
+
+        # Per-token entropy: average over valid tokens only
+        per_token_entropy = tf.ensure_shape(
+            masked_dist.entropy(), (mini_batch_size, max_len - 1)
         )
+        entropy = tf.reduce_sum(per_token_entropy * pad_mask) / num_valid_tokens
 
-        # PPO loss
-        ratio = tf.ensure_shape(
-            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
-        )
-        clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
-            (mini_batch_size, 1),
-        )
-
-        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
-        surr2 = tf.ensure_shape(
-            clipped_ratio * advantages_batch,
-            (mini_batch_size, 1),
-        )
-
-        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
-
-        # Compute bonus/penalty
-        entropy = tf.ensure_shape(masked_dist.entropy(), (mini_batch_size, max_len - 1))
-        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1)
-        entropy = tf.reduce_mean(entropy)
-
-        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+        # Per-token approx KL: average over valid tokens only
+        approx_kl = tf.reduce_sum(
+            (old_log_probs - new_log_probs) * pad_mask
+        ) / num_valid_tokens
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -202,7 +199,9 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+    clipped_frac = tf.reduce_sum(
+        tf.cast(per_token_ratio != per_token_clipped, tf.float32) * pad_mask
+    ) / num_valid_tokens
 
     with tf.GradientTape() as v_tape:
         values = v_model(
@@ -578,7 +577,10 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-        avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
+        all_pad_mask = tf.cast(all_actions[..., 1:] != Keys.PAD, tf.float32)
+        avg_probs = tf.reduce_sum(
+            tf.exp(all_log_probs[:, :, 1:]) * all_pad_mask
+        ) / tf.reduce_sum(all_pad_mask)
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
