@@ -1,11 +1,4 @@
-import argparse
-import sys
-
-# Parse --flat flag before heavy imports
-_parser = argparse.ArgumentParser(add_help=False)
-_parser.add_argument("--flat", action="store_true", default=False)
-_pre_args, _ = _parser.parse_known_args()
-USE_FLAT = _pre_args.flat
+USE_FLAT = True
 
 from TetrisEnv.Moves import Keys
 from TetrisModel import AsymmetricValueModel
