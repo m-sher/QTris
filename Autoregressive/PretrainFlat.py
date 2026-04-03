@@ -7,7 +7,6 @@ import tf_agents
 import wandb
 import time
 import json
-import multiprocessing
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -356,10 +355,7 @@ def train():
 
 
 def main(argv):
-    p = multiprocessing.Process(target=collect_data)
-    p.start()
-    p.join()
-
+    collect_data()
     train()
 
 
