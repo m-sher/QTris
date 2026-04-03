@@ -58,13 +58,11 @@ def train_step(flat_model, batch):
         axis=-1,
     )
 
-    piece_dec, _ = flat_model.process_obs(
-        (boards, pieces, b2b_combo_garbage), training=False
-    )
-    piece_dec = tf.stop_gradient(piece_dec)
-
     with tf.GradientTape() as tape:
-        logits = flat_model.score_actions(piece_dec, training=True)
+        logits = flat_model(
+            (boards, pieces, b2b_combo_garbage),
+            training=True,
+        )
 
         masked_logits = tf.where(
             valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
