@@ -120,13 +120,13 @@ def collect_data():
 
     old_ckpt = tf.train.Checkpoint(model=old_model)
     old_mgr = tf.train.CheckpointManager(
-        old_ckpt, "./policy_checkpoints", max_to_keep=1
+        old_ckpt, "./checkpoints/policy_checkpoints_445k", max_to_keep=1
     )
     old_ckpt.restore(old_mgr.latest_checkpoint).expect_partial()
     print("Restored old autoregressive policy", flush=True)
 
     v_ckpt = tf.train.Checkpoint(model=v_model)
-    v_mgr = tf.train.CheckpointManager(v_ckpt, "./value_checkpoints", max_to_keep=1)
+    v_mgr = tf.train.CheckpointManager(v_ckpt, "./checkpoints/value_checkpoints_445k", max_to_keep=1)
     v_ckpt.restore(v_mgr.latest_checkpoint).expect_partial()
     print("Restored value model", flush=True)
 
@@ -275,7 +275,7 @@ def train():
     else:
         ar_ckpt = tf.train.Checkpoint(model=flat_model)
         ar_mgr = tf.train.CheckpointManager(
-            ar_ckpt, "./policy_checkpoints", max_to_keep=1
+            ar_ckpt, "./checkpoints/policy_checkpoints_445k", max_to_keep=1
         )
         ar_ckpt.restore(ar_mgr.latest_checkpoint).expect_partial()
         print("Restored flat model encoder from autoregressive checkpoint", flush=True)
