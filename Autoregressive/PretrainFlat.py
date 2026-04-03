@@ -22,7 +22,7 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 num_envs = 64
-num_collection_steps = 4196
+num_collection_steps = 2048
 queue_size = 5
 max_holes = 50
 max_height = 18
