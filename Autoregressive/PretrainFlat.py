@@ -58,11 +58,13 @@ def train_step(flat_model, batch):
         axis=-1,
     )
 
+    piece_dec, _ = flat_model.process_obs(
+        (boards, pieces, b2b_combo_garbage), training=False
+    )
+    piece_dec = tf.stop_gradient(piece_dec)
+
     with tf.GradientTape() as tape:
-        logits = flat_model(
-            (boards, pieces, b2b_combo_garbage),
-            training=True,
-        )
+        logits = flat_model.score_actions(piece_dec, training=True)
 
         masked_logits = tf.where(
             valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
@@ -279,14 +281,6 @@ def train():
         )
         ar_ckpt.restore(ar_mgr.latest_checkpoint).expect_partial()
         print("Restored flat model encoder from autoregressive checkpoint", flush=True)
-
-    flat_model.make_patches.trainable = False
-    flat_model.piece_embedding.trainable = False
-    flat_model._bcg_dense.trainable = False
-    for layer in flat_model.board_decoder_layers:
-        layer.trainable = False
-    for layer in flat_model.piece_decoder_layers:
-        layer.trainable = False
 
     optimizer = keras.optimizers.Adam(learning_rate, clipnorm=0.5)
     flat_model.compile(optimizer=optimizer, jit_compile=True)
