@@ -43,7 +43,7 @@ save_freq = 1
 DATA_DIR = "./pretrain_data"
 METRICS_PATH = "./pretrain_metrics.json"
 
-@tf.function(jit_compile=True)
+@tf.function
 def train_step(flat_model, batch):
     boards = tf.ensure_shape(batch["boards"], (mini_batch_size, 24, 10, 1))
     pieces = tf.ensure_shape(batch["pieces"], (mini_batch_size, queue_size + 2))
