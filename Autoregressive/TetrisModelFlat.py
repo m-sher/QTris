@@ -2,45 +2,10 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisModel import PosEncoding, DecoderLayer, ValueModel
+from TetrisModel import PosEncoding, DecoderLayer, CrossAttention, FeedForward, ValueModel
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
-
-
-class ActionDecoderLayer(layers.Layer):
-    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="ActionDecoder"):
-        super().__init__(name=name)
-
-        self.cross_attention = layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.add = layers.Add()
-        self.layernorm = layers.LayerNormalization()
-
-        self.ff = keras.Sequential(
-            [
-                layers.Dense(units=2 * units, activation="relu"),
-                layers.Dense(units=units),
-                layers.Dropout(rate=dropout_rate),
-            ]
-        )
-        self.ff_layernorm = layers.LayerNormalization()
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False):
-        context, queries = inputs
-
-        attn, attn_scores = self.cross_attention(
-            query=queries, value=context, return_attention_scores=True, training=training
-        )
-        queries = self.add([queries, attn])
-        queries = self.layernorm(queries, training=training)
-
-        queries = queries + self.ff(queries, training=training)
-        queries = self.ff_layernorm(queries, training=training)
-
-        return queries, attn_scores
 
 
 class FlatPolicyModel(keras.Model):
@@ -137,15 +102,10 @@ class FlatPolicyModel(keras.Model):
             output_dim=depth,
         )
 
-        self.action_decoder_layers = [
-            ActionDecoderLayer(
-                units=depth,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"action_dec_{i}",
-            )
-            for i in range(num_layers)
-        ]
+        self.action_cross_attention = CrossAttention(
+            num_heads=num_heads, key_dim=depth, dropout=dropout_rate
+        )
+        self.action_ff = FeedForward(units=depth, dropout_rate=dropout_rate)
 
         self.action_proj = layers.Dense(1, name="action_proj")
 
@@ -185,10 +145,10 @@ class FlatPolicyModel(keras.Model):
         )
         action_dec = self.action_embedding(action_ids, training=training)
 
-        for action_dec_layer in self.action_decoder_layers:
-            action_dec, _ = action_dec_layer(
-                [piece_dec, action_dec], training=training
-            )
+        action_dec, _ = self.action_cross_attention(
+            action_dec, piece_dec, training=training
+        )
+        action_dec = self.action_ff(action_dec, training=training)
 
         logits = tf.squeeze(
             self.action_proj(action_dec, training=training), axis=-1
