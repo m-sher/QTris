@@ -1,6 +1,14 @@
-from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
+import argparse
+import sys
+
+# Parse --flat flag before heavy imports
+_parser = argparse.ArgumentParser(add_help=False)
+_parser.add_argument("--flat", action="store_true", default=False)
+_pre_args, _ = _parser.parse_known_args()
+USE_FLAT = _pre_args.flat
+
 from TetrisEnv.Moves import Keys
-from TetrisModel import PolicyModel, AsymmetricValueModel
+from TetrisModel import AsymmetricValueModel
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -10,6 +18,15 @@ import time
 import os
 import glob
 import random
+
+if USE_FLAT:
+    from TetrisEnv.Py1v1TetrisRunnerFlat import Py1v1TetrisRunnerFlat
+    from TetrisModelFlat import FlatPolicyModel
+else:
+    from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
+    from TetrisModel import PolicyModel
+
+HARD_DROP_ID = Keys.HARD_DROP
 
 # Model params
 piece_dim = 8
@@ -49,9 +66,10 @@ target_kl = 0.02
 # Opponent pool params
 pool_save_interval = 25
 max_pool_size = 50
-pool_dir = "./opponent_pool"
+pool_dir = "./opponent_pool_flat" if USE_FLAT else "./opponent_pool"
 
 config = {
+    "flat": USE_FLAT,
     "num_envs": num_envs,
     "num_collection_steps": num_collection_steps,
     "mini_batch_size": mini_batch_size,
@@ -92,8 +110,11 @@ def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     return advantages, returns
 
 
+# ---------------------------------------------------------------------------
+# Autoregressive train step
+# ---------------------------------------------------------------------------
 @tf.function()
-def train_step(p_model, v_model, online_batch, entropy_coef):
+def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -245,11 +266,149 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     }
 
 
+# ---------------------------------------------------------------------------
+# Flat train step
+# ---------------------------------------------------------------------------
+@tf.function()
+def train_step_flat(p_model, v_model, online_batch, entropy_coef):
+    online_board_batch = tf.ensure_shape(
+        online_batch["boards"], (mini_batch_size, 24, 10, 1)
+    )
+    online_pieces_batch = tf.ensure_shape(
+        online_batch["pieces"], (mini_batch_size, queue_size + 2)
+    )
+    online_b2b_combo_garbage_batch = tf.ensure_shape(
+        online_batch["b2b_combo_garbage"], (mini_batch_size, 3)
+    )
+    online_valid_sequences_batch = tf.ensure_shape(
+        online_batch["valid_sequences"], (mini_batch_size, num_sequences, max_len)
+    )
+    action_indices_batch = tf.ensure_shape(
+        online_batch["action_indices"], (mini_batch_size,)
+    )
+
+    old_log_probs_batch = tf.ensure_shape(
+        online_batch["old_log_probs"], (mini_batch_size, 1)
+    )
+    advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
+    old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
+
+    # Opponent state for asymmetric value model
+    opp_board_batch = tf.ensure_shape(
+        online_batch["opp_boards"], (mini_batch_size, 24, 10, 1)
+    )
+    opp_b2b_combo_garbage_batch = tf.ensure_shape(
+        online_batch["opp_b2b_combo_garbage"], (mini_batch_size, 3)
+    )
+
+    valid_mask = tf.reduce_any(
+        tf.equal(
+            online_valid_sequences_batch,
+            tf.constant(HARD_DROP_ID, dtype=tf.int64),
+        ),
+        axis=-1,
+    )
+
+    with tf.GradientTape() as p_tape:
+        logits, piece_scores = p_model(
+            (
+                online_board_batch,
+                online_pieces_batch,
+                online_b2b_combo_garbage_batch,
+            ),
+            training=True,
+            return_scores=True,
+        )
+
+        masked_logits = tf.where(
+            valid_mask, logits / temperature, tf.constant(-1e9, dtype=tf.float32)
+        )
+
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        new_log_probs = tf.ensure_shape(
+            dist.log_prob(action_indices_batch)[..., None], (mini_batch_size, 1)
+        )
+
+        ratio = tf.ensure_shape(
+            tf.exp(new_log_probs - old_log_probs_batch), (mini_batch_size, 1)
+        )
+        clipped_ratio = tf.ensure_shape(
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
+            (mini_batch_size, 1),
+        )
+
+        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
+        surr2 = tf.ensure_shape(
+            clipped_ratio * advantages_batch,
+            (mini_batch_size, 1),
+        )
+
+        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+
+        entropy = tf.reduce_mean(dist.entropy())
+
+        approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
+
+        total_policy_loss = ppo_loss - entropy_coef * entropy
+
+    p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
+    p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
+
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+
+    with tf.GradientTape() as v_tape:
+        values = v_model(
+            (
+                online_board_batch,
+                online_pieces_batch,
+                online_b2b_combo_garbage_batch,
+                opp_board_batch,
+                opp_b2b_combo_garbage_batch,
+            ),
+            training=True,
+        )
+
+        value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
+        clipped_values = old_values_batch + tf.clip_by_value(
+            values - old_values_batch, -value_clip, value_clip
+        )
+        clipped_value_error = clipped_values - returns_batch
+        value_loss = tf.reduce_mean(
+            tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
+        )
+
+    v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
+    v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
+
+    ret_var = tf.math.reduce_variance(returns_batch)
+    res_var = tf.math.reduce_variance(returns_batch - values)
+    explained_var = tf.reduce_mean(1.0 - tf.math.divide_no_nan(res_var, ret_var))
+
+    return {
+        "ppo_loss": ppo_loss,
+        "entropy": entropy,
+        "approx_kl": approx_kl,
+        "clipped_frac": clipped_frac,
+        "value_loss": value_loss,
+        "explained_var": explained_var,
+        "board": online_board_batch[0],
+        "scores": piece_scores,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Common helpers
+# ---------------------------------------------------------------------------
+_train_step_fn = train_step_flat if USE_FLAT else train_step_ar
+
+
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
         kls = []
         for online_batch in online_dataset:
-            step_out = train_step(p_model, v_model, online_batch, entropy_coef)
+            step_out = _train_step_fn(p_model, v_model, online_batch, entropy_coef)
             kls.append(step_out["approx_kl"])
 
         if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
@@ -291,31 +450,54 @@ def load_pool_opponent(opp_model):
 
 
 def main(argv):
-    # Initialize models
-    p_model = PolicyModel(
-        batch_size=num_envs,
-        piece_dim=piece_dim,
-        key_dim=key_dim,
-        depth=depth,
-        max_len=max_len,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout_rate=dropout_rate,
-        output_dim=key_dim,
-    )
+    mode_str = "flat" if USE_FLAT else "autoregressive"
+    print(f"Starting 1v1 trainer in {mode_str} mode", flush=True)
 
-    # Opponent policy (same architecture, loaded from pool)
-    opp_model = PolicyModel(
-        batch_size=num_envs,
-        piece_dim=piece_dim,
-        key_dim=key_dim,
-        depth=depth,
-        max_len=max_len,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout_rate=dropout_rate,
-        output_dim=key_dim,
-    )
+    # -----------------------------------------------------------------------
+    # Initialize models
+    # -----------------------------------------------------------------------
+    if USE_FLAT:
+        p_model = FlatPolicyModel(
+            batch_size=num_envs,
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            num_sequences=num_sequences,
+        )
+        opp_model = FlatPolicyModel(
+            batch_size=num_envs,
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            num_sequences=num_sequences,
+        )
+    else:
+        p_model = PolicyModel(
+            batch_size=num_envs,
+            piece_dim=piece_dim,
+            key_dim=key_dim,
+            depth=depth,
+            max_len=max_len,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=key_dim,
+        )
+        opp_model = PolicyModel(
+            batch_size=num_envs,
+            piece_dim=piece_dim,
+            key_dim=key_dim,
+            depth=depth,
+            max_len=max_len,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=key_dim,
+        )
 
     v_model = AsymmetricValueModel(
         piece_dim=piece_dim,
@@ -334,51 +516,65 @@ def main(argv):
     v_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
     v_model.compile(optimizer=v_optimizer, jit_compile=True)
 
+    # -----------------------------------------------------------------------
+    # Checkpoint paths depend on mode
+    # -----------------------------------------------------------------------
+    if USE_FLAT:
+        p_ckpt_dir = "./1v1_flat_policy_checkpoints"
+        solo_bootstrap_dir = "./flat_head_policy_checkpoints"
+    else:
+        p_ckpt_dir = "./1v1_policy_checkpoints"
+        solo_bootstrap_dir = "./policy_checkpoints"
+
+    v_ckpt_dir = "./1v1_value_checkpoints"
+
     # Initialize checkpoint managers for training models
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(
-        p_checkpoint, "./1v1_policy_checkpoints", max_to_keep=3
+        p_checkpoint, p_ckpt_dir, max_to_keep=3
     )
 
     if p_checkpoint_manager.latest_checkpoint:
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
-        print("Restored policy from 1v1 checkpoint", flush=True)
+        print(f"Restored policy from 1v1 checkpoint ({p_ckpt_dir})", flush=True)
     else:
         # Bootstrap from solo trainer's policy checkpoint
         solo_p_checkpoint = tf.train.Checkpoint(model=p_model)
         solo_p_manager = tf.train.CheckpointManager(
-            solo_p_checkpoint, "./policy_checkpoints", max_to_keep=1
+            solo_p_checkpoint, solo_bootstrap_dir, max_to_keep=1
         )
         if solo_p_manager.latest_checkpoint:
             solo_p_checkpoint.restore(solo_p_manager.latest_checkpoint).expect_partial()
-            print("Bootstrapped policy from solo trainer checkpoint", flush=True)
+            print(f"Bootstrapped policy from solo checkpoint ({solo_bootstrap_dir})", flush=True)
         else:
             print("No policy checkpoints found, starting from scratch", flush=True)
 
     v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
     v_checkpoint_manager = tf.train.CheckpointManager(
-        v_checkpoint, "./1v1_value_checkpoints", max_to_keep=3
+        v_checkpoint, v_ckpt_dir, max_to_keep=3
     )
     v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
-    p_model.build(
-        input_shape=[
+    # -----------------------------------------------------------------------
+    # Build models
+    # -----------------------------------------------------------------------
+    if USE_FLAT:
+        p_build_shape = [
+            (None, 24, 10, 1),
+            (None, queue_size + 2),
+            (None, 3),
+        ]
+    else:
+        p_build_shape = [
             (None, 24, 10, 1),
             (None, queue_size + 2),
             (None, 3),
             (None, max_len),
         ]
-    )
 
-    opp_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, max_len),
-        ]
-    )
+    p_model.build(input_shape=p_build_shape)
+    opp_model.build(input_shape=p_build_shape)
 
     v_model.build(
         input_shape=[
@@ -399,25 +595,45 @@ def main(argv):
         opp_model.set_weights(p_model.get_weights())
         print("No pool checkpoints found, opponent initialized from current policy", flush=True)
 
+    # -----------------------------------------------------------------------
     # Initialize runner
-    runner = Py1v1TetrisRunner(
-        queue_size=queue_size,
-        max_holes=max_holes,
-        max_height=max_height,
-        max_steps=max_steps,
-        pathfinding=True,
-        max_len=max_len,
-        key_dim=key_dim,
-        num_steps=num_collection_steps,
-        num_envs=num_envs,
-        p_model=p_model,
-        opp_model=opp_model,
-        v_model=v_model,
-        temperature=temperature,
-        seed=None,
-        num_sequences=num_sequences,
-        num_row_tiers=num_row_tiers,
-    )
+    # -----------------------------------------------------------------------
+    if USE_FLAT:
+        runner = Py1v1TetrisRunnerFlat(
+            queue_size=queue_size,
+            max_holes=max_holes,
+            max_height=max_height,
+            max_steps=max_steps,
+            max_len=max_len,
+            num_steps=num_collection_steps,
+            num_envs=num_envs,
+            p_model=p_model,
+            opp_model=opp_model,
+            v_model=v_model,
+            temperature=temperature,
+            seed=None,
+            num_sequences=num_sequences,
+            num_row_tiers=num_row_tiers,
+        )
+    else:
+        runner = Py1v1TetrisRunner(
+            queue_size=queue_size,
+            max_holes=max_holes,
+            max_height=max_height,
+            max_steps=max_steps,
+            pathfinding=True,
+            max_len=max_len,
+            key_dim=key_dim,
+            num_steps=num_collection_steps,
+            num_envs=num_envs,
+            p_model=p_model,
+            opp_model=opp_model,
+            v_model=v_model,
+            temperature=temperature,
+            seed=None,
+            num_sequences=num_sequences,
+            num_row_tiers=num_row_tiers,
+        )
 
     print("Initialized runner", flush=True)
     last_time = time.time()
@@ -432,33 +648,56 @@ def main(argv):
     return_var = 1.0
     return_var_decay = 0.99
 
-    # Collect trajectories and train
+    # -----------------------------------------------------------------------
+    # Training loop
+    # -----------------------------------------------------------------------
     for gen in range(generations):
         # Collect trajectory
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
 
-        (
-            all_boards,
-            all_pieces,
-            all_b2b_combo_garbage,
-            all_actions,
-            all_log_probs,
-            all_masks,
-            all_valid_sequences,
-            all_action_indices,
-            all_values,
-            all_last_values,
-            all_attacks,
-            all_clears,
-            all_attack_reward,
-            all_total_reward,
-            all_dones,
-            all_garbage_pushed,
-            all_wins,
-            all_opp_boards,
-            all_opp_b2b_combo_garbage,
-        ) = runner.collect_trajectory(render=False)
+        if USE_FLAT:
+            (
+                all_boards,
+                all_pieces,
+                all_b2b_combo_garbage,
+                all_log_probs,
+                all_valid_sequences,
+                all_action_indices,
+                all_values,
+                all_last_values,
+                all_attacks,
+                all_clears,
+                all_attack_reward,
+                all_total_reward,
+                all_dones,
+                all_garbage_pushed,
+                all_wins,
+                all_opp_boards,
+                all_opp_b2b_combo_garbage,
+            ) = runner.collect_trajectory(render=False)
+        else:
+            (
+                all_boards,
+                all_pieces,
+                all_b2b_combo_garbage,
+                all_actions,
+                all_log_probs,
+                all_masks,
+                all_valid_sequences,
+                all_action_indices,
+                all_values,
+                all_last_values,
+                all_attacks,
+                all_clears,
+                all_attack_reward,
+                all_total_reward,
+                all_dones,
+                all_garbage_pushed,
+                all_wins,
+                all_opp_boards,
+                all_opp_b2b_combo_garbage,
+            ) = runner.collect_trajectory(render=False)
 
         all_rewards = tf.ensure_shape(
             all_total_reward[..., None], (num_collection_steps, num_envs, 1)
@@ -493,42 +732,76 @@ def main(argv):
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
         b2b_combo_garbage_flat = tf.reshape(all_b2b_combo_garbage, (-1, 3))
-        actions_flat = tf.reshape(all_actions, (-1, max_len))
-        log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
-        masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))
         values_flat = tf.reshape(all_values, (-1, 1))
         opp_boards_flat = tf.reshape(all_opp_boards, (-1, 24, 10, 1))
         opp_b2b_combo_garbage_flat = tf.reshape(all_opp_b2b_combo_garbage, (-1, 3))
 
-        # Create TF dataset from data
-        online_dataset = (
-            tf.data.Dataset.from_tensor_slices(
-                {
-                    "boards": boards_flat,
-                    "pieces": pieces_flat,
-                    "b2b_combo_garbage": b2b_combo_garbage_flat,
-                    "actions": actions_flat,
-                    "old_log_probs": log_probs_flat,
-                    "masks": masks_flat,
-                    "advantages": advantages_flat,
-                    "returns": returns_flat,
-                    "old_values": values_flat,
-                    "opp_boards": opp_boards_flat,
-                    "opp_b2b_combo_garbage": opp_b2b_combo_garbage_flat,
-                }
+        if USE_FLAT:
+            valid_sequences_flat = tf.reshape(
+                all_valid_sequences, (-1, num_sequences, max_len)
             )
-            .cache()
-            .shuffle(buffer_size=boards_flat.shape[0])
-            .batch(
-                mini_batch_size,
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
-                drop_remainder=True,
+            action_indices_flat = tf.reshape(all_action_indices, (-1,))
+            log_probs_flat = tf.reshape(all_log_probs, (-1, 1))
+
+            online_dataset = (
+                tf.data.Dataset.from_tensor_slices(
+                    {
+                        "boards": boards_flat,
+                        "pieces": pieces_flat,
+                        "b2b_combo_garbage": b2b_combo_garbage_flat,
+                        "valid_sequences": valid_sequences_flat,
+                        "action_indices": action_indices_flat,
+                        "old_log_probs": log_probs_flat,
+                        "advantages": advantages_flat,
+                        "returns": returns_flat,
+                        "old_values": values_flat,
+                        "opp_boards": opp_boards_flat,
+                        "opp_b2b_combo_garbage": opp_b2b_combo_garbage_flat,
+                    }
+                )
+                .cache()
+                .shuffle(buffer_size=boards_flat.shape[0])
+                .batch(
+                    mini_batch_size,
+                    num_parallel_calls=tf.data.AUTOTUNE,
+                    deterministic=False,
+                    drop_remainder=True,
+                )
+                .prefetch(tf.data.AUTOTUNE)
             )
-            .prefetch(tf.data.AUTOTUNE)
-        )
+        else:
+            actions_flat = tf.reshape(all_actions, (-1, max_len))
+            log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
+            masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
+
+            online_dataset = (
+                tf.data.Dataset.from_tensor_slices(
+                    {
+                        "boards": boards_flat,
+                        "pieces": pieces_flat,
+                        "b2b_combo_garbage": b2b_combo_garbage_flat,
+                        "actions": actions_flat,
+                        "old_log_probs": log_probs_flat,
+                        "masks": masks_flat,
+                        "advantages": advantages_flat,
+                        "returns": returns_flat,
+                        "old_values": values_flat,
+                        "opp_boards": opp_boards_flat,
+                        "opp_b2b_combo_garbage": opp_b2b_combo_garbage_flat,
+                    }
+                )
+                .cache()
+                .shuffle(buffer_size=boards_flat.shape[0])
+                .batch(
+                    mini_batch_size,
+                    num_parallel_calls=tf.data.AUTOTUNE,
+                    deterministic=False,
+                    drop_remainder=True,
+                )
+                .prefetch(tf.data.AUTOTUNE)
+            )
 
         print(
             f"{time.time() - last_time:2.2f} | Dataset made. Training on dataset...",
@@ -572,10 +845,15 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-        all_pad_mask = tf.cast(all_actions[..., 1:] != Keys.PAD, tf.float32)
-        avg_probs = tf.reduce_sum(
-            tf.exp(all_log_probs[:, :, 1:]) * all_pad_mask
-        ) / tf.reduce_sum(all_pad_mask)
+
+        if USE_FLAT:
+            avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
+        else:
+            all_pad_mask = tf.cast(all_actions[..., 1:] != Keys.PAD, tf.float32)
+            avg_probs = tf.reduce_sum(
+                tf.exp(all_log_probs[:, :, 1:]) * all_pad_mask
+            ) / tf.reduce_sum(all_pad_mask)
+
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
