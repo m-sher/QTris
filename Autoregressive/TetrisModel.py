@@ -295,16 +295,7 @@ class PolicyModel(keras.Model):
 
         return piece_dec, piece_scores
 
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, None, None), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
+    @tf.function(jit_compile=True)
     def process_keys(self, inputs, training=False):
         piece_dec, keys = inputs
 
