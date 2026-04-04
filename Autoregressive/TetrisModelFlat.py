@@ -109,7 +109,17 @@ class FlatPolicyModel(keras.Model):
 
         self.action_proj = layers.Dense(1, name="action_proj")
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_obs(self, inputs, training=False):
         board, piece, b2b_combo_garbage = inputs
 
@@ -136,7 +146,13 @@ class FlatPolicyModel(keras.Model):
 
         return piece_dec, piece_scores
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            tf.TensorSpec(shape=(None, None, None), dtype=tf.float32),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def score_actions(self, piece_dec, training=False):
         batch_size = tf.shape(piece_dec)[0]
         action_ids = tf.broadcast_to(
