@@ -109,7 +109,7 @@ class FlatPolicyModel(keras.Model):
                 dropout_rate=dropout_rate,
                 name=f"action_ca_{i}",
             )
-            for i in range(num_layers)
+            for i in range(num_layers // 2)
         ]
 
         self.action_proj = layers.Dense(1, name="action_proj")
