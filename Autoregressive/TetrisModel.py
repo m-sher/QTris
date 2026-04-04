@@ -89,6 +89,28 @@ class FeedForward(layers.Layer):
         return self.layernorm(x, training=training)
 
 
+class CrossAttentionLayer(layers.Layer):
+    """Cross-attention + feed-forward block (no self-attention)."""
+
+    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="CrossAttnLayer"):
+        super().__init__(name=name)
+
+        self.cross_attention = CrossAttention(
+            num_heads=num_heads, key_dim=units, dropout=dropout_rate
+        )
+        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
+
+    @tf.function(jit_compile=True)
+    def call(self, inputs, training=False):
+        in_seq, out_seq = inputs
+
+        out_seq, attn_scores = self.cross_attention(out_seq, in_seq, training=training)
+
+        out_seq = self.ff(out_seq, training=training)
+
+        return out_seq, attn_scores
+
+
 class EncoderLayer(layers.Layer):
     def __init__(self, units, num_heads=1, dropout_rate=0.1, name="Encoder"):
         super().__init__(name=name)

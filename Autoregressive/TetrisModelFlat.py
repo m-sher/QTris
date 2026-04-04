@@ -2,7 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisModel import PosEncoding, DecoderLayer, CrossAttention, FeedForward, ValueModel
+from TetrisModel import PosEncoding, DecoderLayer, CrossAttentionLayer, ValueModel
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
@@ -102,10 +102,15 @@ class FlatPolicyModel(keras.Model):
             output_dim=depth,
         )
 
-        self.action_cross_attention = CrossAttention(
-            num_heads=num_heads, key_dim=depth, dropout=dropout_rate
-        )
-        self.action_ff = FeedForward(units=depth, dropout_rate=dropout_rate)
+        self.action_cross_attn_layers = [
+            CrossAttentionLayer(
+                units=depth,
+                num_heads=num_heads,
+                dropout_rate=dropout_rate,
+                name=f"action_ca_{i}",
+            )
+            for i in range(num_layers)
+        ]
 
         self.action_proj = layers.Dense(1, name="action_proj")
 
@@ -155,10 +160,10 @@ class FlatPolicyModel(keras.Model):
         )
         action_dec = self.action_embedding(action_ids, training=training)
 
-        action_dec, _ = self.action_cross_attention(
-            action_dec, piece_dec, training=training
-        )
-        action_dec = self.action_ff(action_dec, training=training)
+        for action_ca_layer in self.action_cross_attn_layers:
+            action_dec, _ = action_ca_layer(
+                [piece_dec, action_dec], training=training
+            )
 
         logits = tf.squeeze(
             self.action_proj(action_dec, training=training), axis=-1
