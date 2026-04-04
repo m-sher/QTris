@@ -108,15 +108,21 @@ def collect_data():
         output_dim=1,
     )
 
-    old_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, max_len),
-        ]
+    old_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
     )
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
 
     old_ckpt = tf.train.Checkpoint(model=old_model)
     old_mgr = tf.train.CheckpointManager(
@@ -255,12 +261,12 @@ def train():
         num_sequences=num_sequences,
     )
 
-    flat_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
+    flat_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
     )
 
     flat_ckpt_weights = tf.train.Checkpoint(model=flat_model)

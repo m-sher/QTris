@@ -561,31 +561,31 @@ def main(argv):
     # Build models
     # -----------------------------------------------------------------------
     if USE_FLAT:
-        p_build_shape = [
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
+        p_build_inputs = (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
     else:
-        p_build_shape = [
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, max_len),
-        ]
+        p_build_inputs = (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
 
-    p_model.build(input_shape=p_build_shape)
-    opp_model.build(input_shape=p_build_shape)
+    p_model(p_build_inputs)
+    opp_model(p_build_inputs)
 
-    v_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
     )
     print("Built models", flush=True)
 

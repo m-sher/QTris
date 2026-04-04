@@ -284,16 +284,22 @@ def main(argv):
     v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
-    p_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, max_len),
-        ]
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
     )
 
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
     print("Built models", flush=True)
 
     p_model.summary()
