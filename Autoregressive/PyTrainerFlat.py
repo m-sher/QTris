@@ -279,15 +279,21 @@ def main(argv):
 
     print("Initialized models", flush=True)
 
-    p_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
     )
 
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
     print("Built models", flush=True)
 
     p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
