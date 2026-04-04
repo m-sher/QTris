@@ -767,8 +767,8 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=training
         )
 
-        trunk_out_a = self.trunk_a(flat_a, training=training)
-        trunk_out_b = self.trunk_b(flat_b, training=training)
+        trunk_out_a = self.trunk_a(piece_dec_a, training=training)
+        trunk_out_b = self.trunk_b(piece_dec_b, training=training)
 
         top_out_a = self.top((trunk_out_a, trunk_out_b), training=training)
         top_out_b = self.top((trunk_out_b, trunk_out_a), training=training)
@@ -804,8 +804,8 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=False
         )
 
-        trunk_out_a = self.trunk_a(flat_a, training=False)
-        trunk_out_b = self.trunk_b(flat_b, training=False)
+        trunk_out_a = self.trunk_a(piece_dec_a, training=False)
+        trunk_out_b = self.trunk_b(piece_dec_b, training=False)
 
         top_out_a = self.top((trunk_out_a, trunk_out_b), training=False)
         top_out_b = self.top((trunk_out_b, trunk_out_a), training=False)
