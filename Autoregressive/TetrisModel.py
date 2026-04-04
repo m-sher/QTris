@@ -697,18 +697,25 @@ class AsymmetricValueModel(keras.Model):
             name="bcg_dense",
         )
 
-        self.flatten_a = layers.Flatten()
-        self.flatten_b = layers.Flatten()
+        self.trunk_a = keras.Sequential([
+            layers.Flatten(),
+            layers.Dense(depth, activation="relu")
+        ])
 
-        self.trunk = keras.Sequential(
+        self.trunk_b = keras.Sequential([
+            layers.Flatten(),
+            layers.Dense(depth, activation="relu")
+        ])
+
+        self.top = keras.Sequential(
             [
                 layers.Concatenate(),
                 layers.Dropout(dropout_rate),
-                layers.Dense(depth * 2, activation="relu"),
                 layers.Dense(depth, activation="relu"),
+                layers.Dense(depth // 2, activation="relu"),
                 layers.Dense(output_dim)
             ],
-            name="trunk",
+            name="top",
         )
 
     @tf.function(
@@ -760,13 +767,13 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=training
         )
 
-        flat_a = self.flatten_a(piece_dec_a)
-        flat_b = self.flatten_b(piece_dec_b)
+        trunk_out_a = self.trunk_a(flat_a, training=training)
+        trunk_out_b = self.trunk_b(flat_b, training=training)
 
-        trunk_out_a = self.trunk((flat_a, flat_b), training=training)
-        trunk_out_b = self.trunk((flat_b, flat_a), training=training)
+        top_out_a = self.top((trunk_out_a, trunk_out_b), training=training)
+        top_out_b = self.top((trunk_out_b, trunk_out_a), training=training)
 
-        output = 0.5 * (trunk_out_a - trunk_out_b)
+        output = 0.5 * (top_out_a - top_out_b)
 
         if return_scores:
             return output, piece_scores_a, piece_scores_b
@@ -797,12 +804,12 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=False
         )
 
-        flat_a = self.flatten_a(piece_dec_a)
-        flat_b = self.flatten_b(piece_dec_b)
+        trunk_out_a = self.trunk_a(flat_a, training=False)
+        trunk_out_b = self.trunk_b(flat_b, training=False)
 
-        trunk_out_a = self.trunk((flat_a, flat_b), training=False)
-        trunk_out_b = self.trunk((flat_b, flat_a), training=False)
+        top_out_a = self.top((trunk_out_a, trunk_out_b), training=False)
+        top_out_b = self.top((trunk_out_b, trunk_out_a), training=False)
 
-        output = 0.5 * (trunk_out_a - trunk_out_b)
+        output = 0.5 * (top_out_a - top_out_b)
 
         return output
