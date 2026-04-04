@@ -146,13 +146,7 @@ class FlatPolicyModel(keras.Model):
 
         return piece_dec, piece_scores
 
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            tf.TensorSpec(shape=(None, None, None), dtype=tf.float32),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
+    @tf.function(jit_compile=True)
     def score_actions(self, piece_dec, training=False):
         batch_size = tf.shape(piece_dec)[0]
         action_ids = tf.broadcast_to(
