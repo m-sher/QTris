@@ -647,7 +647,7 @@ def main(argv):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 1.0
+    return_var = 17.0
     return_var_decay = 0.99
 
     # -----------------------------------------------------------------------
