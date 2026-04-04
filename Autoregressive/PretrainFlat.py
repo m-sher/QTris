@@ -10,6 +10,8 @@ import json
 import numpy as np
 import argparse
 
+USE_GT = True
+
 HARD_DROP_ID = Keys.HARD_DROP
 
 piece_dim = 8
@@ -572,14 +574,8 @@ def train():
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(description="Pretrain flat model")
-    parser.add_argument(
-        "--gt", action="store_true",
-        help="Use B2B search algorithm for ground truth instead of autoregressive model",
-    )
-    args, _ = parser.parse_known_args(argv[1:])
 
-    if args.gt:
+    if USE_GT:
         collect_data_gt()
     else:
         collect_data()
