@@ -136,6 +136,9 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     opp_board_batch = tf.ensure_shape(
         online_batch["opp_boards"], (mini_batch_size, 24, 10, 1)
     )
+    opp_pieces_batch = tf.ensure_shape(
+        online_batch["opp_pieces"], (mini_batch_size, queue_size + 2)
+    )
     opp_b2b_combo_garbage_batch = tf.ensure_shape(
         online_batch["opp_b2b_combo_garbage"], (mini_batch_size, 3)
     )
@@ -224,6 +227,7 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
                 online_pieces_batch,
                 online_b2b_combo_garbage_batch,
                 opp_board_batch,
+                opp_pieces_batch,
                 opp_b2b_combo_garbage_batch,
             ),
             training=True,
@@ -290,6 +294,9 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
     # Opponent state for asymmetric value model
     opp_board_batch = tf.ensure_shape(
         online_batch["opp_boards"], (mini_batch_size, 24, 10, 1)
+    )
+    opp_pieces_batch = tf.ensure_shape(
+        online_batch["opp_pieces"], (mini_batch_size, queue_size + 2)
     )
     opp_b2b_combo_garbage_batch = tf.ensure_shape(
         online_batch["opp_b2b_combo_garbage"], (mini_batch_size, 3)
@@ -358,6 +365,7 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
                 online_pieces_batch,
                 online_b2b_combo_garbage_batch,
                 opp_board_batch,
+                opp_pieces_batch,
                 opp_b2b_combo_garbage_batch,
             ),
             training=True,
@@ -575,6 +583,7 @@ def main(argv):
             (None, queue_size + 2),
             (None, 3),
             (None, 24, 10, 1),
+            (None, queue_size + 2),
             (None, 3),
         ]
     )
@@ -667,6 +676,7 @@ def main(argv):
                 all_garbage_pushed,
                 all_wins,
                 all_opp_boards,
+                all_opp_pieces,
                 all_opp_b2b_combo_garbage,
             ) = runner.collect_trajectory(render=False)
         else:
@@ -689,6 +699,7 @@ def main(argv):
                 all_garbage_pushed,
                 all_wins,
                 all_opp_boards,
+                all_opp_pieces,
                 all_opp_b2b_combo_garbage,
             ) = runner.collect_trajectory(render=False)
 
@@ -729,6 +740,7 @@ def main(argv):
         returns_flat = tf.reshape(all_returns, (-1, 1))
         values_flat = tf.reshape(all_values, (-1, 1))
         opp_boards_flat = tf.reshape(all_opp_boards, (-1, 24, 10, 1))
+        opp_pieces_flat = tf.reshape(all_opp_pieces, (-1, (queue_size + 2)))
         opp_b2b_combo_garbage_flat = tf.reshape(all_opp_b2b_combo_garbage, (-1, 3))
 
         if USE_FLAT:
@@ -751,6 +763,7 @@ def main(argv):
                         "returns": returns_flat,
                         "old_values": values_flat,
                         "opp_boards": opp_boards_flat,
+                        "opp_pieces": opp_pieces_flat,
                         "opp_b2b_combo_garbage": opp_b2b_combo_garbage_flat,
                     }
                 )
@@ -782,6 +795,7 @@ def main(argv):
                         "returns": returns_flat,
                         "old_values": values_flat,
                         "opp_boards": opp_boards_flat,
+                        "opp_pieces": opp_pieces_flat,
                         "opp_b2b_combo_garbage": opp_b2b_combo_garbage_flat,
                     }
                 )

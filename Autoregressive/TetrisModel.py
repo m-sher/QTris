@@ -258,7 +258,17 @@ class PolicyModel(keras.Model):
 
         self.top = layers.Dense(output_dim)
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_obs(self, inputs, training=False):
         board, piece, b2b_combo_garbage = inputs
 
@@ -285,7 +295,16 @@ class PolicyModel(keras.Model):
 
         return piece_dec, piece_scores
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, None, None), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_keys(self, inputs, training=False):
         piece_dec, keys = inputs
 
@@ -521,7 +540,17 @@ class ValueModel(keras.Model):
 
         self.top = layers.Dense(output_dim)
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_obs(self, inputs, training=False):
         board, piece, b2b_combo_garbage = inputs
 
@@ -565,7 +594,16 @@ class ValueModel(keras.Model):
         else:
             return output
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+        ],
+    )
     def predict(self, inputs):
         board, piece, b2b_combo_garbage = inputs
 
@@ -596,7 +634,6 @@ class AsymmetricValueModel(keras.Model):
 
         self._depth = depth
 
-        # === Shared board conv encoder (used for both own and opponent boards) ===
         self.make_patches = keras.Sequential(
             [
                 keras.Input(shape=(24, 10, 1)),
@@ -629,7 +666,6 @@ class AsymmetricValueModel(keras.Model):
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
 
-        # === Own board processing (same as ValueModel) ===
         self.board_decoder_layers = [
             DecoderLayer(
                 units=depth,
@@ -670,40 +706,32 @@ class AsymmetricValueModel(keras.Model):
             name="bcg_dense",
         )
 
-        # === Opponent processing ===
-        self._opp_bcg_dense = keras.Sequential(
-            [
-                layers.Dense(depth // 2, activation="relu"),
-                layers.Dense(depth, activation="relu"),
-            ],
-            name="opp_bcg_dense",
-        )
+        self.flatten_a = layers.Flatten()
+        self.flatten_b = layers.Flatten()
 
-        self.opp_encoder_layers = [
-            EncoderLayer(
-                units=depth,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"opp_enc_{i}",
-            )
-            for i in range(max(1, num_layers // 2))
-        ]
-
-        # === Combined trunk ===
         self.trunk = keras.Sequential(
             [
+                layers.Concatenate(),
                 layers.Dropout(dropout_rate),
                 layers.Dense(depth * 2, activation="relu"),
                 layers.Dense(depth, activation="relu"),
+                layers.Dense(output_dim)
             ],
             name="trunk",
         )
 
-        self.top = layers.Dense(output_dim)
-
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_obs(self, inputs, training=False):
-        """Process own board state. Identical to ValueModel.process_obs."""
         board, piece, b2b_combo_garbage = inputs
 
         piece_scores = []
@@ -730,64 +758,60 @@ class AsymmetricValueModel(keras.Model):
         return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
-    def process_opp(self, opp_board, opp_b2b_combo_garbage, training=False):
-        """Process opponent board into a fixed-size representation."""
-        # Shared conv encoder
-        opp_patches = self.make_patches(opp_board, training=training)
-        opp_enc = self.patch_pos_encoding(opp_patches)
-
-        # Add opponent state info
-        opp_bcg = self._opp_bcg_dense(opp_b2b_combo_garbage, training=training)
-        opp_enc += opp_bcg[:, None, :]
-
-        # Self-attention for spatial reasoning
-        for enc_layer in self.opp_encoder_layers:
-            opp_enc = enc_layer(opp_enc, training=training)
-
-        # Pool to fixed size
-        return tf.reduce_mean(opp_enc, axis=1)  # (batch, depth)
-
-    @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
-        board, piece, b2b_combo_garbage, opp_board, opp_b2b_combo_garbage = inputs
+        board_a, piece_a, bcg_a, board_b, piece_b, bcg_b = inputs
 
-        piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo_garbage), training=training
+        piece_dec_a, piece_scores_a = self.process_obs(
+            (board_a, piece_a, bcg_a), training=training
         )
 
-        opp_repr = self.process_opp(
-            opp_board, opp_b2b_combo_garbage, training=training
+        piece_dec_b, piece_scores_b = self.process_obs(
+            (board_b, piece_b, bcg_b), training=training
         )
 
-        # Flatten own representation and concat with opponent
-        # piece_dec is (batch, 7, depth) — use static size so Dense layers trace correctly
-        own_flat = tf.reshape(piece_dec, (-1, 7 * self._depth))
-        combined = tf.concat([own_flat, opp_repr], axis=-1)
+        flat_a = self.flatten_a(piece_dec_a)
+        flat_b = self.flatten_b(piece_dec_b)
 
-        trunk_out = self.trunk(combined, training=training)
-        output = self.top(trunk_out, training=training)
+        trunk_out_a = self.trunk((flat_a, flat_b), training=training)
+        trunk_out_b = self.trunk((flat_b, flat_a), training=training)
+
+        output = 0.5 * (trunk_out_a - trunk_out_b)
 
         if return_scores:
-            return output, piece_scores
+            return output, piece_scores_a, piece_scores_b
         else:
             return output
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+        ],
+    )
     def predict(self, inputs):
-        board, piece, b2b_combo_garbage, opp_board, opp_b2b_combo_garbage = inputs
+        board_a, piece_a, bcg_a, board_b, piece_b, bcg_b = inputs
 
-        piece_dec, _ = self.process_obs(
-            (board, piece, b2b_combo_garbage), training=False
+        piece_dec_a, piece_scores_a = self.process_obs(
+            (board_a, piece_a, bcg_a), training=False
         )
 
-        opp_repr = self.process_opp(
-            opp_board, opp_b2b_combo_garbage, training=False
+        piece_dec_b, piece_scores_b = self.process_obs(
+            (board_b, piece_b, bcg_b), training=False
         )
 
-        own_flat = tf.reshape(piece_dec, (-1, 7 * self._depth))
-        combined = tf.concat([own_flat, opp_repr], axis=-1)
+        flat_a = self.flatten_a(piece_dec_a)
+        flat_b = self.flatten_b(piece_dec_b)
 
-        trunk_out = self.trunk(combined, training=False)
-        output = self.top(trunk_out, training=False)
+        trunk_out_a = self.trunk((flat_a, flat_b), training=False)
+        trunk_out_b = self.trunk((flat_b, flat_a), training=False)
+
+        output = 0.5 * (trunk_out_a - trunk_out_b)
 
         return output
