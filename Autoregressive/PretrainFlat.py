@@ -276,124 +276,118 @@ def collect_data_gt():
             all_seqs.append(s["seqs"])
             all_actions.append(s["action_idx"])
 
-    total_target = num_envs * num_collection_steps
-    pbar = tqdm(total=total_target, desc="GT Collection", unit="step")
+    gt_total_steps = num_collection_steps * num_envs
 
-    for env_idx in range(num_envs):
-        garbage_chance = garbage_chance_min + (
-            (garbage_chance_max - garbage_chance_min)
-            * env_idx / max(num_envs - 1, 1)
+    env = PyTetrisEnv(
+        queue_size=queue_size,
+        max_holes=max_holes,
+        max_height=max_height,
+        max_steps=max_steps,
+        max_len=max_len,
+        pathfinding=True,
+        seed=0,
+        idx=0,
+        garbage_chance=garbage_chance_min,
+        garbage_min=garbage_rows_min,
+        garbage_max=garbage_rows_max,
+        auto_push_garbage=True,
+        auto_fill_queue=True,
+        num_row_tiers=num_row_tiers,
+    )
+
+    time_step = env.reset()
+    episode_buf = []
+
+    print(f"Collecting {gt_total_steps} steps with B2B search "
+          f"(depth={gt_search_depth}, beam={gt_beam_width})...", flush=True)
+    t0 = time.time()
+
+    for step in tqdm(range(gt_total_steps), desc="GT Collection", unit="step"):
+        obs = time_step.observation
+        board_obs = obs["board"]
+        pieces_obs = obs["pieces"]
+        bcg_obs = obs["b2b_combo_garbage"]
+        seqs_obs = obs["sequences"]
+
+        # Run B2B search using env internals
+        active = env._active_piece.piece_type.value
+        hold = env._hold_piece.value
+        queue_types = np.array(
+            [p.value for p in env._queue], dtype=np.int32
         )
+        b2b = env._scorer._b2b
+        combo = env._scorer._combo
+        total_garb = env._get_total_garbage()
 
-        env = PyTetrisEnv(
-            queue_size=queue_size,
-            max_holes=max_holes,
-            max_height=max_height,
-            max_steps=max_steps,
+        b2b_action, sequence = searcher.search(
+            board=env._board,
+            active_piece=active,
+            hold_piece=hold,
+            queue=queue_types,
+            b2b=b2b,
+            combo=combo,
+            total_garbage=total_garb,
+            garbage_push_delay=env._garbage_push_delay,
+            search_depth=gt_search_depth,
+            beam_width=gt_beam_width,
             max_len=max_len,
-            pathfinding=True,
-            seed=env_idx,
-            idx=env_idx,
-            garbage_chance=garbage_chance,
-            garbage_min=garbage_rows_min,
-            garbage_max=garbage_rows_max,
-            auto_push_garbage=True,
-            auto_fill_queue=True,
-            num_row_tiers=num_row_tiers,
         )
 
-        time_step = env.reset()
-        episode_buf = []
+        if b2b_action < 0:
+            # No valid move found — treat as death
+            flush_episode(episode_buf, is_death=True)
+            episode_buf = []
+            total_deaths += 1
+            time_step = env.reset()
+            continue
 
-        for step in range(num_collection_steps):
-            obs = time_step.observation
-            board_obs = obs["board"]
-            pieces_obs = obs["pieces"]
-            bcg_obs = obs["b2b_combo_garbage"]
-            seqs_obs = obs["sequences"]
+        # Match search sequence against pathfinder sequences
+        matches = np.all(sequence[None, :] == seqs_obs, axis=-1)
 
-            # Run B2B search using env internals
-            active = env._active_piece.piece_type.value
-            hold = env._hold_piece.value
-            queue_types = np.array(
-                [p.value for p in env._queue], dtype=np.int32
-            )
-            b2b = env._scorer._b2b
-            combo = env._scorer._combo
-            total_garb = env._get_total_garbage()
-
-            b2b_action, sequence = searcher.search(
-                board=env._board,
-                active_piece=active,
-                hold_piece=hold,
-                queue=queue_types,
-                b2b=b2b,
-                combo=combo,
-                total_garbage=total_garb,
-                garbage_push_delay=env._garbage_push_delay,
-                search_depth=gt_search_depth,
-                beam_width=gt_beam_width,
-                max_len=max_len,
-            )
-
-            if b2b_action < 0:
-                # No valid move found — treat as death
-                flush_episode(episode_buf, is_death=True)
-                episode_buf = []
-                total_deaths += 1
-                time_step = env.reset()
-                pbar.update(1)
-                continue
-
-            # Match search sequence against pathfinder sequences
-            matches = np.all(sequence[None, :] == seqs_obs, axis=-1)
-
-            if not np.any(matches):
-                # Sequence not found in pathfinder output — skip sample
-                unmatched_steps += 1
-                time_step = env._step(sequence)
-                total_pieces_placed += 1
-                total_attack += float(time_step.reward["attack"])
-                global_max_b2b = max(global_max_b2b, env._scorer._b2b)
-                if time_step.is_last():
-                    flush_episode(episode_buf, is_death=True)
-                    episode_buf = []
-                    total_deaths += 1
-                    time_step = env.reset()
-                pbar.update(1)
-                continue
-
-            action_index = int(np.argmax(matches))
-
-            # Store sample in episode buffer
-            episode_buf.append({
-                "board": board_obs.copy(),
-                "pieces": pieces_obs.copy(),
-                "bcg": bcg_obs.copy(),
-                "seqs": seqs_obs.copy(),
-                "action_idx": action_index,
-            })
-
-            # Execute step
+        if not np.any(matches):
+            # Sequence not found in pathfinder output — skip sample
+            unmatched_steps += 1
             time_step = env._step(sequence)
-
-            atk = float(time_step.reward["attack"])
-            total_attack += atk
             total_pieces_placed += 1
+            total_attack += float(time_step.reward["attack"])
             global_max_b2b = max(global_max_b2b, env._scorer._b2b)
-
             if time_step.is_last():
                 flush_episode(episode_buf, is_death=True)
                 episode_buf = []
                 total_deaths += 1
                 time_step = env.reset()
+            continue
 
-            pbar.update(1)
+        action_index = int(np.argmax(matches))
 
-        # End of env — flush remaining episode (no death)
-        flush_episode(episode_buf, is_death=False)
+        # Store sample in episode buffer
+        episode_buf.append({
+            "board": board_obs.copy(),
+            "pieces": pieces_obs.copy(),
+            "bcg": bcg_obs.copy(),
+            "seqs": seqs_obs.copy(),
+            "action_idx": action_index,
+        })
 
-    pbar.close()
+        # Execute step
+        time_step = env._step(sequence)
+
+        atk = float(time_step.reward["attack"])
+        total_attack += atk
+        total_pieces_placed += 1
+        global_max_b2b = max(global_max_b2b, env._scorer._b2b)
+
+        if time_step.is_last():
+            flush_episode(episode_buf, is_death=True)
+            episode_buf = []
+            total_deaths += 1
+            time_step = env.reset()
+
+    # Flush remaining episode (no death)
+    flush_episode(episode_buf, is_death=False)
+
+    collect_time = time.time() - t0
+    print(f"Collection done in {collect_time:.1f}s", flush=True)
 
     usable = len(all_boards)
     app = total_attack / max(total_pieces_placed, 1)
