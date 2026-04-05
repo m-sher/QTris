@@ -424,7 +424,7 @@ def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef)
         for online_batch in online_dataset:
             step_out = _train_step_fn(p_model, v_model, online_batch, entropy_coef)
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
-                break
+                return step_out
 
     return step_out
 
