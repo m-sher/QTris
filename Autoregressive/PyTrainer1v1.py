@@ -56,6 +56,9 @@ temperature = 1.0
 
 target_kl = 0.02
 
+# B2B gap shaping
+b2b_gap_coef = 1.0
+
 # Opponent pool params
 pool_save_interval = 25
 max_pool_size = 50
@@ -73,6 +76,7 @@ config = {
     "value_clip": value_clip,
     "entropy_coef": entropy_coef,
     "target_kl": target_kl,
+    "b2b_gap_coef": b2b_gap_coef,
     "pool_save_interval": pool_save_interval,
     "max_pool_size": max_pool_size,
 }
@@ -616,6 +620,7 @@ def main(argv):
             seed=None,
             num_sequences=num_sequences,
             num_row_tiers=num_row_tiers,
+            b2b_gap_coef=b2b_gap_coef,
         )
     else:
         runner = Py1v1TetrisRunner(
@@ -635,6 +640,7 @@ def main(argv):
             seed=None,
             num_sequences=num_sequences,
             num_row_tiers=num_row_tiers,
+            b2b_gap_coef=b2b_gap_coef,
         )
 
     print("Initialized runner", flush=True)
