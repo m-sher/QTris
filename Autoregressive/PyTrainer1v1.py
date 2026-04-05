@@ -133,6 +133,11 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     )
 
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    advantages_batch = (
+        (advantages_batch - tf.reduce_mean(advantages_batch)) / 
+        (tf.math.reduce_std(advantages_batch) + 1e-9)
+    )
+
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -292,6 +297,11 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
         online_batch["old_log_probs"], (mini_batch_size, 1)
     )
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    advantages_batch = (
+        (advantages_batch - tf.reduce_mean(advantages_batch)) / 
+        (tf.math.reduce_std(advantages_batch) + 1e-9)
+    )
+
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -411,13 +421,10 @@ _train_step_fn = train_step_flat if USE_FLAT else train_step_ar
 
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
-        kls = []
         for online_batch in online_dataset:
             step_out = _train_step_fn(p_model, v_model, online_batch, entropy_coef)
-            kls.append(step_out["approx_kl"])
-
-        if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
-            break
+            if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                break
 
     return step_out
 
@@ -733,10 +740,6 @@ def main(argv):
         # Update running return variance (EMA)
         batch_var = tf.math.reduce_variance(all_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
-
-        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
-            tf.math.reduce_std(all_advantages) + 1e-8
-        )
 
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
