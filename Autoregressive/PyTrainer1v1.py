@@ -872,10 +872,10 @@ def main(argv):
         total_losses = total_episodes - total_wins
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
 
-        # Save to opponent pool only when winning every game, then load a new challenger
-        if gen % pool_save_interval == 0 and total_episodes > 0 and total_losses == 0:
+        # Save to opponent pool when win rate exceeds threshold, then load a new challenger
+        if gen % pool_save_interval == 0 and total_episodes > 0 and win_rate >= 0.70:
             save_pool_checkpoint(p_model, gen)
-            print(f"Saved to opponent pool at gen {gen} (100% win rate)", flush=True)
+            print(f"Saved to opponent pool at gen {gen} (win rate: {win_rate:.0%})", flush=True)
             if not load_pool_opponent(opp_model):
                 opp_model.set_weights(p_model.get_weights())
 
