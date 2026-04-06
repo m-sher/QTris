@@ -33,7 +33,7 @@ max_len = 15
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 128
+num_collection_steps = 256
 queue_size = 5
 max_holes = 50
 max_height = 18
@@ -42,7 +42,7 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = True
@@ -51,7 +51,7 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.01
+entropy_coef = 1e-4
 temperature = 1.0
 
 target_kl = 0.02
@@ -660,7 +660,7 @@ def main(argv):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 17.0
+    return_var = 100.0
     return_var_decay = 0.99
 
     # -----------------------------------------------------------------------
@@ -722,8 +722,8 @@ def main(argv):
 
         # Scale rewards by running return std
         scaled_rewards = tf.clip_by_value(
-            all_rewards / (tf.sqrt(return_var) + 1e-8),
-            -10.0, 10.0
+            all_rewards / (tf.sqrt(return_var) + 1e-9),
+            -25.0, 25.0
         )
 
         print(
@@ -882,7 +882,7 @@ def main(argv):
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
 
         # Save to opponent pool when win rate exceeds threshold, then load a new challenger
-        if gen % pool_save_interval == 0 and total_episodes > 0 and win_rate >= 0.70:
+        if gen % pool_save_interval == 0 and total_episodes > 0 and win_rate >= 0.55:
             save_pool_checkpoint(p_model, gen)
             print(f"Saved to opponent pool at gen {gen} (win rate: {win_rate:.0%})", flush=True)
             if not load_pool_opponent(opp_model):
