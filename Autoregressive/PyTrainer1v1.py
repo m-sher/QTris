@@ -35,6 +35,7 @@ num_sequences = 160 * num_row_tiers
 
 # Training params
 mini_batch_size = 512
+p_micro_batch_size = 64  # policy gradient accumulation chunk (64 * 320 seqs ≈ 4 GB)
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = True
@@ -98,124 +99,134 @@ def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     return advantages, returns
 
 
+_num_p_micros = mini_batch_size // p_micro_batch_size
+
+
 @tf.function()
 def train_step(p_model, v_model, online_batch, entropy_coef):
-    online_board_batch = tf.ensure_shape(
+    boards = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
-    online_pieces_batch = tf.ensure_shape(
+    pieces = tf.ensure_shape(
         online_batch["pieces"], (mini_batch_size, queue_size + 2)
     )
-    online_b2b_combo_garbage_batch = tf.ensure_shape(
+    bcg = tf.ensure_shape(
         online_batch["b2b_combo_garbage"], (mini_batch_size, 3)
     )
-    online_valid_sequences_batch = tf.ensure_shape(
+    valid_seqs = tf.ensure_shape(
         online_batch["valid_sequences"], (mini_batch_size, num_sequences, max_len)
     )
-    action_indices_batch = tf.ensure_shape(
+    action_indices = tf.ensure_shape(
         online_batch["action_indices"], (mini_batch_size,)
     )
-
-    old_log_probs_batch = tf.ensure_shape(
+    old_log_probs = tf.ensure_shape(
         online_batch["old_log_probs"], (mini_batch_size, 1)
     )
-    advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
-    advantages_batch = (
-        (advantages_batch - tf.reduce_mean(advantages_batch)) / 
-        (tf.math.reduce_std(advantages_batch) + 1e-9)
+
+    # Normalise advantages over the full mini-batch before splitting
+    advantages = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    advantages = (
+        (advantages - tf.reduce_mean(advantages))
+        / (tf.math.reduce_std(advantages) + 1e-9)
     )
 
-    returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
-    old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
+    returns = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
+    old_values = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
     # Opponent state for asymmetric value model
-    opp_board_batch = tf.ensure_shape(
+    opp_boards = tf.ensure_shape(
         online_batch["opp_boards"], (mini_batch_size, 24, 10, 1)
     )
-    opp_pieces_batch = tf.ensure_shape(
+    opp_pieces = tf.ensure_shape(
         online_batch["opp_pieces"], (mini_batch_size, queue_size + 2)
     )
-    opp_b2b_combo_garbage_batch = tf.ensure_shape(
+    opp_bcg = tf.ensure_shape(
         online_batch["opp_b2b_combo_garbage"], (mini_batch_size, 3)
     )
 
     valid_mask = tf.reduce_any(
-        tf.equal(
-            online_valid_sequences_batch,
-            tf.constant(HARD_DROP_ID, dtype=tf.int64),
-        ),
+        tf.equal(valid_seqs, tf.constant(HARD_DROP_ID, dtype=tf.int64)),
         axis=-1,
     )
 
-    with tf.GradientTape() as p_tape:
-        piece_dec, piece_scores = p_model.process_obs(
-            (
-                online_board_batch,
-                online_pieces_batch,
-                online_b2b_combo_garbage_batch,
-            ),
-            training=True,
+    # ------------------------------------------------------------------
+    # Policy update — gradient accumulation over micro-batches
+    # (keeps peak memory at p_micro_batch_size * num_sequences through decoder)
+    # ------------------------------------------------------------------
+    accum_p_grads = [tf.zeros_like(v) for v in p_model.trainable_variables]
+    total_ppo_loss = tf.constant(0.0)
+    total_entropy = tf.constant(0.0)
+    total_approx_kl = tf.constant(0.0)
+    total_clipped_frac = tf.constant(0.0)
+
+    for m in range(_num_p_micros):
+        s = m * p_micro_batch_size
+        e = s + p_micro_batch_size
+
+        with tf.GradientTape() as p_tape:
+            piece_dec, piece_scores = p_model.process_obs(
+                (boards[s:e], pieces[s:e], bcg[s:e]), training=True,
+            )
+            logits = p_model.score_sequences(
+                piece_dec, valid_seqs[s:e], training=True,
+            )
+
+            masked_logits = tf.where(
+                valid_mask[s:e],
+                logits / temperature,
+                tf.constant(-1e9, dtype=tf.float32),
+            )
+            dist = distributions.Categorical(
+                logits=masked_logits, dtype=tf.int64,
+            )
+            new_log_probs = dist.log_prob(action_indices[s:e])[..., None]
+
+            ratio = tf.exp(new_log_probs - old_log_probs[s:e])
+            clipped_ratio = tf.clip_by_value(
+                ratio, 1 - ppo_clip, 1 + ppo_clip,
+            )
+
+            surr1 = ratio * advantages[s:e]
+            surr2 = clipped_ratio * advantages[s:e]
+            ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+            entropy = tf.reduce_mean(dist.entropy())
+            micro_loss = ppo_loss - entropy_coef * entropy
+
+        grads = p_tape.gradient(micro_loss, p_model.trainable_variables)
+        accum_p_grads = [a + g for a, g in zip(accum_p_grads, grads)]
+
+        total_ppo_loss += ppo_loss
+        total_entropy += entropy
+        total_approx_kl += tf.reduce_mean(old_log_probs[s:e] - new_log_probs)
+        total_clipped_frac += tf.reduce_mean(
+            tf.cast(ratio != clipped_ratio, tf.float32)
         )
 
-        logits = p_model.score_sequences(
-            piece_dec, online_valid_sequences_batch, training=True
-        )
+    # Average accumulated gradients and apply
+    inv = 1.0 / _num_p_micros
+    p_model.optimizer.apply_gradients(
+        zip([g * inv for g in accum_p_grads], p_model.trainable_variables)
+    )
 
-        masked_logits = tf.where(
-            valid_mask, logits / temperature, tf.constant(-1e9, dtype=tf.float32)
-        )
+    ppo_loss = total_ppo_loss * inv
+    entropy = total_entropy * inv
+    approx_kl = total_approx_kl * inv
+    clipped_frac = total_clipped_frac * inv
 
-        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
-
-        new_log_probs = tf.ensure_shape(
-            dist.log_prob(action_indices_batch)[..., None], (mini_batch_size, 1)
-        )
-
-        ratio = tf.ensure_shape(
-            tf.exp(new_log_probs - old_log_probs_batch), (mini_batch_size, 1)
-        )
-        clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
-            (mini_batch_size, 1),
-        )
-
-        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
-        surr2 = tf.ensure_shape(
-            clipped_ratio * advantages_batch,
-            (mini_batch_size, 1),
-        )
-
-        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
-
-        entropy = tf.reduce_mean(dist.entropy())
-
-        approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
-
-        total_policy_loss = ppo_loss - entropy_coef * entropy
-
-    p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
-    p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
-
-    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
-
+    # ------------------------------------------------------------------
+    # Value update — full batch (no sequence expansion, much cheaper)
+    # ------------------------------------------------------------------
     with tf.GradientTape() as v_tape:
         values = v_model(
-            (
-                online_board_batch,
-                online_pieces_batch,
-                online_b2b_combo_garbage_batch,
-                opp_board_batch,
-                opp_pieces_batch,
-                opp_b2b_combo_garbage_batch,
-            ),
+            (boards, pieces, bcg, opp_boards, opp_pieces, opp_bcg),
             training=True,
         )
 
-        value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
-        clipped_values = old_values_batch + tf.clip_by_value(
-            values - old_values_batch, -value_clip, value_clip
+        value_error = values - returns
+        clipped_values = old_values + tf.clip_by_value(
+            values - old_values, -value_clip, value_clip
         )
-        clipped_value_error = clipped_values - returns_batch
+        clipped_value_error = clipped_values - returns
         value_loss = tf.reduce_mean(
             tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
         )
@@ -223,8 +234,8 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
 
-    ret_var = tf.math.reduce_variance(returns_batch)
-    res_var = tf.math.reduce_variance(returns_batch - values)
+    ret_var = tf.math.reduce_variance(returns)
+    res_var = tf.math.reduce_variance(returns - values)
     explained_var = tf.reduce_mean(1.0 - tf.math.divide_no_nan(res_var, ret_var))
 
     return {
@@ -234,7 +245,7 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         "clipped_frac": clipped_frac,
         "value_loss": value_loss,
         "explained_var": explained_var,
-        "board": online_board_batch[0],
+        "board": boards[0],
         "scores": piece_scores,
     }
 
