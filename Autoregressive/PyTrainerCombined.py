@@ -1,4 +1,4 @@
-from TetrisEnv.PyTetrisRunner import PyTetrisRunner
+from PyTetrisRunnerFlat import PyTetrisRunnerFlat
 from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
 import tensorflow as tf
@@ -7,6 +7,8 @@ from tensorflow import keras
 import tf_agents
 import wandb
 import time
+
+HARD_DROP_ID = Keys.HARD_DROP
 
 # Model params
 piece_dim = 8
@@ -97,69 +99,55 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     online_b2b_combo_garbage_batch = tf.ensure_shape(
         online_batch["b2b_combo_garbage"], (mini_batch_size, 3)
     )
-    online_actions_batch = tf.ensure_shape(
-        online_batch["actions"], (mini_batch_size, max_len)
+    online_valid_sequences_batch = tf.ensure_shape(
+        online_batch["valid_sequences"], (mini_batch_size, num_sequences, max_len)
+    )
+    action_indices_batch = tf.ensure_shape(
+        online_batch["action_indices"], (mini_batch_size,)
     )
 
-    log_probs_batch = tf.ensure_shape(
-        online_batch["old_log_probs"][:, 1:], (mini_batch_size, max_len - 1)
+    old_log_probs_batch = tf.ensure_shape(
+        online_batch["old_log_probs"], (mini_batch_size, 1)
     )
-    mask_batch = tf.ensure_shape(
-        online_batch["masks"], (mini_batch_size, max_len, key_dim)
-    )
-
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
-    invalid_mask = mask_batch[:, 1:, :]  # batch, max_len - 1, key_dim
-    pad_mask = tf.cast(
-        online_actions_batch[:, 1:] != Keys.PAD, tf.float32
-    )  # batch, max_len - 1
-
-    input_actions_batch = online_actions_batch[:, :-1]
-    target_actions = online_actions_batch[:, 1:]
+    valid_mask = tf.reduce_any(
+        tf.equal(
+            online_valid_sequences_batch,
+            tf.constant(HARD_DROP_ID, dtype=tf.int64),
+        ),
+        axis=-1,
+    )
 
     with tf.GradientTape() as p_tape:
-        logits, piece_scores, key_scores = p_model(
+        piece_dec, piece_scores = p_model.process_obs(
             (
                 online_board_batch,
                 online_pieces_batch,
                 online_b2b_combo_garbage_batch,
-                input_actions_batch,
             ),
             training=True,
-            return_scores=True,
         )
 
-        logits = tf.ensure_shape(
-            logits, (mini_batch_size, max_len - 1, key_dim)
-        )  # batch, max_len - 1, num_actions
-
-        temp_adjusted_logits = logits / temperature
+        logits = p_model.score_sequences(
+            piece_dec, online_valid_sequences_batch, training=True
+        )
 
         masked_logits = tf.where(
-            invalid_mask, temp_adjusted_logits, tf.constant(-1e9, dtype=tf.float32)
-        )  # batch, max_len - 1, num_actions
-
-        masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
-
-        new_log_probs = tf.ensure_shape(
-            masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
-        )
-        new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(new_log_probs * pad_mask, axis=-1)[..., None],
-            (mini_batch_size, 1),
+            valid_mask, logits / temperature, tf.constant(-1e9, dtype=tf.float32)
         )
 
-        old_log_probs = tf.ensure_shape(
-            tf.reduce_sum(log_probs_batch * pad_mask, axis=-1)[..., None],
-            (mini_batch_size, 1),
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        new_log_probs = tf.ensure_shape(
+            dist.log_prob(action_indices_batch)[..., None], (mini_batch_size, 1)
         )
 
         # PPO loss
         ratio = tf.ensure_shape(
-            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
+            tf.exp(new_log_probs - old_log_probs_batch), (mini_batch_size, 1)
         )
         clipped_ratio = tf.ensure_shape(
             tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
@@ -174,12 +162,9 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
-        # Compute bonus/penalty
-        entropy = tf.ensure_shape(masked_dist.entropy(), (mini_batch_size, max_len - 1))
-        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1) / tf.reduce_sum(pad_mask, axis=-1)
-        entropy = tf.reduce_mean(entropy)
+        entropy = tf.reduce_mean(dist.entropy())
 
-        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+        approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -284,6 +269,7 @@ def main(argv):
     v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
     print("Restored checkpoints", flush=True)
 
+    # Build with full 4-input call to initialise all layers (incl. key decoder)
     p_model(
         (
             keras.Input(shape=(24, 10, 1), dtype=tf.float32),
@@ -306,14 +292,12 @@ def main(argv):
     v_model.summary()
 
     # Initialize runner
-    runner = PyTetrisRunner(
+    runner = PyTetrisRunnerFlat(
         queue_size=queue_size,
         max_holes=max_holes,
         max_height=max_height,
         max_steps=max_steps,
-        pathfinding=True,
         max_len=max_len,
-        key_dim=key_dim,
         num_steps=num_collection_steps,
         num_envs=num_envs,
         garbage_chance_min=garbage_chance_min,
@@ -353,9 +337,7 @@ def main(argv):
             all_boards,
             all_pieces,
             all_b2b_combo_garbage,
-            all_actions,
             all_log_probs,
-            all_masks,
             all_valid_sequences,
             all_action_indices,
             all_values,
@@ -400,9 +382,11 @@ def main(argv):
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
         b2b_combo_garbage_flat = tf.reshape(all_b2b_combo_garbage, (-1, 3))
-        actions_flat = tf.reshape(all_actions, (-1, max_len))
-        log_probs_flat = tf.reshape(all_log_probs, (-1, max_len))
-        masks_flat = tf.reshape(all_masks, (-1, max_len, key_dim))
+        valid_sequences_flat = tf.reshape(
+            all_valid_sequences, (-1, num_sequences, max_len)
+        )
+        action_indices_flat = tf.reshape(all_action_indices, (-1,))
+        log_probs_flat = tf.reshape(all_log_probs, (-1, 1))
         advantages_flat = tf.reshape(all_advantages, (-1, 1))
         returns_flat = tf.reshape(all_returns, (-1, 1))
         values_flat = tf.reshape(all_values, (-1, 1))
@@ -414,9 +398,9 @@ def main(argv):
                     "boards": boards_flat,
                     "pieces": pieces_flat,
                     "b2b_combo_garbage": b2b_combo_garbage_flat,
-                    "actions": actions_flat,
+                    "valid_sequences": valid_sequences_flat,
+                    "action_indices": action_indices_flat,
                     "old_log_probs": log_probs_flat,
-                    "masks": masks_flat,
                     "advantages": advantages_flat,
                     "returns": returns_flat,
                     "old_values": values_flat,
@@ -475,7 +459,7 @@ def main(argv):
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
-        avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
+        avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)

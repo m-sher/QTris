@@ -2,7 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisEnv.Moves import Convert
+from TetrisEnv.Moves import Convert, Keys
 
 
 @tf.function(jit_compile=True)
@@ -336,6 +336,55 @@ class PolicyModel(keras.Model):
         return output, key_scores
 
     @tf.function(jit_compile=True)
+    def score_sequences(self, piece_dec, valid_sequences, training=False):
+        """Teacher-force all valid sequences and return sequence-level log-probs.
+
+        Args:
+            piece_dec: (batch, 7, depth) encoded observation from process_obs.
+            valid_sequences: (batch, num_seq, max_len) key sequences.
+
+        Returns:
+            seq_log_probs: (batch, num_seq) un-normalised log P(seq | state).
+        """
+        batch_size = tf.shape(piece_dec)[0]
+        num_seq = tf.shape(valid_sequences)[1]
+        seq_len = tf.shape(valid_sequences)[2]
+
+        # Flatten sequences: (batch * num_seq, max_len)
+        flat_seqs = tf.reshape(valid_sequences, (batch_size * num_seq, seq_len))
+
+        # Repeat piece_dec for every sequence: (batch * num_seq, 7, depth)
+        flat_piece_dec = tf.repeat(piece_dec, num_seq, axis=0)
+
+        # Teacher-forced forward pass through key decoder
+        input_seqs = flat_seqs[:, :-1]   # (B*N, max_len-1)
+        target_seqs = flat_seqs[:, 1:]   # (B*N, max_len-1)
+
+        logits, _ = self.process_keys(
+            (flat_piece_dec, input_seqs), training=training
+        )
+        # logits: (B*N, max_len-1, key_dim)
+
+        log_probs_all = tf.nn.log_softmax(logits, axis=-1)
+
+        # Gather log P(target_token) at each position
+        token_log_probs = tf.gather(
+            log_probs_all, target_seqs[..., None], batch_dims=2
+        )
+        token_log_probs = tf.squeeze(token_log_probs, axis=-1)
+        # (B*N, max_len-1)
+
+        # Mask out PAD positions so they contribute 0 to the sum
+        pad_mask = tf.cast(
+            tf.not_equal(target_seqs, tf.constant(Keys.PAD, dtype=tf.int64)),
+            tf.float32,
+        )
+
+        seq_log_probs = tf.reduce_sum(token_log_probs * pad_mask, axis=-1)
+
+        return tf.reshape(seq_log_probs, (batch_size, num_seq))
+
+    @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo_garbage, keys = inputs
 
@@ -411,10 +460,69 @@ class PolicyModel(keras.Model):
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
             tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
-            tf.TensorSpec(shape=None, dtype=tf.float32)
+            tf.TensorSpec(shape=None, dtype=tf.float32),
         ],
     )
     def predict(self, inputs, greedy=False, valid_sequences=None, temperature=1.0):
+        """Score every valid sequence via teacher forcing, sample from flat categorical."""
+        piece_dec, piece_scores = self.process_obs(inputs, training=False)
+
+        seq_log_probs = self.score_sequences(
+            piece_dec, valid_sequences, training=False
+        )
+
+        valid_mask = tf.reduce_any(
+            tf.equal(
+                valid_sequences,
+                tf.constant(Keys.HARD_DROP, dtype=tf.int64),
+            ),
+            axis=-1,
+        )
+
+        masked_logits = tf.where(
+            valid_mask,
+            seq_log_probs / temperature,
+            tf.constant(-1e9, dtype=tf.float32),
+        )
+
+        dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        if greedy:
+            action_index = tf.argmax(
+                masked_logits, axis=-1, output_type=tf.int64
+            )
+        else:
+            action_index = dist.sample()
+
+        log_prob = dist.log_prob(action_index)
+
+        batch_indices = tf.range(
+            tf.shape(valid_sequences)[0], dtype=tf.int64
+        )
+        selected_sequence = tf.gather_nd(
+            valid_sequences,
+            tf.stack([batch_indices, action_index], axis=1),
+        )
+
+        return selected_sequence, log_prob, action_index, piece_scores
+
+    # ------------------------------------------------------------------
+    # Legacy autoregressive predict (kept for Pretrainer / backwards compat)
+    # ------------------------------------------------------------------
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=None, dtype=tf.bool),
+            tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
+            tf.TensorSpec(shape=None, dtype=tf.float32),
+        ],
+    )
+    def predict_ar(self, inputs, greedy=False, valid_sequences=None, temperature=1.0):
         piece_dec, piece_scores = self.process_obs(inputs, training=False)
         valid_sequences = tf.convert_to_tensor(valid_sequences, dtype=tf.int64)
 
