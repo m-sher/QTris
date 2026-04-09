@@ -51,8 +51,8 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 1e-4
-temperature = 1.0
+entropy_coef = 1e-3
+temperature = 1.5
 
 target_kl = 0.02
 
@@ -660,7 +660,7 @@ def main(argv):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 100.0
+    return_var = 27.72
     return_var_decay = 0.99
 
     # -----------------------------------------------------------------------
