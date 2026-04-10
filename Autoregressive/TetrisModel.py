@@ -272,7 +272,7 @@ class PolicyModel(keras.Model):
                 layers.Dense(depth, activation="relu"),
                 layers.Dense(depth // 2, activation="relu"),
             ],
-            name="trunk",
+            name="trunk_layers",
         )
 
         self.top = layers.Dense(output_dim)
