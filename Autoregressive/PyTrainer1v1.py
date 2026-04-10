@@ -870,7 +870,7 @@ def main(argv):
                 tf.exp(all_log_probs[:, :, 1:]) * all_pad_mask
             ) / tf.reduce_sum(all_pad_mask)
 
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
+        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
