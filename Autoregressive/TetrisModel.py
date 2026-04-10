@@ -546,14 +546,14 @@ class ValueModel(keras.Model):
         self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
-        self.trunk = keras.Sequential(
+        self.trunk_bcg = keras.Sequential(
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
                 layers.Dense(depth, activation="relu"),
                 layers.Dense(depth // 2, activation="relu"),
             ],
-            name="trunk",
+            name="trunk_bcg",
         )
 
         self.top = layers.Dense(output_dim)
@@ -614,7 +614,7 @@ class ValueModel(keras.Model):
             (board, piece, b2b_combo_garbage), training=training
         )
 
-        trunk_out = self.trunk(piece_dec, training=training)
+        trunk_out = self.trunk_bcg(piece_dec, training=training)
 
         output = self.top(trunk_out, training=training)
 
@@ -640,7 +640,7 @@ class ValueModel(keras.Model):
             (board, piece, b2b_combo_garbage), training=False
         )
 
-        trunk_out = self.trunk(piece_dec, training=False)
+        trunk_out = self.trunk_bcg(piece_dec, training=False)
 
         output = self.top(trunk_out, training=False)
 
@@ -732,12 +732,12 @@ class AsymmetricValueModel(keras.Model):
         self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
-        self.trunk_a = keras.Sequential([
+        self.trunk_a_bcg = keras.Sequential([
             layers.Flatten(),
             layers.Dense(depth, activation="relu")
         ])
 
-        self.trunk_b = keras.Sequential([
+        self.trunk_b_bcg = keras.Sequential([
             layers.Flatten(),
             layers.Dense(depth, activation="relu")
         ])
@@ -813,8 +813,8 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=training
         )
 
-        trunk_out_a = self.trunk_a(piece_dec_a, training=training)
-        trunk_out_b = self.trunk_b(piece_dec_b, training=training)
+        trunk_out_a = self.trunk_a_bcg(piece_dec_a, training=training)
+        trunk_out_b = self.trunk_b_bcg(piece_dec_b, training=training)
 
         top_out_a = self.top((trunk_out_a, trunk_out_b), training=training)
         top_out_b = self.top((trunk_out_b, trunk_out_a), training=training)
@@ -850,8 +850,8 @@ class AsymmetricValueModel(keras.Model):
             (board_b, piece_b, bcg_b), training=False
         )
 
-        trunk_out_a = self.trunk_a(piece_dec_a, training=False)
-        trunk_out_b = self.trunk_b(piece_dec_b, training=False)
+        trunk_out_a = self.trunk_a_bcg(piece_dec_a, training=False)
+        trunk_out_b = self.trunk_b_bcg(piece_dec_b, training=False)
 
         top_out_a = self.top((trunk_out_a, trunk_out_b), training=False)
         top_out_b = self.top((trunk_out_b, trunk_out_a), training=False)
