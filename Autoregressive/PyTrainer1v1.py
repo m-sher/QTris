@@ -157,6 +157,14 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
         online_actions_batch[:, 1:] != Keys.PAD, tf.float32
     )  # batch, max_len - 1
 
+    # Decision mask: exclude PAD and single-valid-action positions
+    num_valid_actions = tf.reduce_sum(
+        tf.cast(invalid_mask, tf.float32), axis=-1
+    )  # (batch, max_len - 1)
+    decision_mask = tf.cast(num_valid_actions > 1, tf.float32) * pad_mask
+    # Per-sequence decision token counts for averaging
+    decisions_per_seq = tf.reduce_sum(decision_mask, axis=-1)  # (batch,)
+
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
 
@@ -191,9 +199,6 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
 
         old_log_probs = log_probs_batch  # (batch, max_len - 1)
 
-        # Total valid tokens for averaging
-        num_valid_tokens = tf.reduce_sum(pad_mask)
-
         # Per-token PPO ratio and clipping: (batch, max_len - 1)
         per_token_ratio = tf.exp(new_log_probs - old_log_probs)  # (batch, max_len - 1)
         per_token_clipped = tf.clip_by_value(
@@ -203,20 +208,28 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
         surr1 = per_token_ratio * advantages_batch  # broadcasts (batch, 1) -> (batch, max_len - 1)
         surr2 = per_token_clipped * advantages_batch
 
-        # Mask out PAD tokens and average over valid tokens only
-        per_token_loss = tf.minimum(surr1, surr2) * pad_mask  # zero out PAD positions
-        ppo_loss = -tf.reduce_sum(per_token_loss) / num_valid_tokens
+        # Per-sequence PPO loss: average over decision tokens per sequence, then over batch
+        per_token_loss = tf.minimum(surr1, surr2) * decision_mask
+        per_seq_loss = tf.math.divide_no_nan(
+            tf.reduce_sum(per_token_loss, axis=-1), decisions_per_seq
+        )  # (batch,)
+        ppo_loss = -tf.reduce_mean(per_seq_loss)
 
-        # Per-token entropy: average over valid tokens only
+        # Per-sequence entropy: average over decision tokens per sequence, then over batch
         per_token_entropy = tf.ensure_shape(
             masked_dist.entropy(), (mini_batch_size, max_len - 1)
         )
-        entropy = tf.reduce_sum(per_token_entropy * pad_mask) / num_valid_tokens
+        per_seq_entropy = tf.math.divide_no_nan(
+            tf.reduce_sum(per_token_entropy * decision_mask, axis=-1), decisions_per_seq
+        )
+        entropy = tf.reduce_mean(per_seq_entropy)
 
-        # Per-token approx KL: average over valid tokens only
-        approx_kl = tf.reduce_sum(
-            (old_log_probs - new_log_probs) * pad_mask
-        ) / num_valid_tokens
+        # Per-sequence approx KL: average over decision tokens per sequence, then over batch
+        per_seq_kl = tf.math.divide_no_nan(
+            tf.reduce_sum((old_log_probs - new_log_probs) * decision_mask, axis=-1),
+            decisions_per_seq,
+        )
+        approx_kl = tf.reduce_mean(per_seq_kl)
 
         # Compute total loss
         total_policy_loss = ppo_loss - entropy_coef * entropy
@@ -225,9 +238,14 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    clipped_frac = tf.reduce_sum(
-        tf.cast(per_token_ratio != per_token_clipped, tf.float32) * pad_mask
-    ) / num_valid_tokens
+    per_seq_clipped = tf.math.divide_no_nan(
+        tf.reduce_sum(
+            tf.cast(per_token_ratio != per_token_clipped, tf.float32) * decision_mask,
+            axis=-1,
+        ),
+        decisions_per_seq,
+    )
+    clipped_frac = tf.reduce_mean(per_seq_clipped)
 
     with tf.GradientTape() as v_tape:
         values = v_model(
@@ -865,10 +883,17 @@ def main(argv):
         if USE_FLAT:
             avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         else:
+            all_num_valid = tf.reduce_sum(
+                tf.cast(all_masks[:, :, 1:, :], tf.float32), axis=-1
+            )  # (steps, envs, max_len - 1)
             all_pad_mask = tf.cast(all_actions[..., 1:] != Keys.PAD, tf.float32)
-            avg_probs = tf.reduce_sum(
-                tf.exp(all_log_probs[:, :, 1:]) * all_pad_mask
-            ) / tf.reduce_sum(all_pad_mask)
+            all_decision_mask = tf.cast(all_num_valid > 1, tf.float32) * all_pad_mask
+            all_decisions_per_seq = tf.reduce_sum(all_decision_mask, axis=-1)  # (steps, envs)
+            per_seq_probs = tf.math.divide_no_nan(
+                tf.reduce_sum(tf.exp(all_log_probs[:, :, 1:]) * all_decision_mask, axis=-1),
+                all_decisions_per_seq,
+            )
+            avg_probs = tf.reduce_mean(per_seq_probs)
 
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
