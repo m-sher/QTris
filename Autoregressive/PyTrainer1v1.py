@@ -1,4 +1,4 @@
-USE_FLAT = True
+USE_FLAT = False
 
 from TetrisEnv.Moves import Keys
 from TetrisModel import AsymmetricValueModel
@@ -42,7 +42,7 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 # Training params
-mini_batch_size = 512
+mini_batch_size = 1024
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = True
@@ -51,8 +51,8 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 1e-3
-temperature = 1.5
+entropy_coef = 0.01
+temperature = 1.0
 
 target_kl = 0.02
 
@@ -678,7 +678,7 @@ def main(argv):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 27.72
+    return_var = 100
     return_var_decay = 0.99
 
     # -----------------------------------------------------------------------
