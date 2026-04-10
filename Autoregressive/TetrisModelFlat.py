@@ -89,13 +89,10 @@ class FlatPolicyModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._bcg_dense = keras.Sequential(
-            [
-                layers.Dense(depth // 2, activation="relu"),
-                layers.Dense(depth, activation="relu"),
-            ],
-            name="bcg_dense",
-        )
+        self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
+        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
+        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.action_embedding = layers.Embedding(
             input_dim=num_sequences,
@@ -113,6 +110,21 @@ class FlatPolicyModel(keras.Model):
         ]
 
         self.action_proj = layers.Dense(1, name="action_proj")
+
+    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
+        """Convert raw BCG scalars into 3 separate attention tokens.
+
+        Each feature (b2b, combo, garbage) gets its own learned projection
+        from a log-compressed scalar to a depth-dimensional token vector.
+        """
+        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
+        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
+        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
+        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
+        bcg_tokens = self._bcg_ln(
+            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
+        )  # (B, 3, depth)
+        return bcg_tokens
 
     @tf.function(
         jit_compile=True,
@@ -135,8 +147,9 @@ class FlatPolicyModel(keras.Model):
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        bcg_embedding = self._bcg_dense(b2b_combo_garbage, training=training)
-        piece_dec += bcg_embedding[:, None, :]
+        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
+        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
+        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
 
         for board_dec_layer, piece_dec_layer in zip(
             self.board_decoder_layers, self.piece_decoder_layers
