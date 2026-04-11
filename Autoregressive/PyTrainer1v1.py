@@ -42,7 +42,7 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = True
