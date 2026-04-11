@@ -700,12 +700,14 @@ def main(argv):
                 all_values,
                 all_last_values,
                 all_attacks,
+                all_net_attacks,
                 all_clears,
                 all_attack_reward,
                 all_total_reward,
                 all_dones,
                 all_garbage_pushed,
                 all_wins,
+                all_losses,
                 all_opp_boards,
                 all_opp_pieces,
                 all_opp_b2b_combo_garbage,
@@ -723,12 +725,14 @@ def main(argv):
                 all_values,
                 all_last_values,
                 all_attacks,
+                all_net_attacks,
                 all_clears,
                 all_attack_reward,
                 all_total_reward,
                 all_dones,
                 all_garbage_pushed,
                 all_wins,
+                all_losses,
                 all_opp_boards,
                 all_opp_pieces,
                 all_opp_b2b_combo_garbage,
@@ -869,16 +873,30 @@ def main(argv):
         scores = train_out["scores"]
 
         # Compute more metrics
-        avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
-        avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
-        avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
-        avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
         avg_total_reward = tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0))
+        avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
+        avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
+        avg_net_attacks = tf.reduce_mean(tf.reduce_sum(all_net_attacks, axis=0))
         avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
-        avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
+        avg_episodes = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
         avg_pieces = tf.reduce_mean(
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
+
+        # APP (attacks per piece) — headline objective. Every env step is a
+        # piece placement, so num_collection_steps is the piece count per env.
+        APP = avg_attack_reward / tf.cast(num_collection_steps, tf.float32)
+        APP_net = avg_net_attacks / tf.cast(num_collection_steps, tf.float32)
+        att_per_clear = tf.math.divide_no_nan(avg_attack_reward, avg_clears)
+        cancel_rate = 1.0 - tf.math.divide_no_nan(avg_net_attacks, avg_attack_reward)
+
+        # B2B / combo distribution from the pre-step observations
+        b2b_series = all_b2b_combo_garbage[..., 0]
+        combo_series = all_b2b_combo_garbage[..., 1]
+        avg_b2b = tf.reduce_mean(b2b_series)
+        max_b2b = tf.reduce_max(b2b_series)
+        avg_combo = tf.reduce_mean(combo_series)
+        surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
 
         if USE_FLAT:
             avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
@@ -902,11 +920,18 @@ def main(argv):
 
         # 1v1 metrics
         total_wins = tf.reduce_sum(all_wins)
+        total_losses = tf.reduce_sum(all_losses)
         total_episodes = tf.reduce_sum(all_dones)
-        total_losses = total_episodes - total_wins
+        total_nondec = total_episodes - total_wins - total_losses
+        total_decisive = total_wins + total_losses
+        # Legacy definition (ties/timeouts count as not-wins)
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
+        # Decisive win rate (excludes ties and timeouts) — used for pool gate
+        decisive_wr = tf.math.divide_no_nan(total_wins, total_decisive)
 
-        # Save to opponent pool when win rate exceeds threshold, then load a new challenger
+        # Save to opponent pool when win rate exceeds threshold
+        # NOTE: still using legacy `win_rate` (ties/timeouts counted as not-wins).
+        # Pool-gate refactor is deferred to rev3 — see experiments/rev3/changes.md.
         if gen % pool_save_interval == 0 and total_episodes > 0 and win_rate >= 0.55:
             save_pool_checkpoint(p_model, gen)
             print(f"Saved to opponent pool at gen {gen} (win rate: {win_rate:.0%})", flush=True)
@@ -923,24 +948,39 @@ def main(argv):
                 "explained_var": explained_var,
                 "return_var": return_var,
                 "avg_probs": avg_probs,
-                "avg_reward": avg_reward,
-                "avg_attacks": avg_attacks,
-                "avg_clears": avg_clears,
-                "avg_attack_reward": avg_attack_reward,
+                # Reward channels
                 "avg_total_reward": avg_total_reward,
+                "avg_attack_reward": avg_attack_reward,
+                "avg_net_attacks": avg_net_attacks,
+                "avg_clears": avg_clears,
                 "avg_garbage_pushed": avg_garbage_pushed,
-                "avg_deaths": avg_deaths,
+                # Derived gameplay metrics
+                "APP": APP,
+                "APP_net": APP_net,
+                "att_per_clear": att_per_clear,
+                "cancel_rate": cancel_rate,
+                "avg_b2b": avg_b2b,
+                "max_b2b": max_b2b,
+                "avg_combo": avg_combo,
+                "surge_rate": surge_rate,
+                # Episode structure
+                "avg_episodes": avg_episodes,
                 "avg_pieces": avg_pieces,
-                "win_rate": win_rate,
+                # Outcome counts
                 "total_wins": total_wins,
                 "total_losses": total_losses,
+                "total_nondec": total_nondec,
+                "win_rate": win_rate,
+                "decisive_wr": decisive_wr,
                 "board": wandb.Image(board[..., 0]),
                 "scores": wandb.Image(norm_c_scores),
             }
         )
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | WR: {win_rate:.2f}",
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | APP: {float(APP):.3f} | "
+            f"att/row: {float(att_per_clear):.2f} | WR: {float(win_rate):.2f} | "
+            f"decisive_WR: {float(decisive_wr):.2f} (n={int(total_decisive)})",
             flush=True,
         )
         last_time = time.time()
