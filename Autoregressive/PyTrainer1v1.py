@@ -51,13 +51,13 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.01
+entropy_coef = 0.03
 temperature = 1.0
 
 target_kl = 0.02
 
 # B2B gap shaping
-b2b_gap_coef = 1.0
+b2b_gap_coef = 0.0
 
 # Opponent pool params
 pool_save_interval = 25
@@ -678,8 +678,12 @@ def main(argv):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 100.0
+    return_var = 30.0
     return_var_decay = 0.99
+
+    # EMA-smoothed decisive win rate for pool-save gate
+    wr_ema = 0.5
+    wr_ema_alpha = 0.1
 
     # -----------------------------------------------------------------------
     # Training loop
@@ -929,12 +933,12 @@ def main(argv):
         # Decisive win rate (excludes ties and timeouts) — used for pool gate
         decisive_wr = tf.math.divide_no_nan(total_wins, total_decisive)
 
-        # Save to opponent pool when win rate exceeds threshold
-        # NOTE: still using legacy `win_rate` (ties/timeouts counted as not-wins).
-        # Pool-gate refactor is deferred to rev3 — see experiments/rev3/changes.md.
-        if gen % pool_save_interval == 0 and total_episodes > 0 and win_rate >= 0.55:
+        # Update EMA decisive win rate and save to pool when threshold met
+        if total_decisive > 0:
+            wr_ema = (1 - wr_ema_alpha) * wr_ema + wr_ema_alpha * float(decisive_wr)
+        if gen % pool_save_interval == 0 and total_decisive >= 50 and wr_ema >= 0.58:
             save_pool_checkpoint(p_model, gen)
-            print(f"Saved to opponent pool at gen {gen} (win rate: {win_rate:.0%})", flush=True)
+            print(f"Saved to opponent pool at gen {gen} (wr_ema: {wr_ema:.3f}, decisive_wr: {float(decisive_wr):.3f})", flush=True)
             if not load_pool_opponent(opp_model):
                 opp_model.set_weights(p_model.get_weights())
 
@@ -972,6 +976,7 @@ def main(argv):
                 "total_nondec": total_nondec,
                 "win_rate": win_rate,
                 "decisive_wr": decisive_wr,
+                "wr_ema": wr_ema,
                 "board": wandb.Image(board[..., 0]),
                 "scores": wandb.Image(norm_c_scores),
             }
