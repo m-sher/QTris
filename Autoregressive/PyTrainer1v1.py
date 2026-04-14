@@ -879,6 +879,7 @@ def main(argv):
         # Compute more metrics
         avg_total_reward = tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0))
         avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
+        avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
         avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
         avg_net_attacks = tf.reduce_mean(tf.reduce_sum(all_net_attacks, axis=0))
         avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
@@ -889,10 +890,12 @@ def main(argv):
 
         # APP (attacks per piece) — headline objective. Every env step is a
         # piece placement, so num_collection_steps is the piece count per env.
-        APP = avg_attack_reward / tf.cast(num_collection_steps, tf.float32)
+        APP_reward = avg_attack_reward / tf.cast(num_collection_steps, tf.float32)
+        APP_gross = avg_attacks / tf.cast(num_collection_steps, tf.float32)
         APP_net = avg_net_attacks / tf.cast(num_collection_steps, tf.float32)
-        att_per_clear = tf.math.divide_no_nan(avg_attack_reward, avg_clears)
-        cancel_rate = 1.0 - tf.math.divide_no_nan(avg_net_attacks, avg_attack_reward)
+        reward_per_clear = tf.math.divide_no_nan(avg_attack_reward, avg_clears)
+        att_per_clear = tf.math.divide_no_nan(avg_attacks, avg_clears)
+        cancel_rate = 1.0 - tf.math.divide_no_nan(avg_net_attacks, avg_attacks)
 
         # B2B / combo distribution from the pre-step observations
         b2b_series = all_b2b_combo_garbage[..., 0]
@@ -955,12 +958,15 @@ def main(argv):
                 # Reward channels
                 "avg_total_reward": avg_total_reward,
                 "avg_attack_reward": avg_attack_reward,
+                "avg_attacks": avg_attacks,
                 "avg_net_attacks": avg_net_attacks,
                 "avg_clears": avg_clears,
                 "avg_garbage_pushed": avg_garbage_pushed,
                 # Derived gameplay metrics
-                "APP": APP,
+                "APP_reward": APP_reward,
+                "APP_gross": APP_gross,
                 "APP_net": APP_net,
+                "reward_per_clear": reward_per_clear,
                 "att_per_clear": att_per_clear,
                 "cancel_rate": cancel_rate,
                 "avg_b2b": avg_b2b,
@@ -983,7 +989,7 @@ def main(argv):
         )
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | APP: {float(APP):.3f} | "
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | APP_net: {float(APP_net):.3f} | "
             f"att/row: {float(att_per_clear):.2f} | WR: {float(win_rate):.2f} | "
             f"decisive_WR: {float(decisive_wr):.2f} (n={int(total_decisive)})",
             flush=True,
