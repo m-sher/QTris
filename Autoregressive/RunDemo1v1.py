@@ -22,6 +22,7 @@ dropout_rate = 0.1
 max_len = 15
 queue_size = 5
 num_row_tiers = 2
+num_sequences = 160 * num_row_tiers
 
 piece_colors = np.array([
     [0, 0, 0],
@@ -53,8 +54,13 @@ def load_policy(checkpoint_dir):
         dropout_rate=dropout_rate,
         output_dim=key_dim,
     )
-    model.build(
-        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3), (None, max_len)]
+    model(
+        (
+            tf.keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            tf.keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            tf.keras.Input(shape=(3,), dtype=tf.float32),
+            tf.keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
     )
     checkpoint = tf.train.Checkpoint(model=model)
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=1)
@@ -66,11 +72,35 @@ def load_policy(checkpoint_dir):
     return model
 
 
+BCG_COLORS_RGB = np.array(
+    [
+        [100, 200, 255],  # b2b: cyan
+        [255, 255, 100],  # combo: yellow
+        [255, 100, 100],  # garbage: red
+    ]
+)
+BCG_LABELS = ["B2B", "Combo", "Garb"]
+
+
+def compute_bcg_heatmaps(piece_scores):
+    """Build 3 colored (12, 5, 3) heatmaps for b2b, combo, garbage attention."""
+    attention = tf.reduce_sum(piece_scores, axis=[0, 2])  # (batch, query, key)
+    bcg_patch_attn = attention[0, 7:10, :60].numpy()  # (3, 60)
+    grids = bcg_patch_attn.reshape(3, 12, 5)
+    out = np.zeros((3, 12, 5, 3), dtype=np.uint8)
+    for i in range(3):
+        g = grids[i]
+        g_min, g_max = g.min(), g.max()
+        norm = (g - g_min) / (g_max - g_min + 1e-8)
+        out[i] = (BCG_COLORS_RGB[i][None, None] * norm[..., None]).astype(np.uint8)
+    return out
+
+
 def draw_garbage_bar(env_instance, height=24, width=4):
     """Create a garbage queue visualization array (height, width, 3)."""
     surface = np.zeros((height, width, 3), dtype=np.uint8)
     current_row = height - 1
-    for i, (num_rows, _) in enumerate(env_instance._garbage_queue):
+    for i, (num_rows, _, _timing) in enumerate(env_instance._garbage_queue):
         start_row = max(0, current_row - num_rows + 1)
         for row in range(start_row, current_row + 1):
             if 0 <= row < height:
@@ -84,6 +114,100 @@ def draw_garbage_bar(env_instance, height=24, width=4):
     return surface
 
 
+def run_eval(p1_model, p2_model, args):
+    """Headless evaluation loop: run for --eval-steps total steps, resetting on
+    game end with a new seed, and report win/loss/draw statistics."""
+    num_steps = args.steps
+    total_steps = args.eval_steps
+    rng = np.random.RandomState(args.seed)
+
+    p1_wins = 0
+    p2_wins = 0
+    draws = 0
+    games = 0
+    steps_done = 0
+
+    start = time.time()
+
+    while steps_done < total_steps:
+        game_seed = int(rng.randint(0, 2**31))
+        py_env = PyTetris1v1Env(
+            queue_size=queue_size,
+            max_holes=50,
+            max_height=18,
+            max_steps=num_steps,
+            max_len=max_len,
+            pathfinding=True,
+            seed=game_seed,
+            idx=0,
+            num_row_tiers=num_row_tiers,
+        )
+        env = TFPyEnvironment(py_env)
+        time_step = env.reset()
+
+        for t in range(num_steps):
+            board1 = time_step.observation["board"]
+            pieces1 = time_step.observation["pieces"]
+            bcg1 = time_step.observation["b2b_combo_garbage"]
+            seqs1 = time_step.observation["sequences"]
+
+            board2 = time_step.observation["opp_board"]
+            pieces2 = time_step.observation["opp_pieces"]
+            bcg2 = time_step.observation["opp_b2b_combo_garbage"]
+            seqs2 = time_step.observation["opp_sequences"]
+
+            p1_keys, _, _, _ = p1_model.predict(
+                (board1, pieces1, bcg1),
+                greedy=args.greedy, valid_sequences=seqs1, temperature=args.temperature,
+            )
+            p2_keys, _, _, _ = p2_model.predict(
+                (board2, pieces2, bcg2),
+                greedy=args.greedy, valid_sequences=seqs2, temperature=args.temperature,
+            )
+
+            combined = tf.concat([p1_keys, p2_keys], axis=-1)
+            time_step = env.step(combined)
+            steps_done += 1
+
+            if time_step.is_last():
+                break
+
+        # Determine outcome
+        win_reward = time_step.reward["win"].numpy()[0]
+        if not time_step.is_last():
+            # Ran out of eval steps before the game finished
+            draws += 1
+        elif win_reward > 0:
+            p1_wins += 1
+        elif t + 1 >= num_steps:
+            # Hit max steps per game — timeout draw
+            draws += 1
+        else:
+            # Episode ended by death and P1 didn't win
+            p2_wins += 1
+
+        games += 1
+        elapsed = time.time() - start
+        p1_wr = p1_wins / games * 100
+        p2_wr = p2_wins / games * 100
+        draw_pct = draws / games * 100
+        print(
+            f"Game {games:>4d} | Steps {steps_done:>7d}/{total_steps} | "
+            f"P1 {p1_wins}W ({p1_wr:.1f}%)  P2 {p2_wins}W ({p2_wr:.1f}%)  "
+            f"Draw {draws} ({draw_pct:.1f}%) | {elapsed:.1f}s",
+            flush=True,
+        )
+        env.close()
+
+    elapsed = time.time() - start
+    print(f"\n{'='*60}")
+    print(f"Evaluation complete: {games} games, {steps_done} steps, {elapsed:.1f}s")
+    print(f"  P1 wins: {p1_wins:>4d} ({p1_wins/games*100:.1f}%)")
+    print(f"  P2 wins: {p2_wins:>4d} ({p2_wins/games*100:.1f}%)")
+    print(f"  Draws:   {draws:>4d} ({draws/games*100:.1f}%)")
+    print(f"{'='*60}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="1v1 Tetris Demo")
     parser.add_argument("--p1", required=True, help="P1 checkpoint directory")
@@ -92,6 +216,8 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--greedy", action="store_true", help="Use greedy action selection")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--eval-steps", type=int, default=None,
+                        help="Run headless evaluation for this many total steps, tracking win%%")
     args = parser.parse_args()
 
     num_steps = args.steps
@@ -100,6 +226,10 @@ def main():
     p1_model = load_policy(args.p1)
     p2_model = load_policy(args.p2)
     p1_model.summary()
+
+    if args.eval_steps is not None:
+        run_eval(p1_model, p2_model, args)
+        return
 
     # Create environment
     py_env = PyTetris1v1Env(
@@ -119,18 +249,26 @@ def main():
     board_w, board_h = 250, 600
     garbage_w = 20
     gap = 30
-    stats_h = 120
+    stats_h = 100
     margin = 10
+
+    # BCG attention heatmap layout (per player)
+    bcg_heatmap_w = 40
+    bcg_heatmap_h = 100
+    bcg_cell_gap = 10
+    bcg_label_h = 22
+    bcg_section_h = bcg_label_h + bcg_heatmap_h + 10
 
     panel_w = garbage_w + board_w
     screen_w = margin + panel_w + gap + panel_w + margin
-    screen_h = board_h + stats_h + 30  # 30 for top bar
+    screen_h = 28 + board_h + 5 + stats_h + bcg_section_h + margin
 
     pygame.init()
     screen = pygame.display.set_mode((screen_w, screen_h))
     pygame.display.set_caption("Tetris 1v1")
     font = pygame.font.Font(None, 24)
     big_font = pygame.font.Font(None, 36)
+    bcg_font = pygame.font.Font(None, 18)
 
     time_step = env.reset()
 
@@ -160,14 +298,16 @@ def main():
         seqs2 = time_step.observation["opp_sequences"]
 
         # Generate actions
-        p1_keys, _, _, _ = p1_model.predict(
+        p1_keys, _, _, p1_scores = p1_model.predict(
             (board1, pieces1, bcg1),
             greedy=args.greedy, valid_sequences=seqs1, temperature=args.temperature,
         )
-        p2_keys, _, _, _ = p2_model.predict(
+        p2_keys, _, _, p2_scores = p2_model.predict(
             (board2, pieces2, bcg2),
             greedy=args.greedy, valid_sequences=seqs2, temperature=args.temperature,
         )
+        p1_bcg_heatmaps = compute_bcg_heatmaps(p1_scores)
+        p2_bcg_heatmaps = compute_bcg_heatmaps(p2_scores)
 
         combined = tf.concat([p1_keys, p2_keys], axis=-1)
         time_step = env.step(combined)
@@ -263,11 +403,36 @@ def main():
         draw_stats(p1_x + garbage_w, p1_stats, t, (100, 200, 255))
         draw_stats(p2_x, p2_stats, t, (255, 150, 100))
 
+        # BCG attention heatmaps (b2b, combo, garbage) for each player
+        bcg_y = stats_y + stats_h
+        bcg_total_w = 3 * bcg_heatmap_w + 2 * bcg_cell_gap
+
+        def draw_bcg(panel_left, heatmaps, stats_dict, idx, color):
+            start_x = panel_left + (panel_w - bcg_total_w) // 2
+            vals = [
+                stats_dict["b2b"][idx],
+                stats_dict["combo"][idx],
+                stats_dict["garbage"][idx],
+            ]
+            for i in range(3):
+                hx = start_x + i * (bcg_heatmap_w + bcg_cell_gap)
+                label = bcg_font.render(f"{BCG_LABELS[i]}: {vals[i]}", True, color)
+                screen.blit(label, (hx, bcg_y))
+                surf = pygame.Surface((5, 12))
+                pygame.surfarray.blit_array(surf, heatmaps[i].transpose(1, 0, 2))
+                surf = pygame.transform.scale(surf, (bcg_heatmap_w, bcg_heatmap_h))
+                screen.blit(surf, (hx, bcg_y + bcg_label_h))
+
+        draw_bcg(p1_x, p1_bcg_heatmaps, p1_stats, t, (100, 200, 255))
+        draw_bcg(p2_x, p2_bcg_heatmaps, p2_stats, t, (255, 150, 100))
+
         # Check game end
         if time_step.is_last() and winner is None:
             win_reward = time_step.reward["win"].numpy()[0]
             if win_reward > 0:
                 winner = "P1 WINS"
+            elif t + 1 >= num_steps:
+                winner = "DRAW (timeout)"
             else:
                 winner = "P2 WINS"
 

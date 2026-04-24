@@ -15,9 +15,9 @@ piece_dim = 8
 depth = 64
 num_heads = 4
 num_layers = 4
-dropout_rate = 0.1
+dropout_rate = 0.0
 max_len = 15
-num_row_tiers = 1
+num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 num_steps = 500
@@ -35,13 +35,17 @@ p_model = FlatPolicyModel(
     num_sequences=num_sequences,
 )
 
-p_model.build(
-    input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)]
+p_model(
+    (
+        tf.keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+        tf.keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+        tf.keras.Input(shape=(3,), dtype=tf.float32),
+    )
 )
 
 p_checkpoint = tf.train.Checkpoint(model=p_model)
 p_checkpoint_manager = tf.train.CheckpointManager(
-    p_checkpoint, "./flat_head_policy_checkpoints", max_to_keep=3
+    p_checkpoint, "./checkpoints/1v1_flat_policy_17k", max_to_keep=3
 )
 p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
@@ -63,10 +67,29 @@ py_env = PyTetrisEnv(
 )
 env = TFPyEnvironment(py_env)
 
+screen_w = 870
+screen_h = 800
 pygame.init()
-screen = pygame.display.set_mode((670, 800))
+screen = pygame.display.set_mode((screen_w, screen_h))
 pygame.display.set_caption("Tetris")
 font = pygame.font.Font(None, 30)
+small_font = pygame.font.Font(None, 22)
+
+# BCG attention panel layout
+bcg_panel_x = 680
+bcg_label_y = 5
+bcg_heatmap_y = 30
+bcg_heatmap_w = 50
+bcg_heatmap_h = 120
+bcg_gap = 15
+bcg_colors_rgb = np.array(
+    [
+        [100, 200, 255],  # b2b: cyan
+        [255, 255, 100],  # combo: yellow
+        [255, 100, 100],  # garbage: red
+    ]
+)
+bcg_labels = ["B2B", "Combo", "Garb"]
 
 time_step = env.reset()
 
@@ -79,6 +102,7 @@ attack_rewards = []
 total_rewards = []
 current_b2b = []
 current_combo = []
+current_garbage = []
 
 death = 0
 running_attacks = 0
@@ -127,6 +151,7 @@ for t in range(num_steps):
 
     current_b2b_val = py_env._scorer._b2b
     current_combo_val = py_env._scorer._combo
+    current_garbage_val = py_env._get_total_garbage()
 
     if time_step.is_last():
         death = t
@@ -139,7 +164,7 @@ for t in range(num_steps):
 
     key_sequence, log_prob, action_index, scores = p_model.predict(
         (board, pieces, b2b_combo_garbage),
-        greedy=False,
+        greedy=True,
         valid_sequences=valid_sequences,
         temperature=1.0,
     )
@@ -149,11 +174,25 @@ for t in range(num_steps):
         pieces_array = pieces_array[0]
 
     piece_attention = tf.reduce_sum(scores, axis=[0, 2])
-    dominant_pieces = tf.argmax(piece_attention[0], axis=0)
+    # Slice out BCG tokens: keep only piece queries (:7) and patch keys (:60)
+    piece_patch_attn = piece_attention[0, :7, :60]
+    dominant_pieces = tf.argmax(piece_patch_attn, axis=0)
     dominant_grid = tf.reshape(dominant_pieces, (12, 5))
 
-    dominant_attention = tf.reduce_max(piece_attention[0], axis=0)
+    dominant_attention = tf.reduce_max(piece_patch_attn, axis=0)
     dominant_attention_grid = tf.reshape(dominant_attention, (12, 5))
+
+    # BCG (b2b, combo, garbage) attention over the 60 board patches
+    bcg_patch_attn = piece_attention[0, 7:10, :60].numpy()  # (3, 60)
+    bcg_grids = bcg_patch_attn.reshape(3, 12, 5)
+    bcg_colored_heatmaps = np.zeros((3, 12, 5, 3), dtype=np.uint8)
+    for i in range(3):
+        g = bcg_grids[i]
+        g_min, g_max = g.min(), g.max()
+        norm = (g - g_min) / (g_max - g_min + 1e-8)
+        bcg_colored_heatmaps[i] = (
+            bcg_colors_rgb[i][None, None] * norm[..., None]
+        ).astype(np.uint8)
 
     attention_min = tf.reduce_min(dominant_attention_grid)
     attention_max = tf.reduce_max(dominant_attention_grid)
@@ -193,7 +232,7 @@ for t in range(num_steps):
     )
 
     current_row = garbage_bar_height - 1
-    for i, (num_rows, empty_column) in enumerate(garbage_queue):
+    for i, (num_rows, empty_column, timing) in enumerate(garbage_queue):
         start_row = max(0, current_row - num_rows + 1)
         for row in range(start_row, current_row + 1):
             if row >= 0 and row < garbage_bar_height:
@@ -237,6 +276,21 @@ for t in range(num_steps):
     screen.blit(piece_surf, (285, 0))
     screen.blit(scores_surf, (415, 0))
 
+    # BCG attention panel (b2b, combo, garbage attention over board patches)
+    bcg_vals = [current_b2b_val, current_combo_val, current_garbage_val]
+    for i in range(3):
+        hx = bcg_panel_x + i * (bcg_heatmap_w + bcg_gap)
+        label_text = small_font.render(
+            f"{bcg_labels[i]}: {bcg_vals[i]}", True, (255, 255, 255)
+        )
+        screen.blit(label_text, (hx, bcg_label_y))
+        bcg_surf = pygame.Surface((5, 12))
+        pygame.surfarray.blit_array(
+            bcg_surf, bcg_colored_heatmaps[i].transpose(1, 0, 2)
+        )
+        bcg_surf = pygame.transform.scale(bcg_surf, (bcg_heatmap_w, bcg_heatmap_h))
+        screen.blit(bcg_surf, (hx, bcg_heatmap_y))
+
     step_text = font.render(f"Step: {t + 1}/{num_steps}", True, (255, 255, 255))
     step_rect = step_text.get_rect()
     step_rect.topleft = (10, 25)
@@ -259,10 +313,11 @@ for t in range(num_steps):
     total_rewards.append(total_reward)
     current_b2b.append(current_b2b_val)
     current_combo.append(current_combo_val)
+    current_garbage.append(current_garbage_val)
 
     time_step = env.step(key_sequence)
 
-    text_bg_rect = pygame.Rect(0, 610, 670, 190)
+    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
@@ -426,7 +481,7 @@ while True:
 
     pygame_widgets.update(events)
 
-    text_bg_rect = pygame.Rect(0, 610, 670, 190)
+    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
