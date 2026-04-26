@@ -237,9 +237,30 @@ class AlphaModel(keras.Model):
         state = self.state_pool(piece_dec)
         return piece_dec, state
 
-    def call(self, inputs, training=False):
+    # Inputs are fixed-shape per the canonical action space (board=(_,24,10,1),
+    # pieces=(_,7), bcg=(_,3)).  The leading batch dim is polymorphic via
+    # `shape=(None, ...)` so a single trace covers single-state inference,
+    # batched MCTS leaf eval, and training mini-batches.
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 7), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+        reduce_retracing=True,
+    )
+    def _forward(self, inputs, training):
         board, pieces, bcg = inputs
         _, state = self._encode(board, pieces, bcg, training=training)
-        v = self.value_head(state, training=training)[..., 0]              # (B,)
-        logits = self.policy_head(state, training=training)                 # (B, NUM_ACTIONS)
+        v = self.value_head(state, training=training)[..., 0]
+        logits = self.policy_head(state, training=training)
         return logits, v
+
+    def call(self, inputs, training=False):
+        # Promote `training` to a tensor so the @tf.function signature matches.
+        training_t = tf.constant(bool(training), dtype=tf.bool)
+        return self._forward(inputs, training_t)

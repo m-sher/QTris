@@ -214,7 +214,9 @@ def run_phase2(
             # ----- Self-play -----
             sp_t0 = time.perf_counter()
             sp_stats = []
-            for _ in range(cfg.games_per_generation):
+            n_games = cfg.games_per_generation
+            for game_idx in range(n_games):
+                game_t0 = time.perf_counter()
                 transitions, stats = play_game(
                     seed=next_seed,
                     num_steps=cfg.num_steps_per_game,
@@ -228,6 +230,14 @@ def run_phase2(
                 buffer.push_many(transitions)
                 sp_stats.append(stats)
                 next_seed += 1
+                game_secs = time.perf_counter() - game_t0
+                log_fn(
+                    f"  gen={gen}  game={game_idx+1:>3}/{n_games}  "
+                    f"steps={stats['steps']:>4}  surv={stats['survived']}  "
+                    f"app={stats['app']:>5.3f}  b2b={stats['max_b2b']:>3}  "
+                    f"atk={stats['total_attack']:>4.0f}  "
+                    f"t={game_secs:>5.1f}s"
+                )
             sp_seconds = time.perf_counter() - sp_t0
 
             avg_app = float(np.mean([s["app"] for s in sp_stats]))
@@ -242,13 +252,25 @@ def run_phase2(
             tr_t0 = time.perf_counter()
             train_losses, train_p, train_v = [], [], []
             last_metrics = None
-            for _ in range(cfg.train_steps_per_generation):
+            n_train = cfg.train_steps_per_generation
+            # Print ~10 progress lines per training phase, regardless of size.
+            log_every = max(n_train // 10, 1)
+            for step_idx in range(n_train):
                 m = trainer.train_step(buffer, cfg.batch_size)
                 if m is not None:
                     train_losses.append(m.loss)
                     train_p.append(m.policy_loss)
                     train_v.append(m.value_loss)
                     last_metrics = m
+                if (step_idx + 1) % log_every == 0 and last_metrics is not None:
+                    elapsed = time.perf_counter() - tr_t0
+                    log_fn(
+                        f"  gen={gen}  train={step_idx+1:>4}/{n_train}  "
+                        f"L={last_metrics.loss:.3f}  "
+                        f"(P={last_metrics.policy_loss:.3f} "
+                        f"V={last_metrics.value_loss:.3f})  "
+                        f"t={elapsed:>5.1f}s"
+                    )
             tr_seconds = time.perf_counter() - tr_t0
 
             gen_seconds = time.perf_counter() - gen_t0
