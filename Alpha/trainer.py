@@ -154,6 +154,13 @@ class Phase2Config:
     wandb_project: str = "Tetris-Alpha"
     wandb_run_name: Optional[str] = None
     wandb_tags: Tuple[str, ...] = ("phase2", "solo")
+    # --- Warm-start from an Autoregressive PolicyModel checkpoint ---
+    # Path to the directory containing a tf.train.CheckpointManager checkpoint
+    # for QTris/Autoregressive/TetrisModel.PolicyModel.  Only encoder weights
+    # are transferred; policy/value heads start fresh.  Set None to skip.
+    warm_start_ckpt: Optional[str] = None
+    warm_start_piece_dim: int = 8
+    warm_start_dropout: float = 0.0
 
 
 def oracle_weight_for_generation(gen: int, anneal_gens: int) -> float:
@@ -189,6 +196,19 @@ def run_phase2(
         num_layers=cfg.model_num_layers,
         dropout_rate=cfg.model_dropout,
     )
+
+    if cfg.warm_start_ckpt:
+        from .warm_start import warm_start_alpha_from_autoregressive
+        warm_start_alpha_from_autoregressive(
+            model,
+            cfg.warm_start_ckpt,
+            piece_dim=cfg.warm_start_piece_dim,
+            depth=cfg.model_depth,
+            num_heads=cfg.model_num_heads,
+            num_layers=cfg.model_num_layers,
+            dropout_rate=cfg.warm_start_dropout,
+        )
+
     optimizer = keras.optimizers.AdamW(
         learning_rate=cfg.learning_rate, weight_decay=cfg.weight_decay
     )

@@ -77,7 +77,12 @@ class DecomposeOracle(Valuator):
     """
 
     V_SCALE = 100.0
-    P_TEMP = 8.0
+    # P_TEMP controls how sharp the prior is over per-state placements.
+    # A small gap of ~3 between sibling decompose-sums at P_TEMP=1.0 already
+    # gives ~20× weight ratio between best and worst — enough that MCTS
+    # focuses sims on the heuristically preferred actions, and the policy
+    # cross-entropy target has real headroom to drop.
+    P_TEMP = 1.0
 
     def evaluate(self, state: TetrisCore) -> Tuple[Optional[np.ndarray], float]:
         components = state.decompose()

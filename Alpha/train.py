@@ -79,6 +79,18 @@ def _build_config(argv: list) -> Phase2Config:
     p.add_argument("--run-name", "--wandb-run-name", type=str, default=None,
                    dest="wandb_run_name")
 
+    # Warm start from autoregressive checkpoint
+    p.add_argument("--warm-start", type=str, default=None,
+                   dest="warm_start_ckpt",
+                   help="Path to a tf.train.CheckpointManager directory "
+                        "for QTris/Autoregressive/TetrisModel.PolicyModel. "
+                        "Encoder weights will be copied; heads start fresh. "
+                        "Geometry must match (depth/num_layers).")
+    p.add_argument("--warm-start-piece-dim", type=int, default=None,
+                   dest="warm_start_piece_dim")
+    p.add_argument("--warm-start-dropout", type=float, default=None,
+                   dest="warm_start_dropout")
+
     args = p.parse_args(argv)
 
     cfg = Phase2Config()
@@ -107,6 +119,8 @@ def main(argv=None) -> int:
               f"run={cfg.wandb_run_name or '<auto>'}", flush=True)
     else:
         print("[phase2] WandB disabled (console logging only)", flush=True)
+    if cfg.warm_start_ckpt:
+        print(f"[phase2] warm-start from {cfg.warm_start_ckpt}", flush=True)
 
     run_phase2(cfg)
     print("[phase2] done.", flush=True)
