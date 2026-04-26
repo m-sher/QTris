@@ -138,8 +138,8 @@ class Phase2Config:
     weight_decay: float = 1e-4
     value_loss_weight: float = 1.0
     seed: int = 0
-    # --- Network architecture (matches QTris/Autoregressive/TetrisModel defaults) ---
-    model_depth: int = 96
+    # --- Network architecture (matches PyTrainer1v1 / PyTrainerFlat conventions) ---
+    model_depth: int = 64
     model_num_heads: int = 4
     model_num_layers: int = 4
     model_dropout: float = 0.0

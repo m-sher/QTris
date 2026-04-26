@@ -138,7 +138,7 @@ class AlphaModel(keras.Model):
 
     def __init__(
         self,
-        depth: int = 96,
+        depth: int = 64,
         num_heads: int = 4,
         num_layers: int = 4,
         dropout_rate: float = 0.0,
