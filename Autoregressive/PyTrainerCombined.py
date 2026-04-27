@@ -86,6 +86,22 @@ def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     return advantages, returns
 
 
+@tf.function(jit_compile=True)
+def compute_raw_returns(rewards, dones, gamma):
+    returns = tf.TensorArray(
+        dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
+    )
+
+    last_ret = tf.zeros(returns.element_shape, dtype=tf.float32)
+
+    for t in tf.range(num_collection_steps - 1, -1, -1):
+        mask = 1.0 - dones[t]
+        last_ret = rewards[t] + gamma * last_ret * mask
+        returns = returns.write(t, last_ret)
+
+    return tf.ensure_shape(returns.stack(), (num_collection_steps, num_envs, 1))
+
+
 @tf.function()
 def train_step(p_model, v_model, online_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
@@ -116,6 +132,12 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     pad_mask = tf.cast(
         online_actions_batch[:, 1:] != Keys.PAD, tf.float32
     )  # batch, max_len - 1
+
+    num_valid_actions = tf.reduce_sum(
+        tf.cast(invalid_mask, tf.float32), axis=-1
+    )  # (batch, max_len - 1)
+    decision_mask = tf.cast(num_valid_actions > 1, tf.float32) * pad_mask
+    decisions_per_seq = tf.reduce_sum(decision_mask, axis=-1)  # (batch,)
 
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
@@ -174,9 +196,10 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
 
-        # Compute bonus/penalty
         entropy = tf.ensure_shape(masked_dist.entropy(), (mini_batch_size, max_len - 1))
-        entropy = tf.reduce_sum(entropy * pad_mask, axis=-1) / tf.reduce_sum(pad_mask, axis=-1)
+        entropy = tf.math.divide_no_nan(
+            tf.reduce_sum(entropy * decision_mask, axis=-1), decisions_per_seq
+        )
         entropy = tf.reduce_mean(entropy)
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
@@ -388,8 +411,8 @@ def main(argv):
             all_values, all_last_values, scaled_rewards, all_dones, gamma, lam
         )
 
-        # Update running return variance (EMA)
-        batch_var = tf.math.reduce_variance(all_returns)
+        raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
+        batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 
         all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
