@@ -1,361 +1,363 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Moves, Convert
-from TetrisEnv.Pieces import PieceType
+from TetrisEnv.CB2BSearch import CB2BSearch
+from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel
 import multiprocessing
+import os
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
-import numpy as np
-import glob
-from tqdm import tqdm
-import time
-import os
+
+
+def _build_mask(sequence, valid_sequences, max_len, key_dim):
+    masks = np.zeros((max_len, key_dim), dtype=bool)
+    for pos in range(1, max_len):
+        prefix = sequence[:pos]
+        match = np.all(valid_sequences[:, :pos] == prefix, axis=-1)
+        if not match.any():
+            continue
+        next_tokens = valid_sequences[match, pos]
+        masks[pos, np.unique(next_tokens)] = True
+    return masks
+
+
+def _play_one_game(args):
+    (
+        seed,
+        num_steps,
+        search_depth,
+        beam_width,
+        queue_size,
+        max_len,
+        key_dim,
+        max_height,
+        max_holes,
+        max_steps_env,
+        garbage_chance,
+        garbage_min,
+        garbage_max,
+        garbage_push_delay,
+        num_row_tiers,
+        death_trim_count,
+    ) = args
+
+    env = PyTetrisEnv(
+        queue_size=queue_size,
+        max_holes=max_holes,
+        max_height=max_height,
+        max_steps=max_steps_env,
+        max_len=max_len,
+        pathfinding=True,
+        seed=seed,
+        idx=0,
+        garbage_chance=garbage_chance,
+        garbage_min=garbage_min,
+        garbage_max=garbage_max,
+        garbage_push_delay=garbage_push_delay,
+        auto_push_garbage=True,
+        auto_fill_queue=True,
+        num_row_tiers=num_row_tiers,
+    )
+
+    time_step = env.reset()
+    searcher = CB2BSearch()
+
+    transitions = []
+    episode_buf = []
+    unmatched = 0
+    deaths = 0
+
+    def flush(buf, is_death):
+        if is_death:
+            kept = buf[:-death_trim_count] if len(buf) > death_trim_count else []
+        else:
+            kept = buf
+        transitions.extend(kept)
+
+    for _ in range(num_steps):
+        obs = time_step.observation
+        board = obs["board"].astype(np.float32)
+        pieces = obs["pieces"].astype(np.int64)
+        bcg = obs["b2b_combo_garbage"].astype(np.float32)
+        valid_sequences = obs["sequences"].astype(np.int64)
+
+        action_idx, sequence = searcher.search(
+            board=env._board,
+            active_piece=env._active_piece.piece_type.value,
+            hold_piece=env._hold_piece.value,
+            queue=np.array(
+                [p.value for p in env._queue], dtype=np.int32
+            ),
+            b2b=int(env._scorer._b2b),
+            combo=int(env._scorer._combo),
+            total_garbage=int(env._get_total_garbage()),
+            garbage_push_delay=env._garbage_push_delay,
+            search_depth=search_depth,
+            beam_width=beam_width,
+            max_len=max_len,
+        )
+
+        if action_idx < 0:
+            flush(episode_buf, is_death=True)
+            episode_buf = []
+            deaths += 1
+            time_step = env.reset()
+            continue
+
+        sequence = sequence.astype(np.int64)
+
+        if not np.any(np.all(valid_sequences == sequence[None, :], axis=-1)):
+            unmatched += 1
+            time_step = env._step(sequence)
+            if time_step.is_last():
+                flush(episode_buf, is_death=True)
+                episode_buf = []
+                deaths += 1
+                time_step = env.reset()
+            continue
+
+        mask = _build_mask(sequence, valid_sequences, max_len, key_dim)
+        episode_buf.append((board, pieces, bcg, sequence, mask))
+
+        time_step = env._step(sequence)
+
+        if time_step.is_last():
+            flush(episode_buf, is_death=True)
+            episode_buf = []
+            deaths += 1
+            time_step = env.reset()
+
+    flush(episode_buf, is_death=False)
+    return transitions, unmatched, deaths
 
 
 class Pretrainer:
-    def __init__(self):
-        self._new_pieces = {
-            0: PieceType.N.value,
-            1: PieceType.I.value,
-            2: PieceType.T.value,
-            3: PieceType.L.value,
-            4: PieceType.J.value,
-            5: PieceType.Z.value,
-            6: PieceType.S.value,
-            7: PieceType.O.value,
-        }
-        self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    def __init__(
+        self,
+        dataset_path="../tetris_expert_dataset_b2b",
+        queue_size=5,
+        max_len=15,
+        key_dim=12,
+        max_height=18,
+        max_holes=50,
+        max_steps_env=9999999,
+        search_depth=7,
+        beam_width=96,
+        garbage_chance=0.15,
+        garbage_min=1,
+        garbage_max=4,
+        garbage_push_delay=1,
+        num_row_tiers=2,
+        death_trim_count=20,
+    ):
+        self._dataset_path = dataset_path
+        self._queue_size = queue_size
+        self._max_len = max_len
+        self._key_dim = key_dim
+        self._max_height = max_height
+        self._max_holes = max_holes
+        self._max_steps_env = max_steps_env
+        self._search_depth = search_depth
+        self._beam_width = beam_width
+        self._garbage_chance = garbage_chance
+        self._garbage_min = garbage_min
+        self._garbage_max = garbage_max
+        self._garbage_push_delay = garbage_push_delay
+        self._num_row_tiers = num_row_tiers
+        self._death_trim_count = death_trim_count
+        self._scc = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="none"
+        )
 
-    def _load_raw_data(self):
-        """
-        Loads the raw game data from text files.
-        """
-        raw_data = [[], []]
-        for file in glob.glob(
-            "E:\\MisaMino-Tetrio\\MisaMino\\tetris_ai\\logs\\game*.txt"
-        ):
-            with open(file) as f:
-                contents = f.readlines()
-                for line in contents:
-                    raw_data[int(line[0])].append(line[2:])
-            print(f"Loaded {len(contents)} lines from {file}", flush=True)
-        return raw_data
+    def _generate_dataset(self, num_games, num_steps_per_game, seed):
+        args_list = [
+            (
+                seed + i,
+                num_steps_per_game,
+                self._search_depth,
+                self._beam_width,
+                self._queue_size,
+                self._max_len,
+                self._key_dim,
+                self._max_height,
+                self._max_holes,
+                self._max_steps_env,
+                self._garbage_chance,
+                self._garbage_min,
+                self._garbage_max,
+                self._garbage_push_delay,
+                self._num_row_tiers,
+                self._death_trim_count,
+            )
+            for i in range(num_games)
+        ]
 
-    def _process_into_transitions(
-        self, raw_data: list[list[str]]
-    ) -> list[tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]]:
-        """
-        Process the raw game data into transitions of ((state), (next_state)).
-        Raw game data has the following fields in order, separated by '#':
-        1. Player ID (removed by `_load_raw_data`)
-        2. Active piece
-        3. Hold piece
-        4. Queue of next pieces
-        5. Board (represented by a list of integers where each integer is
-                  equivalent to a binary representation of the corresponding row)
-        """
-        transitions = []
-        transitions_checked = 0
-        last_time = time.time()
-        for player_data in raw_data:
-            for i in range(len(player_data) - 1):
-                # Parse state
-                split_results = player_data[i].strip().split("#")
-                active = int(split_results[0])
-                hold = int(split_results[1])
-                queue = [int(piece) for piece in split_results[2].split(",")[:5]]
-                piece_seq = np.array(
-                    [self._new_pieces[piece] for piece in [active] + [hold] + queue],
-                    dtype=np.int32,
+        all_transitions = []
+        total_unmatched = 0
+        total_deaths = 0
+
+        games_done = 0
+        with multiprocessing.Pool(
+            processes=max(1, multiprocessing.cpu_count() - 1)
+        ) as pool:
+            for transitions, unmatched, deaths in pool.imap_unordered(
+                _play_one_game, args_list, chunksize=1
+            ):
+                all_transitions.extend(transitions)
+                total_unmatched += unmatched
+                total_deaths += deaths
+                games_done += 1
+                print(
+                    f"Game {games_done}/{num_games} | "
+                    f"this: steps={len(transitions)} unmatched={unmatched} deaths={deaths} | "
+                    f"total: steps={len(all_transitions)} unmatched={total_unmatched} deaths={total_deaths}",
+                    flush=True,
                 )
-                board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                state = (board, piece_seq)
-
-                # Parse next_state
-                next_split_results = player_data[i + 1].strip().split("#")
-                next_active = int(next_split_results[0])
-                next_hold = int(next_split_results[1])
-                next_queue = [
-                    int(piece) for piece in next_split_results[2].split(",")[:5]
-                ]
-                next_piece_seq = np.array(
-                    [
-                        self._new_pieces[piece]
-                        for piece in [next_active] + [next_hold] + next_queue
-                    ],
-                    dtype=np.int32,
-                )
-                next_board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in next_split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                next_state = (next_board, next_piece_seq)
-
-                transitions_checked += 1
-
-                if self._is_candidate(state, next_state):
-                    transitions.append((state, next_state))
-
-                if time.time() - last_time > 5:
-                    print(
-                        f"\rtransitions checked: {transitions_checked} | Valid transitions: {len(transitions)}",
-                        end="",
-                        flush=True,
-                    )
-                    last_time = time.time()
 
         print(
-            f"\rTotal transitions checked: {transitions_checked} | Total valid transitions: {len(transitions)}",
+            f"Collected {len(all_transitions)} transitions | "
+            f"unmatched: {total_unmatched} | deaths: {total_deaths}",
             flush=True,
         )
 
-        return transitions
+        boards = np.stack([t[0] for t in all_transitions]).astype(np.float32)
+        pieces = np.stack([t[1] for t in all_transitions]).astype(np.int64)
+        bcg = np.stack([t[2] for t in all_transitions]).astype(np.float32)
+        actions = np.stack([t[3] for t in all_transitions]).astype(np.int64)
+        masks = np.stack([t[4] for t in all_transitions]).astype(bool)
 
-    def _is_candidate(
-        self,
-        state: tuple[np.ndarray, np.ndarray],
-        next_state: tuple[np.ndarray, np.ndarray],
-    ) -> bool:
-        """
-        Determine if the transition from board_t to board_t1 is a candidate for training.
-        This removes transitions between two episodes and transitions that accept garbage.
-        """
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
-
-        # Check that the queue cycles as expected
-        # Piece sequence is [active, hold, next1, next2, next3, next4, next5]
-        if not (
-            np.array_equal(piece_seq[3:], next_piece_seq[2:-1])  # Queue cycled once
-            or (
-                piece_seq[1] == 0  # Hold started empty
-                and next_piece_seq[1] != 0  # Hold is now occupied
-                and np.array_equal(piece_seq[4:], next_piece_seq[2:-2])
-            )
-        ):  # Queue cycled twice
-            return False
-
-        # Check that the board changes in an expected way
-        cell_count_diff = np.sum(next_board) - np.sum(board)
-        if not (
-            cell_count_diff == 4  # Placed a piece without clearing lines
-            or cell_count_diff == 4 - 10  # Placed a piece and cleared one line
-            or cell_count_diff == 4 - 20  # Placed a piece and cleared two lines
-            or cell_count_diff == 4 - 30  # Placed a piece and cleared three lines
-            or cell_count_diff == 4 - 40
-        ):  # Placed a piece and cleared four lines
-            return False
-
-        return True
-
-    def _find_action(
-        self,
-        transition: tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
-        test_env: PyTetrisEnv,
-    ) -> tuple[int, int, int]:
-        """
-        Determine the action taken to transition from state_t to state_t1.
-        """
-        state, next_state = transition
-
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
-
-        # Determine whether hold was used
-        if piece_seq[1] != next_piece_seq[1]:
-            hold = 1
-        else:
-            hold = 0
-
-        # Determine the action(s) that cause the transition
-        # Checking non-spins first to avoid unnecessary keypresses with spins
-        for spin in range(len(Moves._spins)):
-            for standard in range(len(Moves._standards)):
-                action = {"hold": hold, "standard": standard, "spin": spin}
-                active_piece = test_env._spawn_piece(PieceType(piece_seq[0]))
-                hold_piece = PieceType(piece_seq[1])
-                queue = [PieceType(piece) for piece in piece_seq[2:]]
-                _, _, sim_board, _, _, _ = test_env._execute_action(
-                    board, active_piece, hold_piece, queue, action
-                )
-                if np.array_equal(sim_board, next_board):
-                    return board, piece_seq, (hold, standard, spin)
-
-        # If no action is found, return action to filter
-        return board, piece_seq, (-1, -1, -1)
-
-    def process_single_transition(self, transition):
-        return self._find_action(transition, self.test_env)
-
-    def _generate_dataset(self) -> tf.data.Dataset:
-        """
-        Generate a dataset of transitions from the raw game data.
-        """
-
-        # Initialize test environment
-        self.test_env = PyTetrisEnv(queue_size=5, max_holes=100, seed=123, idx=0)
-
-        # Load transitions
-        raw_data = self._load_raw_data()
-        transition_df = self._process_into_transitions(raw_data)
-
-        with multiprocessing.Pool(processes=multiprocessing.cpu_count() - 1) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(
-                        self.process_single_transition, transition_df, chunksize=512
-                    ),
-                    total=len(transition_df),
-                    desc="Processing transitions",
-                )
-            )
-
-        # Convert results from list of tuples to tuple of lists
-        repacked = tuple(map(list, zip(*results)))
-
-        # Create dataset
-        dataset = tf.data.Dataset.from_tensor_slices(repacked).filter(
-            lambda board, piece_seq, action: tf.reduce_all(action[1] != (-1, -1, -1))
+        dataset = tf.data.Dataset.from_tensor_slices(
+            {
+                "boards": boards,
+                "pieces": pieces,
+                "b2b_combo_garbage": bcg,
+                "actions": actions,
+                "masks": masks,
+            }
         )
+        dataset.save(self._dataset_path)
+        return tf.data.Dataset.load(self._dataset_path)
 
-        # Save dataset and ensure it can be loaded
-        dataset.save("../tetris_expert_dataset")
-        dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-
-        return dataset
-
-    @tf.function
-    def _get_key_sequence(self, separate_action):
-        action = tf.gather_nd(Convert.to_ind, separate_action)
-        key_sequence = tf.gather(Convert.to_sequence, action)
-        return key_sequence
-
-    def _load_dataset(self, batch_size: int | None = 1024) -> tf.data.Dataset:
-        """
-        Load the dataset from disk if it exists, otherwise generate it.
-        """
-
-        # Check if dataset exists
-        if not os.path.exists("../tetris_expert_dataset"):
-            print("Dataset not found. Generating dataset...", flush=True)
-            # Generate dataset
-            dataset = self._generate_dataset()
+    def _load_dataset(self, batch_size, num_games, num_steps_per_game, seed):
+        if not os.path.exists(self._dataset_path):
+            print(
+                f"Dataset not found at {self._dataset_path}. Generating...",
+                flush=True,
+            )
+            dataset = self._generate_dataset(
+                num_games=num_games,
+                num_steps_per_game=num_steps_per_game,
+                seed=seed,
+            )
         else:
             try:
-                dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-                print("Dataset loaded successfully.", flush=True)
+                dataset = tf.data.Dataset.load(self._dataset_path)
+                print(f"Loaded dataset from {self._dataset_path}", flush=True)
             except Exception:
-                print("Dataset loading failed. Generating dataset...", flush=True)
-                # Generate dataset
-                dataset = self._generate_dataset()
+                print("Dataset load failed. Regenerating...", flush=True)
+                dataset = self._generate_dataset(
+                    num_games=num_games,
+                    num_steps_per_game=num_steps_per_game,
+                    seed=seed,
+                )
 
-        dataset = (
-            dataset.map(
-                lambda board, piece_seq, separate_action: {
-                    "boards": tf.cast(board[..., None], tf.float32),
-                    "pieces": tf.cast(piece_seq, tf.int64),
-                    "actions": tf.cast(
-                        self._get_key_sequence(separate_action), tf.int64
-                    ),
-                },
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
-            )
-            .cache()
-            .shuffle(1000000)
-        )
-
-        if batch_size:
-            dataset = dataset.batch(
+        return (
+            dataset.cache()
+            .shuffle(buffer_size=100_000)
+            .batch(
                 batch_size,
-                deterministic=False,
                 drop_remainder=True,
                 num_parallel_calls=tf.data.AUTOTUNE,
-            ).prefetch(tf.data.AUTOTUNE)
-
-        return dataset
+                deterministic=False,
+            )
+            .prefetch(tf.data.AUTOTUNE)
+        )
 
     @tf.function
-    def _train_step(self, model: keras.Model, batch) -> tuple[float, float]:
-        """
-        Perform a single training step.
-        """
+    def _train_step(self, model, batch):
         board = batch["boards"]
-        piece_seq = batch["pieces"]
-        key_sequence = batch["actions"]
-        input_sequence = key_sequence[:, :-1]
-        target_sequence = key_sequence[:, 1:]
+        pieces = batch["pieces"]
+        bcg = batch["b2b_combo_garbage"]
+        actions = batch["actions"]
+        masks = batch["masks"]
+
+        input_seq = actions[:, :-1]
+        target_seq = actions[:, 1:]
+        valid_mask = masks[:, 1:, :]
+
+        pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
+        num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
+        decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
 
         with tf.GradientTape() as tape:
-            # Forward pass
-            logits = model((board, piece_seq, input_sequence), training=True)
-            # Compute loss
-            loss = self.scc(target_sequence, logits)
-        # Compute and apply gradients
-        gradients = tape.gradient(loss, model.trainable_variables)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-        # Compute accuracy
-        accuracy = tf.reduce_mean(
-            tf.cast(
-                tf.argmax(logits, axis=-1, output_type=tf.int64) == target_sequence,
-                tf.float32,
+            logits = model(
+                (board, pieces, bcg, input_seq), training=True
             )
+            masked_logits = tf.where(
+                valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            per_token_loss = self._scc(target_seq, masked_logits)
+            loss = tf.math.divide_no_nan(
+                tf.reduce_sum(per_token_loss * decision_mask),
+                tf.reduce_sum(decision_mask),
+            )
+
+        gradients = tape.gradient(loss, model.trainable_variables)
+        model.optimizer.apply_gradients(
+            zip(gradients, model.trainable_variables)
+        )
+
+        pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
+        accuracy = tf.math.divide_no_nan(
+            tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
         )
 
         return loss, accuracy
 
     def train(
         self,
-        model: keras.Model,
-        epochs: int = 10,
-        batch_size: int = 1024,
+        model,
+        epochs=10,
+        batch_size=256,
+        num_games=2000,
+        num_steps_per_game=200,
+        seed=0,
         checkpoint_manager=None,
     ):
-        """
-        Train the model on saved dataset.
-        """
-        # Load dataset
-        dataset = self._load_dataset(batch_size)
+        dataset = self._load_dataset(
+            batch_size=batch_size,
+            num_games=num_games,
+            num_steps_per_game=num_steps_per_game,
+            seed=seed,
+        )
 
-        # Train model
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
-                # Perform training step
                 loss, accuracy = self._train_step(model, batch)
-                # Print progress every 100 steps
                 if step % 100 == 0:
                     print(
-                        f"Step {step + 1} | Loss: {loss:2.3f} | Accuracy: {accuracy:1.3f}",
+                        f"Step {step + 1} | Loss: {float(loss):2.3f} | "
+                        f"Accuracy: {float(accuracy):1.3f}",
                         flush=True,
                     )
-            # Save checkpoint after each epoch
             if checkpoint_manager is not None:
                 checkpoint_manager.save()
 
 
 def main():
-    # Model params
     piece_dim = 8
     key_dim = 12
     depth = 64
-    max_len = 9
+    max_len = 15
+    queue_size = 5
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.1
-    batch_size = 1024
+    batch_size = 256
+    num_row_tiers = 2
 
-    # Initialize model and optimizer
     model = PolicyModel(
         batch_size=batch_size,
         piece_dim=piece_dim,
@@ -368,29 +370,42 @@ def main():
         output_dim=key_dim,
     )
 
-    optimizer = keras.optimizers.Adam(3e-5)
+    optimizer = keras.optimizers.Adam(3e-4)
     model.compile(optimizer=optimizer, jit_compile=True)
     print("Initialized model and optimizer.", flush=True)
 
-    dummy_board = tf.random.uniform((32, 24, 10, 1), dtype=tf.float32)
-    dummy_pieces = tf.random.uniform((32, 7), dtype=tf.int32, minval=0, maxval=8)
-    dummy_keys = tf.random.uniform((32, 9), dtype=tf.int32, minval=0, maxval=12)
-    model((dummy_board, dummy_pieces, dummy_keys), training=False)
+    model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
+    )
     model.summary()
 
-    # Load checkpoint if it exists
-    # Initialize checkpoint manager
     checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints', max_to_keep=3)
-    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint, "./pretrained_checkpoints", max_to_keep=3
     )
-    # print("Restored checkpoint.", flush=True)
+    if checkpoint_manager.latest_checkpoint:
+        checkpoint.restore(checkpoint_manager.latest_checkpoint).expect_partial()
+        print("Restored pretrained checkpoint.", flush=True)
 
-    pretrainer = Pretrainer()
+    pretrainer = Pretrainer(
+        queue_size=queue_size,
+        max_len=max_len,
+        key_dim=key_dim,
+        num_row_tiers=num_row_tiers,
+    )
+
     pretrainer.train(
-        model, batch_size=batch_size, epochs=10, checkpoint_manager=checkpoint_manager
+        model,
+        epochs=10,
+        batch_size=batch_size,
+        num_games=2000,
+        num_steps_per_game=200,
+        checkpoint_manager=checkpoint_manager,
     )
 
 
