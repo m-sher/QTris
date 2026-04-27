@@ -33,10 +33,10 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 10
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
-early_stopping = False
+early_stopping = True
 
 gamma = 0.99
 lam = 0.95
@@ -125,6 +125,11 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
     )
 
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
+    advantages_batch = (
+        (advantages_batch - tf.reduce_mean(advantages_batch)) /
+        (tf.math.reduce_std(advantages_batch) + 1e-9)
+    )
+
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -251,13 +256,11 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
     for epoch in range(num_epochs):
-        kls = []
         for online_batch in online_dataset:
             step_out = train_step(p_model, v_model, online_batch, entropy_coef)
-            kls.append(step_out["approx_kl"])
 
-        if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
-            break
+            if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                return step_out
 
     return step_out
 
@@ -415,10 +418,6 @@ def main(argv):
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 
-        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
-            tf.math.reduce_std(all_advantages) + 1e-8
-        )
-
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
         pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
@@ -508,7 +507,7 @@ def main(argv):
         avg_combo = tf.reduce_mean(combo_series)
         surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
 
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
+        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
