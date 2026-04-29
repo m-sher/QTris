@@ -4,6 +4,7 @@ from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel
 import multiprocessing
 import os
+import shutil
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -170,9 +171,26 @@ class Pretrainer:
         )
 
     def _generate_dataset(self, num_games, num_steps_per_game, seed):
+        existing_count = 0
+        existing = None
+        if os.path.exists(self._dataset_path):
+            try:
+                existing_ds = tf.data.Dataset.load(self._dataset_path)
+                existing = {
+                    k: v.numpy()
+                    for k, v in next(iter(existing_ds.batch(10_000_000))).items()
+                }
+                existing_count = len(existing["actions"])
+                print(
+                    f"Found existing dataset with {existing_count} transitions",
+                    flush=True,
+                )
+            except Exception:
+                print("Existing dataset load failed, starting fresh", flush=True)
+
         args_list = [
             (
-                seed + i,
+                seed + existing_count + i,
                 num_steps_per_game,
                 self._search_depth,
                 self._beam_width,
@@ -226,6 +244,20 @@ class Pretrainer:
         actions = np.stack([t[3] for t in all_transitions]).astype(np.int64)
         masks = np.stack([t[4] for t in all_transitions]).astype(bool)
 
+        if existing is not None:
+            boards = np.concatenate([existing["boards"], boards])
+            pieces = np.concatenate([existing["pieces"], pieces])
+            bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
+            actions = np.concatenate([existing["actions"], actions])
+            masks = np.concatenate([existing["masks"], masks])
+            print(
+                f"Combined: {existing_count} existing + {len(all_transitions)} new = {len(actions)} total",
+                flush=True,
+            )
+
+        if os.path.exists(self._dataset_path):
+            shutil.rmtree(self._dataset_path)
+
         dataset = tf.data.Dataset.from_tensor_slices(
             {
                 "boards": boards,
@@ -239,27 +271,11 @@ class Pretrainer:
         return tf.data.Dataset.load(self._dataset_path)
 
     def _load_dataset(self, batch_size, num_games, num_steps_per_game, seed):
-        if not os.path.exists(self._dataset_path):
-            print(
-                f"Dataset not found at {self._dataset_path}. Generating...",
-                flush=True,
-            )
-            dataset = self._generate_dataset(
-                num_games=num_games,
-                num_steps_per_game=num_steps_per_game,
-                seed=seed,
-            )
-        else:
-            try:
-                dataset = tf.data.Dataset.load(self._dataset_path)
-                print(f"Loaded dataset from {self._dataset_path}", flush=True)
-            except Exception:
-                print("Dataset load failed. Regenerating...", flush=True)
-                dataset = self._generate_dataset(
-                    num_games=num_games,
-                    num_steps_per_game=num_steps_per_game,
-                    seed=seed,
-                )
+        dataset = self._generate_dataset(
+            num_games=num_games,
+            num_steps_per_game=num_steps_per_game,
+            seed=seed,
+        )
 
         cached = dataset.cache()
         for _ in cached:
