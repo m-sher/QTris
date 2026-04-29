@@ -261,8 +261,12 @@ class Pretrainer:
                     seed=seed,
                 )
 
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+
         return (
-            dataset.cache()
+            cached
             .shuffle(buffer_size=100_000)
             .batch(
                 batch_size,
@@ -270,6 +274,19 @@ class Pretrainer:
                 num_parallel_calls=tf.data.AUTOTUNE,
                 deterministic=False,
             )
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    @staticmethod
+    def load_expert_dataset(path, batch_size):
+        cached = tf.data.Dataset.load(path).cache()
+        for _ in cached:
+            pass
+        return (
+            cached
+            .repeat()
+            .shuffle(buffer_size=100_000)
+            .batch(batch_size, drop_remainder=True)
             .prefetch(tf.data.AUTOTUNE)
         )
 
