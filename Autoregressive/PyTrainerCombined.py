@@ -47,6 +47,9 @@ temperature = 1.0
 
 target_kl = 0.04
 
+expert_coef = 1.0
+expert_dataset_path = "../tetris_expert_dataset_b2b"
+
 config = {
     "num_envs": num_envs,
     "num_collection_steps": num_collection_steps,
@@ -58,6 +61,7 @@ config = {
     "value_clip": value_clip,
     "entropy_coef": entropy_coef,
     "target_kl": target_kl,
+    "expert_coef": expert_coef,
 }
 
 
@@ -103,7 +107,7 @@ def compute_raw_returns(rewards, dones, gamma):
 
 
 @tf.function()
-def train_step(p_model, v_model, online_batch, entropy_coef):
+def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -209,8 +213,51 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
 
         approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
-        # Compute total loss
-        total_policy_loss = ppo_loss - entropy_coef * entropy
+        expert_actions_batch = tf.ensure_shape(
+            expert_batch["actions"], (mini_batch_size, max_len)
+        )
+        expert_masks_batch = tf.ensure_shape(
+            expert_batch["masks"], (mini_batch_size, max_len, key_dim)
+        )
+        expert_input_seq = expert_actions_batch[:, :-1]
+        expert_target_seq = expert_actions_batch[:, 1:]
+        expert_valid_mask = expert_masks_batch[:, 1:, :]
+
+        expert_pad_mask = tf.cast(expert_target_seq != Keys.PAD, tf.float32)
+        expert_num_valid = tf.reduce_sum(
+            tf.cast(expert_valid_mask, tf.float32), axis=-1
+        )
+        expert_decision_mask = tf.cast(expert_num_valid > 1, tf.float32) * expert_pad_mask
+
+        expert_logits = p_model(
+            (
+                tf.ensure_shape(expert_batch["boards"], (mini_batch_size, 24, 10, 1)),
+                tf.ensure_shape(expert_batch["pieces"], (mini_batch_size, queue_size + 2)),
+                tf.ensure_shape(expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)),
+                expert_input_seq,
+            ),
+            training=True,
+        )
+        expert_masked_logits = tf.where(
+            expert_valid_mask, expert_logits, tf.constant(-1e9, dtype=tf.float32)
+        )
+        expert_per_token_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            labels=expert_target_seq, logits=expert_masked_logits
+        )
+        expert_loss = tf.math.divide_no_nan(
+            tf.reduce_sum(expert_per_token_loss * expert_decision_mask),
+            tf.reduce_sum(expert_decision_mask),
+        )
+
+        expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
+        expert_correct = tf.cast(
+            expert_pred == expert_target_seq, tf.float32
+        ) * expert_decision_mask
+        expert_accuracy = tf.math.divide_no_nan(
+            tf.reduce_sum(expert_correct), tf.reduce_sum(expert_decision_mask)
+        )
+
+        total_policy_loss = ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
@@ -251,13 +298,15 @@ def train_step(p_model, v_model, online_batch, entropy_coef):
         "explained_var": explained_var,
         "board": online_board_batch[0],
         "scores": piece_scores,
+        "expert_loss": expert_loss,
+        "expert_accuracy": expert_accuracy,
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
+def train_on_dataset(p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef):
     for epoch in range(num_epochs):
-        for online_batch in online_dataset:
-            step_out = train_step(p_model, v_model, online_batch, entropy_coef)
+        for online_batch, expert_batch in tf.data.Dataset.zip((online_dataset, expert_dataset)):
+            step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef)
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
                 return step_out
@@ -355,6 +404,17 @@ def main(argv):
     )
 
     print("Initialized runner", flush=True)
+
+    expert_dataset = (
+        tf.data.Dataset.load(expert_dataset_path)
+        .cache()
+        .repeat()
+        .shuffle(buffer_size=100_000)
+        .batch(mini_batch_size, drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
+
     last_time = time.time()
 
     # Initialize WandB logging
@@ -463,7 +523,7 @@ def main(argv):
 
         # Train on collected data
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, num_epochs, entropy_coef
+            p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef
         )
 
         # Save checkpoint
@@ -485,6 +545,8 @@ def main(argv):
         explained_var = train_out["explained_var"]
         board = train_out["board"]
         scores = train_out["scores"]
+        expert_loss = train_out["expert_loss"]
+        expert_accuracy = train_out["expert_accuracy"]
 
         # Compute more metrics
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
@@ -535,6 +597,9 @@ def main(argv):
                     "max_b2b": max_b2b,
                     "avg_combo": avg_combo,
                     "surge_rate": surge_rate,
+                    "expert_loss": expert_loss,
+                    "expert_accuracy": expert_accuracy,
+                    "expert_coef": expert_coef,
                     "board": wandb.Image(board[..., 0]),
                     "scores": wandb.Image(norm_c_scores),
                 }
