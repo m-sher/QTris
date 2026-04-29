@@ -1,6 +1,7 @@
 from TetrisEnv.PyTetrisRunner import PyTetrisRunner
 from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
+from Pretrainer import Pretrainer
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -405,14 +406,7 @@ def main(argv):
 
     print("Initialized runner", flush=True)
 
-    expert_dataset = (
-        tf.data.Dataset.load(expert_dataset_path)
-        .cache()
-        .repeat()
-        .shuffle(buffer_size=100_000)
-        .batch(mini_batch_size, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
-    )
+    expert_dataset = Pretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
     print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
 
     last_time = time.time()
