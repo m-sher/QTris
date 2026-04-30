@@ -229,6 +229,10 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
             tf.cast(expert_valid_mask, tf.float32), axis=-1
         )
         expert_decision_mask = tf.cast(expert_num_valid > 1, tf.float32) * expert_pad_mask
+        expert_sample_weights = tf.ensure_shape(
+            expert_batch["sample_weights"], (mini_batch_size,)
+        )
+        expert_weighted_mask = expert_decision_mask * expert_sample_weights[:, None]
 
         expert_logits = p_model(
             (
@@ -246,8 +250,8 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
             labels=expert_target_seq, logits=expert_masked_logits
         )
         expert_loss = tf.math.divide_no_nan(
-            tf.reduce_sum(expert_per_token_loss * expert_decision_mask),
-            tf.reduce_sum(expert_decision_mask),
+            tf.reduce_sum(expert_per_token_loss * expert_weighted_mask),
+            tf.reduce_sum(expert_weighted_mask),
         )
 
         expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
