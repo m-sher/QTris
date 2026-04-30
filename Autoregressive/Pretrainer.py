@@ -294,7 +294,7 @@ class Pretrainer:
 
         return (
             cached
-            .shuffle(buffer_size=100_000)
+            .shuffle(buffer_size=500_000)
             .batch(
                 batch_size,
                 drop_remainder=True,
@@ -306,7 +306,12 @@ class Pretrainer:
 
     @staticmethod
     def load_expert_dataset(path, batch_size):
-        cached = tf.data.Dataset.load(path).cache()
+        dataset = tf.data.Dataset.load(path)
+        if "sample_weights" not in dataset.element_spec:
+            def _add_default_weight(x):
+                return {**x, "sample_weights": tf.constant(1.0, dtype=tf.float32)}
+            dataset = dataset.map(_add_default_weight)
+        cached = dataset.cache()
         for _ in cached:
             pass
         return (
