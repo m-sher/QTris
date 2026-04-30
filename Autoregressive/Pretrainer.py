@@ -67,6 +67,7 @@ def _play_one_game(args):
     episode_buf = []
     unmatched = 0
     deaths = 0
+    max_b2b = 0
 
     def flush(buf, is_death):
         if is_death:
@@ -123,6 +124,7 @@ def _play_one_game(args):
         )
 
         time_step = env._step(sequence)
+        max_b2b = max(max_b2b, int(env._scorer._b2b))
 
         if time_step.is_last():
             flush(episode_buf, is_death=True)
@@ -131,7 +133,7 @@ def _play_one_game(args):
             time_step = env.reset()
 
     flush(episode_buf, is_death=False)
-    return transitions, unmatched, deaths
+    return transitions, unmatched, deaths, max_b2b
 
 
 class Pretrainer:
@@ -220,7 +222,7 @@ class Pretrainer:
         with multiprocessing.Pool(
             processes=min(16, max(1, multiprocessing.cpu_count() - 1))
         ) as pool:
-            for transitions, unmatched, deaths in pool.imap_unordered(
+            for transitions, unmatched, deaths, max_b2b in pool.imap_unordered(
                 _play_one_game, args_list, chunksize=1
             ):
                 all_transitions.extend(transitions)
@@ -229,7 +231,7 @@ class Pretrainer:
                 games_done += 1
                 print(
                     f"Game {games_done}/{num_games} | "
-                    f"this: steps={len(transitions)} unmatched={unmatched} deaths={deaths} | "
+                    f"this: steps={len(transitions)} unmatched={unmatched} deaths={deaths} max_b2b={max_b2b} | "
                     f"total: steps={len(all_transitions)} unmatched={total_unmatched} deaths={total_deaths}",
                     flush=True,
                 )
@@ -322,6 +324,7 @@ class Pretrainer:
         bcg = batch["b2b_combo_garbage"]
         actions = batch["actions"]
         masks = batch["masks"]
+        sample_weights = batch["sample_weights"]
 
         input_seq = actions[:, :-1]
         target_seq = actions[:, 1:]
@@ -330,6 +333,7 @@ class Pretrainer:
         pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
         num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
         decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
+        weighted_mask = decision_mask * sample_weights[:, None]
 
         with tf.GradientTape() as tape:
             logits = model(
@@ -340,8 +344,8 @@ class Pretrainer:
             )
             per_token_loss = self._scc(target_seq, masked_logits)
             loss = tf.math.divide_no_nan(
-                tf.reduce_sum(per_token_loss * decision_mask),
-                tf.reduce_sum(decision_mask),
+                tf.reduce_sum(per_token_loss * weighted_mask),
+                tf.reduce_sum(weighted_mask),
             )
 
         gradients = tape.gradient(loss, model.trainable_variables)
