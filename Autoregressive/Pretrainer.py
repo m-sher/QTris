@@ -118,7 +118,9 @@ def _play_one_game(args):
             continue
 
         mask = _build_mask(sequence, valid_sequences, max_len, key_dim)
-        episode_buf.append((board, pieces, bcg, sequence, mask))
+        episode_buf.append(
+            (board, pieces, bcg, sequence, mask, np.float32(search_depth))
+        )
 
         time_step = env._step(sequence)
 
@@ -216,7 +218,7 @@ class Pretrainer:
 
         games_done = 0
         with multiprocessing.Pool(
-            processes=max(1, multiprocessing.cpu_count() - 1)
+            processes=min(16, max(1, multiprocessing.cpu_count() - 1))
         ) as pool:
             for transitions, unmatched, deaths in pool.imap_unordered(
                 _play_one_game, args_list, chunksize=1
@@ -243,6 +245,7 @@ class Pretrainer:
         bcg = np.stack([t[2] for t in all_transitions]).astype(np.float32)
         actions = np.stack([t[3] for t in all_transitions]).astype(np.int64)
         masks = np.stack([t[4] for t in all_transitions]).astype(bool)
+        sample_weights = np.stack([t[5] for t in all_transitions]).astype(np.float32)
 
         if existing is not None:
             boards = np.concatenate([existing["boards"], boards])
@@ -250,6 +253,11 @@ class Pretrainer:
             bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
             actions = np.concatenate([existing["actions"], actions])
             masks = np.concatenate([existing["masks"], masks])
+            existing_weights = existing.get(
+                "sample_weights",
+                np.ones(existing_count, dtype=np.float32),
+            )
+            sample_weights = np.concatenate([existing_weights, sample_weights])
             print(
                 f"Combined: {existing_count} existing + {len(all_transitions)} new = {len(actions)} total",
                 flush=True,
@@ -265,6 +273,7 @@ class Pretrainer:
                 "b2b_combo_garbage": bcg,
                 "actions": actions,
                 "masks": masks,
+                "sample_weights": sample_weights,
             }
         )
         dataset.save(self._dataset_path)
@@ -387,8 +396,8 @@ def main():
     queue_size = 5
     num_heads = 4
     num_layers = 4
-    dropout_rate = 0.1
-    batch_size = 256
+    dropout_rate = 0.0
+    batch_size = 512
     num_row_tiers = 2
 
     model = PolicyModel(
@@ -436,7 +445,7 @@ def main():
         model,
         epochs=10,
         batch_size=batch_size,
-        num_games=2000,
+        num_games=1000,
         num_steps_per_game=200,
         checkpoint_manager=checkpoint_manager,
     )
