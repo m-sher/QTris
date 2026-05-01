@@ -98,6 +98,7 @@ class FlatPolicyModel(keras.Model):
             [
                 layers.Flatten(),
                 layers.Dropout(dropout_rate),
+                layers.Dense(4 * depth, activation="relu"),
                 layers.Dense(2 * depth, activation="relu"),
                 layers.Dense(depth, activation="relu"),
             ],
