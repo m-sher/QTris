@@ -2,7 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisModel import PosEncoding, DecoderLayer, CrossAttentionLayer, ValueModel
+from TetrisModel import PosEncoding, DecoderLayer, ValueModel
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
@@ -94,22 +94,17 @@ class FlatPolicyModel(keras.Model):
         self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
-        self.action_embedding = layers.Embedding(
-            input_dim=num_sequences,
-            output_dim=depth,
+        self.trunk = keras.Sequential(
+            [
+                layers.Flatten(),
+                layers.Dropout(dropout_rate),
+                layers.Dense(2 * depth, activation="relu"),
+                layers.Dense(depth, activation="relu"),
+            ],
+            name="trunk_layers",
         )
 
-        self.action_cross_attn_layers = [
-            CrossAttentionLayer(
-                units=depth,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"action_ca_{i}",
-            )
-            for i in range(num_layers // 2)
-        ]
-
-        self.action_proj = layers.Dense(1, name="action_proj")
+        self.top = layers.Dense(num_sequences, name="action_logits")
 
     def _tokenize_bcg(self, b2b_combo_garbage, training=False):
         """Convert raw BCG scalars into 3 separate attention tokens.
@@ -166,21 +161,8 @@ class FlatPolicyModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def score_actions(self, piece_dec, training=False):
-        batch_size = tf.shape(piece_dec)[0]
-        action_ids = tf.broadcast_to(
-            tf.range(self._num_sequences, dtype=tf.int64)[None, :],
-            [batch_size, self._num_sequences],
-        )
-        action_dec = self.action_embedding(action_ids, training=training)
-
-        for action_ca_layer in self.action_cross_attn_layers:
-            action_dec, _ = action_ca_layer(
-                [piece_dec, action_dec], training=training
-            )
-
-        logits = tf.squeeze(
-            self.action_proj(action_dec, training=training), axis=-1
-        )
+        trunk_out = self.trunk(piece_dec, training=training)
+        logits = self.top(trunk_out, training=training)
         return logits
 
     @tf.function(jit_compile=True)
