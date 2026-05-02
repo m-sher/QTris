@@ -507,7 +507,16 @@ def main(argv):
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
         avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
+        avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
+
+        b2b_series = all_b2b_combo_garbage[..., 0]
+        combo_series = all_b2b_combo_garbage[..., 1]
+        avg_b2b = tf.reduce_mean(b2b_series)
+        max_b2b = tf.reduce_max(b2b_series)
+        avg_combo = tf.reduce_mean(combo_series)
+        surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
+
+        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
@@ -528,8 +537,13 @@ def main(argv):
                     "avg_clears": avg_clears,
                     "avg_attack_reward": avg_attack_reward,
                     "avg_total_reward": avg_total_reward,
+                    "avg_garbage_pushed": avg_garbage_pushed,
                     "avg_deaths": avg_deaths,
                     "avg_pieces": avg_pieces,
+                    "avg_b2b": avg_b2b,
+                    "max_b2b": max_b2b,
+                    "avg_combo": avg_combo,
+                    "surge_rate": surge_rate,
                     "expert_loss": expert_loss,
                     "expert_accuracy": expert_accuracy,
                     "expert_coef": expert_coef,
