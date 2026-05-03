@@ -2,11 +2,45 @@ from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
+import multiprocessing
 import os
 import shutil
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+
+
+def _available_cpus():
+    """CPUs the current process can actually use, respecting affinity and cgroup quota."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity_count = len(os.sched_getaffinity(0))
+        except OSError:
+            affinity_count = os.cpu_count() or 1
+    else:
+        affinity_count = os.cpu_count() or 1
+
+    # cgroup v2
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()
+            if quota != "max":
+                return min(affinity_count, max(1, int(quota) // int(period)))
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    # cgroup v1
+    try:
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as f:
+            quota_us = int(f.read().strip())
+        if quota_us > 0:
+            with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as f:
+                period_us = int(f.read().strip())
+            return min(affinity_count, max(1, quota_us // period_us))
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    return affinity_count
 
 
 def _build_mask(sequence, valid_sequences, max_len, key_dim):
@@ -21,32 +55,33 @@ def _build_mask(sequence, valid_sequences, max_len, key_dim):
     return masks
 
 
-def _collect(
-    seed,
-    num_steps,
-    search_depth,
-    beam_width,
-    queue_size,
-    max_len,
-    key_dim,
-    max_height,
-    max_holes,
-    max_steps_env,
-    garbage_chance,
-    garbage_min,
-    garbage_max,
-    garbage_push_delay,
-    num_row_tiers,
-    death_trim_count,
-    gamma,
-    log_every=1000,
-):
-    """Run a single env for num_steps total transitions, resetting on death.
+def _play_one_game(args):
+    """Worker entry point. Runs num_steps in one env (with resets on death).
 
-    Per-episode discounted returns are computed in flush so that kept
-    transitions carry the discounted impact of the upcoming death penalty
-    even though the trimmed final tail isn't added to the dataset itself.
+    Per-episode discounted returns are computed in flush so kept transitions
+    carry the discounted impact of the upcoming death penalty even though the
+    trimmed final tail isn't added to the dataset itself.
     """
+    (
+        seed,
+        num_steps,
+        search_depth,
+        beam_width,
+        queue_size,
+        max_len,
+        key_dim,
+        max_height,
+        max_holes,
+        max_steps_env,
+        garbage_chance,
+        garbage_min,
+        garbage_max,
+        garbage_push_delay,
+        num_row_tiers,
+        death_trim_count,
+        gamma,
+    ) = args
+
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -97,7 +132,7 @@ def _collect(
                 (board, pieces, bcg, sequence, mask, sample_weight, returns_arr[t])
             )
 
-    for step in range(num_steps):
+    for _ in range(num_steps):
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
@@ -155,14 +190,6 @@ def _collect(
             deaths += 1
             time_step = env.reset()
 
-        if (step + 1) % log_every == 0:
-            print(
-                f"Step {step + 1}/{num_steps} | "
-                f"transitions={len(transitions)} unmatched={unmatched} "
-                f"deaths={deaths} max_b2b={max_b2b}",
-                flush=True,
-            )
-
     flush(episode_buf, is_death=False)
     return transitions, unmatched, deaths, max_b2b
 
@@ -207,7 +234,7 @@ class Pretrainer:
             from_logits=True, reduction="none"
         )
 
-    def _generate_dataset(self, num_steps, seed):
+    def _generate_dataset(self, num_games, num_steps_per_game, seed):
         existing_count = 0
         existing = None
         if os.path.exists(self._dataset_path):
@@ -234,39 +261,74 @@ class Pretrainer:
             except Exception:
                 print("Existing dataset load failed, starting fresh", flush=True)
 
-        new_transitions, unmatched, deaths, max_b2b = _collect(
-            seed=seed + existing_count,
-            num_steps=num_steps,
-            search_depth=self._search_depth,
-            beam_width=self._beam_width,
-            queue_size=self._queue_size,
-            max_len=self._max_len,
-            key_dim=self._key_dim,
-            max_height=self._max_height,
-            max_holes=self._max_holes,
-            max_steps_env=self._max_steps_env,
-            garbage_chance=self._garbage_chance,
-            garbage_min=self._garbage_min,
-            garbage_max=self._garbage_max,
-            garbage_push_delay=self._garbage_push_delay,
-            num_row_tiers=self._num_row_tiers,
-            death_trim_count=self._death_trim_count,
-            gamma=self._gamma,
-        )
+        args_list = [
+            (
+                seed + existing_count + i,
+                num_steps_per_game,
+                self._search_depth,
+                self._beam_width,
+                self._queue_size,
+                self._max_len,
+                self._key_dim,
+                self._max_height,
+                self._max_holes,
+                self._max_steps_env,
+                self._garbage_chance,
+                self._garbage_min,
+                self._garbage_max,
+                self._garbage_push_delay,
+                self._num_row_tiers,
+                self._death_trim_count,
+                self._gamma,
+            )
+            for i in range(num_games)
+        ]
 
+        all_transitions = []
+        total_unmatched = 0
+        total_deaths = 0
+        global_max_b2b = 0
+
+        n_workers = max(1, min(num_games, _available_cpus()))
         print(
-            f"Collected {len(new_transitions)} transitions | "
-            f"unmatched: {unmatched} | deaths: {deaths} | max_b2b: {max_b2b}",
+            f"Collecting {num_games} games of {num_steps_per_game} steps "
+            f"with {n_workers} workers (available CPUs: {_available_cpus()}).",
             flush=True,
         )
 
-        boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
-        pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
-        bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-        actions = np.stack([t[3] for t in new_transitions]).astype(np.int64)
-        masks = np.stack([t[4] for t in new_transitions]).astype(bool)
-        sample_weights = np.stack([t[5] for t in new_transitions]).astype(np.float32)
-        returns = np.stack([t[6] for t in new_transitions]).astype(np.float32)
+        games_done = 0
+        with multiprocessing.Pool(processes=n_workers) as pool:
+            for transitions, unmatched, deaths, max_b2b in pool.imap_unordered(
+                _play_one_game, args_list, chunksize=1
+            ):
+                all_transitions.extend(transitions)
+                total_unmatched += unmatched
+                total_deaths += deaths
+                global_max_b2b = max(global_max_b2b, max_b2b)
+                games_done += 1
+                print(
+                    f"Game {games_done}/{num_games} | "
+                    f"this: steps={len(transitions)} unmatched={unmatched} "
+                    f"deaths={deaths} max_b2b={max_b2b} | "
+                    f"total: steps={len(all_transitions)} unmatched={total_unmatched} "
+                    f"deaths={total_deaths} max_b2b={global_max_b2b}",
+                    flush=True,
+                )
+
+        print(
+            f"Collected {len(all_transitions)} transitions | "
+            f"unmatched: {total_unmatched} | deaths: {total_deaths} | "
+            f"max_b2b: {global_max_b2b}",
+            flush=True,
+        )
+
+        boards = np.stack([t[0] for t in all_transitions]).astype(np.float32)
+        pieces = np.stack([t[1] for t in all_transitions]).astype(np.int64)
+        bcg = np.stack([t[2] for t in all_transitions]).astype(np.float32)
+        actions = np.stack([t[3] for t in all_transitions]).astype(np.int64)
+        masks = np.stack([t[4] for t in all_transitions]).astype(bool)
+        sample_weights = np.stack([t[5] for t in all_transitions]).astype(np.float32)
+        returns = np.stack([t[6] for t in all_transitions]).astype(np.float32)
 
         if existing is not None:
             boards = np.concatenate([existing["boards"], boards])
@@ -281,7 +343,7 @@ class Pretrainer:
             sample_weights = np.concatenate([existing_weights, sample_weights])
             returns = np.concatenate([existing["returns"], returns])
             print(
-                f"Combined: {existing_count} existing + {len(new_transitions)} new = "
+                f"Combined: {existing_count} existing + {len(all_transitions)} new = "
                 f"{len(actions)} total",
                 flush=True,
             )
@@ -303,8 +365,12 @@ class Pretrainer:
         dataset.save(self._dataset_path)
         return tf.data.Dataset.load(self._dataset_path)
 
-    def _load_dataset(self, batch_size, num_steps, seed):
-        dataset = self._generate_dataset(num_steps=num_steps, seed=seed)
+    def _load_dataset(self, batch_size, num_games, num_steps_per_game, seed):
+        dataset = self._generate_dataset(
+            num_games=num_games,
+            num_steps_per_game=num_steps_per_game,
+            seed=seed,
+        )
 
         cached = dataset.cache()
         for _ in cached:
@@ -405,14 +471,16 @@ class Pretrainer:
         v_model,
         epochs=10,
         batch_size=256,
-        num_steps=200_000,
+        num_games=1000,
+        num_steps_per_game=200,
         seed=0,
         p_checkpoint_manager=None,
         v_checkpoint_manager=None,
     ):
         dataset = self._load_dataset(
             batch_size=batch_size,
-            num_steps=num_steps,
+            num_games=num_games,
+            num_steps_per_game=num_steps_per_game,
             seed=seed,
         )
 
@@ -519,7 +587,8 @@ def main():
         v_model,
         epochs=10,
         batch_size=batch_size,
-        num_steps=200_000,
+        num_games=1000,
+        num_steps_per_game=200,
         p_checkpoint_manager=p_checkpoint_manager,
         v_checkpoint_manager=v_checkpoint_manager,
     )
