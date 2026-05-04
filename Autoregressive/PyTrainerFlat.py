@@ -338,12 +338,41 @@ def main(argv):
         else:
             print("No checkpoint found, training from scratch", flush=True)
 
-    v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
+    loaded_return_scale = tf.Variable(
+        1.0, trainable=False, dtype=tf.float32, name="return_scale"
+    )
+    v_checkpoint = tf.train.Checkpoint(
+        model=v_model,
+        optimizer=v_optimizer,
+        return_scale=loaded_return_scale,
+    )
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
-    print("Restored value checkpoint", flush=True)
+
+    if v_checkpoint_manager.latest_checkpoint:
+        v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+        print(
+            f"Restored value checkpoint (return_scale={float(loaded_return_scale):.3f})",
+            flush=True,
+        )
+    else:
+        pretrained_v_ckpt = tf.train.Checkpoint(
+            model=v_model,
+            return_scale=loaded_return_scale,
+        )
+        pretrained_v_mgr = tf.train.CheckpointManager(
+            pretrained_v_ckpt, "./pretrained_flat_value_checkpoints", max_to_keep=1
+        )
+        if pretrained_v_mgr.latest_checkpoint:
+            pretrained_v_ckpt.restore(pretrained_v_mgr.latest_checkpoint).expect_partial()
+            print(
+                f"Bootstrapped value from pretrained checkpoint "
+                f"(return_scale={float(loaded_return_scale):.3f})",
+                flush=True,
+            )
+        else:
+            print("No value checkpoint found, training from scratch", flush=True)
 
     p_model.summary()
     v_model.summary()
@@ -380,8 +409,9 @@ def main(argv):
     expert_iter = iter(expert_dataset)
     print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
 
-    return_var = 1.0
+    return_var = float(loaded_return_scale) ** 2
     return_var_decay = 0.99
+    print(f"Initial return_var = {return_var:.3f}", flush=True)
 
     for gen in range(generations):
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
