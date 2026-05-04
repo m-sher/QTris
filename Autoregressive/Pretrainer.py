@@ -11,6 +11,9 @@ class Pretrainer:
         self._scc = keras.losses.SparseCategoricalCrossentropy(
             from_logits=True, reduction="none"
         )
+        self._return_scale = tf.Variable(
+            1.0, trainable=False, dtype=tf.float32, name="return_scale"
+        )
 
     def _load_dataset(self, batch_size):
         if not os.path.exists(self._dataset_path):
@@ -30,6 +33,20 @@ class Pretrainer:
                 f"Dataset at {self._dataset_path} lacks `sample_weights` field. "
                 "Regenerate with the current DataGen.py."
             )
+
+        all_returns = tf.concat(
+            [batch["returns"] for batch in dataset.batch(100_000)],
+            axis=0,
+        )
+        return_mean = tf.reduce_mean(all_returns)
+        return_std = tf.math.reduce_std(all_returns)
+        scale = tf.maximum(return_std, 1.0)
+        self._return_scale.assign(scale)
+        print(
+            f"Return stats: mean={float(return_mean):.3f}, "
+            f"std={float(return_std):.3f}, value-head scale={float(scale):.3f}",
+            flush=True,
+        )
 
         cached = dataset.cache()
         for _ in cached:
@@ -110,7 +127,7 @@ class Pretrainer:
 
         with tf.GradientTape() as v_tape:
             values = v_model((board, pieces, bcg), training=True)
-            targets = tf.reshape(returns, (-1, 1))
+            targets = tf.reshape(returns / self._return_scale, (-1, 1))
             squared_error = tf.square(values - targets)
             value_loss = tf.math.divide_no_nan(
                 tf.reduce_sum(squared_error * sample_weights[:, None]),
@@ -219,15 +236,23 @@ def main():
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
+    pretrainer = Pretrainer()
+
+    v_checkpoint = tf.train.Checkpoint(
+        model=v_model,
+        optimizer=v_optimizer,
+        return_scale=pretrainer._return_scale,
+    )
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./pretrained_value_checkpoints", max_to_keep=3
     )
     if v_checkpoint_manager.latest_checkpoint:
         v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
-        print("Restored pretrained value checkpoint.", flush=True)
-
-    pretrainer = Pretrainer()
+        print(
+            f"Restored pretrained value checkpoint "
+            f"(return_scale={float(pretrainer._return_scale):.3f}).",
+            flush=True,
+        )
 
     pretrainer.train(
         p_model,
