@@ -315,9 +315,10 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef):
+def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
     for epoch in range(num_epochs):
-        for online_batch, expert_batch in tf.data.Dataset.zip((online_dataset, expert_dataset)):
+        for online_batch in online_dataset:
+            expert_batch = next(expert_iter)
             step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef)
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
@@ -418,6 +419,7 @@ def main(argv):
     print("Initialized runner", flush=True)
 
     expert_dataset = Pretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
+    expert_iter = iter(expert_dataset)
     print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
 
     last_time = time.time()
@@ -528,7 +530,7 @@ def main(argv):
 
         # Train on collected data
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef
+            p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
         )
 
         # Save checkpoint

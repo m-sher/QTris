@@ -36,7 +36,7 @@ garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
@@ -262,9 +262,10 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef):
+def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
     for epoch in range(num_epochs):
-        for online_batch, expert_batch in tf.data.Dataset.zip((online_dataset, expert_dataset)):
+        for online_batch in online_dataset:
+            expert_batch = next(expert_iter)
             step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef)
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
@@ -376,6 +377,7 @@ def main(argv):
     )
 
     expert_dataset = FlatPretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
+    expert_iter = iter(expert_dataset)
     print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
 
     return_var = 1.0
@@ -473,7 +475,7 @@ def main(argv):
         last_time = time.time()
 
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef, expert_coef
+            p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
         )
 
         if gen % 5 == 0:
