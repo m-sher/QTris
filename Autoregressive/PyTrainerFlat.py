@@ -8,6 +8,7 @@ from tensorflow import keras
 import tf_agents
 import wandb
 import time
+import os
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -111,7 +112,15 @@ def compute_raw_returns(rewards, dones, gamma):
 
 
 @tf.function()
-def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef):
+def train_step(
+    p_model,
+    v_model,
+    online_batch,
+    entropy_coef,
+    expert_coef,
+    use_expert,
+    expert_batch=None,
+):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -185,39 +194,43 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
         approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
 
         # Expert BC anchor
-        expert_action_indices = tf.ensure_shape(
-            expert_batch["action_indices"], (mini_batch_size,)
-        )
-        expert_valid_masks = tf.ensure_shape(
-            expert_batch["valid_masks"], (mini_batch_size, num_sequences)
-        )
-        expert_sample_weights = tf.ensure_shape(
-            expert_batch["sample_weights"], (mini_batch_size,)
-        )
+        if use_expert:
+            expert_action_indices = tf.ensure_shape(
+                expert_batch["action_indices"], (mini_batch_size,)
+            )
+            expert_valid_masks = tf.ensure_shape(
+                expert_batch["valid_masks"], (mini_batch_size, num_sequences)
+            )
+            expert_sample_weights = tf.ensure_shape(
+                expert_batch["sample_weights"], (mini_batch_size,)
+            )
 
-        expert_logits = p_model(
-            (
-                tf.ensure_shape(expert_batch["boards"], (mini_batch_size, 24, 10, 1)),
-                tf.ensure_shape(expert_batch["pieces"], (mini_batch_size, queue_size + 2)),
-                tf.ensure_shape(expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)),
-            ),
-            training=True,
-        )
-        expert_masked_logits = tf.where(
-            expert_valid_masks, expert_logits, tf.constant(-1e9, dtype=tf.float32)
-        )
-        expert_per_sample_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=expert_action_indices, logits=expert_masked_logits
-        )
-        expert_loss = tf.math.divide_no_nan(
-            tf.reduce_sum(expert_per_sample_loss * expert_sample_weights),
-            tf.reduce_sum(expert_sample_weights),
-        )
+            expert_logits = p_model(
+                (
+                    tf.ensure_shape(expert_batch["boards"], (mini_batch_size, 24, 10, 1)),
+                    tf.ensure_shape(expert_batch["pieces"], (mini_batch_size, queue_size + 2)),
+                    tf.ensure_shape(expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)),
+                ),
+                training=True,
+            )
+            expert_masked_logits = tf.where(
+                expert_valid_masks, expert_logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            expert_per_sample_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=expert_action_indices, logits=expert_masked_logits
+            )
+            expert_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(expert_per_sample_loss * expert_sample_weights),
+                tf.reduce_sum(expert_sample_weights),
+            )
 
-        expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
-        expert_accuracy = tf.reduce_mean(
-            tf.cast(expert_pred == expert_action_indices, tf.float32)
-        )
+            expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
+            expert_accuracy = tf.reduce_mean(
+                tf.cast(expert_pred == expert_action_indices, tf.float32)
+            )
+        else:
+            expert_loss = tf.constant(0.0, dtype=tf.float32)
+            expert_accuracy = tf.constant(0.0, dtype=tf.float32)
 
         total_policy_loss = ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
 
@@ -263,10 +276,20 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, exper
 
 
 def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
+    use_expert = expert_iter is not None
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
-            expert_batch = next(expert_iter)
-            step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef, expert_coef)
+            if use_expert:
+                expert_batch = next(expert_iter)
+                step_out = train_step(
+                    p_model, v_model, online_batch,
+                    entropy_coef, expert_coef, True, expert_batch,
+                )
+            else:
+                step_out = train_step(
+                    p_model, v_model, online_batch,
+                    entropy_coef, expert_coef, False,
+                )
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
                 return step_out
@@ -405,9 +428,17 @@ def main(argv):
         config=config,
     )
 
-    expert_dataset = FlatPretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
-    expert_iter = iter(expert_dataset)
-    print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
+    if os.path.exists(expert_dataset_path):
+        expert_dataset = FlatPretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
+        expert_iter = iter(expert_dataset)
+        print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
+    else:
+        expert_iter = None
+        print(
+            f"No expert dataset found at {expert_dataset_path}; "
+            f"running PPO without expert anchoring",
+            flush=True,
+        )
 
     return_var = float(loaded_return_scale) ** 2
     return_var_decay = 0.99
