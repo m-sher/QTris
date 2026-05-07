@@ -21,7 +21,7 @@ max_len = 15
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 128
+num_collection_steps = 256
 queue_size = 5
 max_holes = 50
 max_height = 18
@@ -43,12 +43,12 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
+entropy_coef = 0.02
 temperature = 1.0
 
-target_kl = 0.04
+target_kl = 0.03
 
-expert_coef = 1.0
+expert_coef = 0.5
 expert_dataset_path = "../tetris_expert_dataset_b2b"
 
 config = {
