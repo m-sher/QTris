@@ -167,7 +167,7 @@ def main():
     num_steps = 200_000
     seed = 0
 
-    search_depth = 7
+    search_depth = 8
     beam_width = 96
     queue_size = 5
     max_len = 15
