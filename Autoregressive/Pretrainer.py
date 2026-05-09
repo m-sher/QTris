@@ -1,13 +1,15 @@
 from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel, ValueModel
+import argparse
 import os
 import tensorflow as tf
 from tensorflow import keras
 
 
 class Pretrainer:
-    def __init__(self, dataset_path="../tetris_expert_dataset_b2b"):
+    def __init__(self, dataset_path="../tetris_expert_dataset_b2b", policy_only=False):
         self._dataset_path = dataset_path
+        self._policy_only = policy_only
         self._scc = keras.losses.SparseCategoricalCrossentropy(
             from_logits=True, reduction="none"
         )
@@ -34,19 +36,20 @@ class Pretrainer:
                 "Regenerate with the current DataGen.py."
             )
 
-        all_returns = tf.concat(
-            [batch["returns"] for batch in dataset.batch(100_000)],
-            axis=0,
-        )
-        return_mean = tf.reduce_mean(all_returns)
-        return_std = tf.math.reduce_std(all_returns)
-        scale = tf.maximum(return_std, 1.0)
-        self._return_scale.assign(scale)
-        print(
-            f"Return stats: mean={float(return_mean):.3f}, "
-            f"std={float(return_std):.3f}, value-head scale={float(scale):.3f}",
-            flush=True,
-        )
+        if not self._policy_only:
+            all_returns = tf.concat(
+                [batch["returns"] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            return_mean = tf.reduce_mean(all_returns)
+            return_std = tf.math.reduce_std(all_returns)
+            scale = tf.maximum(return_std, 1.0)
+            self._return_scale.assign(scale)
+            print(
+                f"Return stats: mean={float(return_mean):.3f}, "
+                f"std={float(return_std):.3f}, value-head scale={float(scale):.3f}",
+                flush=True,
+            )
 
         cached = dataset.cache()
         for _ in cached:
@@ -90,7 +93,6 @@ class Pretrainer:
         actions = batch["actions"]
         masks = batch["masks"]
         sample_weights = batch["sample_weights"]
-        returns = batch["returns"]
 
         input_seq = actions[:, :-1]
         target_seq = actions[:, 1:]
@@ -125,6 +127,10 @@ class Pretrainer:
             tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
         )
 
+        if self._policy_only:
+            return policy_loss, accuracy, tf.constant(0.0, dtype=tf.float32)
+
+        returns = batch["returns"]
         with tf.GradientTape() as v_tape:
             values = v_model((board, pieces, bcg), training=True)
             targets = tf.reshape(returns / self._return_scale, (-1, 1))
@@ -144,12 +150,18 @@ class Pretrainer:
     def train(
         self,
         p_model,
-        v_model,
+        v_model=None,
         epochs=10,
         batch_size=256,
         p_checkpoint_manager=None,
         v_checkpoint_manager=None,
     ):
+        if not self._policy_only and v_model is None:
+            raise ValueError(
+                "v_model is required unless Pretrainer was constructed "
+                "with policy_only=True."
+            )
+
         dataset = self._load_dataset(batch_size=batch_size)
 
         for epoch in range(epochs):
@@ -159,19 +171,38 @@ class Pretrainer:
                     p_model, v_model, batch
                 )
                 if step % 100 == 0:
-                    print(
-                        f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
-                        f"Acc: {float(accuracy):1.3f} | "
-                        f"Value: {float(value_loss):2.3f}",
-                        flush=True,
-                    )
+                    if self._policy_only:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Value: {float(value_loss):2.3f}",
+                            flush=True,
+                        )
             if p_checkpoint_manager is not None:
                 p_checkpoint_manager.save()
-            if v_checkpoint_manager is not None:
+            if v_checkpoint_manager is not None and not self._policy_only:
                 v_checkpoint_manager.save()
 
 
 def main():
+    ap = argparse.ArgumentParser(
+        description="Pretrain the autoregressive policy (and optionally the "
+                    "value head)."
+    )
+    ap.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Train only the policy head; skip building, loading, and "
+             "training the value model.",
+    )
+    args = ap.parse_args()
+
     piece_dim = 8
     key_dim = 12
     depth = 64
@@ -194,20 +225,22 @@ def main():
         output_dim=key_dim,
     )
 
-    v_model = ValueModel(
-        piece_dim=piece_dim,
-        depth=depth,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout_rate=dropout_rate,
-        output_dim=1,
-    )
-
     p_optimizer = keras.optimizers.Adam(3e-4)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    v_optimizer = keras.optimizers.Adam(3e-4)
-    v_model.compile(optimizer=v_optimizer, jit_compile=True)
+    v_model = None
+    v_optimizer = None
+    if not args.policy_only:
+        v_model = ValueModel(
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=1,
+        )
+        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_model.compile(optimizer=v_optimizer, jit_compile=True)
     print("Initialized models and optimizers.", flush=True)
 
     p_model(
@@ -218,15 +251,16 @@ def main():
             keras.Input(shape=(max_len,), dtype=tf.int64),
         )
     )
-    v_model(
-        (
-            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
-            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
-            keras.Input(shape=(3,), dtype=tf.float32),
-        )
-    )
     p_model.summary()
-    v_model.summary()
+    if v_model is not None:
+        v_model(
+            (
+                keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+                keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+                keras.Input(shape=(3,), dtype=tf.float32),
+            )
+        )
+        v_model.summary()
 
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(
@@ -236,23 +270,27 @@ def main():
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    pretrainer = Pretrainer()
+    pretrainer = Pretrainer(policy_only=args.policy_only)
 
-    v_checkpoint = tf.train.Checkpoint(
-        model=v_model,
-        optimizer=v_optimizer,
-        return_scale=pretrainer._return_scale,
-    )
-    v_checkpoint_manager = tf.train.CheckpointManager(
-        v_checkpoint, "./pretrained_value_checkpoints", max_to_keep=3
-    )
-    if v_checkpoint_manager.latest_checkpoint:
-        v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
-        print(
-            f"Restored pretrained value checkpoint "
-            f"(return_scale={float(pretrainer._return_scale):.3f}).",
-            flush=True,
+    v_checkpoint_manager = None
+    if v_model is not None:
+        v_checkpoint = tf.train.Checkpoint(
+            model=v_model,
+            optimizer=v_optimizer,
+            return_scale=pretrainer._return_scale,
         )
+        v_checkpoint_manager = tf.train.CheckpointManager(
+            v_checkpoint, "./pretrained_value_checkpoints", max_to_keep=3
+        )
+        if v_checkpoint_manager.latest_checkpoint:
+            v_checkpoint.restore(
+                v_checkpoint_manager.latest_checkpoint
+            ).expect_partial()
+            print(
+                f"Restored pretrained value checkpoint "
+                f"(return_scale={float(pretrainer._return_scale):.3f}).",
+                flush=True,
+            )
 
     pretrainer.train(
         p_model,
