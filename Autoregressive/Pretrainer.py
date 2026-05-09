@@ -127,8 +127,30 @@ class Pretrainer:
             tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
         )
 
+        # Top-3 on decision tokens. Robust to "equivalent key sequence"
+        # label noise — when two prefixes both reach the same final
+        # placement (e.g. left-rotate vs rotate-left), DataGen records one
+        # canonically and top-1 marks the other "wrong" even though it's
+        # equally valid. Top-3 accepts the equivalent token in the top
+        # candidates and tracks how often the right answer is *ranked*
+        # well, which is closer to what placement-level decoding cares
+        # about.
+        last_dim = tf.shape(masked_logits)[-1]
+        flat_logits = tf.reshape(masked_logits, [-1, last_dim])
+        flat_targets = tf.reshape(target_seq, [-1])
+        top3_flat = tf.math.in_top_k(flat_logits, flat_targets, k=3)
+        top3 = tf.cast(
+            tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32
+        ) * decision_mask
+        accuracy_top3 = tf.math.divide_no_nan(
+            tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
+        )
+
         if self._policy_only:
-            return policy_loss, accuracy, tf.constant(0.0, dtype=tf.float32)
+            return (
+                policy_loss, accuracy, accuracy_top3,
+                tf.constant(0.0, dtype=tf.float32),
+            )
 
         returns = batch["returns"]
         with tf.GradientTape() as v_tape:
@@ -145,7 +167,7 @@ class Pretrainer:
             zip(v_gradients, v_model.trainable_variables)
         )
 
-        return policy_loss, accuracy, value_loss
+        return policy_loss, accuracy, accuracy_top3, value_loss
 
     def train(
         self,
@@ -167,20 +189,22 @@ class Pretrainer:
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
-                policy_loss, accuracy, value_loss = self._train_step(
-                    p_model, v_model, batch
+                policy_loss, accuracy, accuracy_top3, value_loss = (
+                    self._train_step(p_model, v_model, batch)
                 )
                 if step % 100 == 0:
                     if self._policy_only:
                         print(
                             f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
-                            f"Acc: {float(accuracy):1.3f}",
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f}",
                             flush=True,
                         )
                     else:
                         print(
                             f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
                             f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f} | "
                             f"Value: {float(value_loss):2.3f}",
                             flush=True,
                         )
