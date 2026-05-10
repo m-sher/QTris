@@ -6,6 +6,10 @@ import tensorflow as tf
 from tensorflow import keras
 
 
+RETURN_CLIP_LOW = -150.0
+RETURN_CLIP_HIGH = 100.0
+
+
 class Pretrainer:
     def __init__(self, dataset_path="../tetris_expert_dataset_b2b", policy_only=False):
         self._dataset_path = dataset_path
@@ -19,19 +23,30 @@ class Pretrainer:
 
     @staticmethod
     def _surge_correction(b2b):
-        """Add back the contribution of the removed surge potential to G_t.
+        """Add back the recoverable part of the removed surge potential.
 
-        The dataset's `returns` were computed under the old env where
-        ``φ`` included ``surge_coef * (1.15^b2b - 1)`` for ``b2b >= 4``.
-        The new env has ``surge_coef = 0``; potential-shaping
-        telescoping then shifts G_t by approximately
-        ``+(1.15^b2b - 1)`` at the state V predicts for. The
-        post-terminal contribution is assumed negligible (deaths
-        typically occur at low b2b).
+        Old env had ``φ`` with a ``surge_coef * (1.15^b2b - 1)`` term;
+        new env removes it. Potential-shaping telescoping gives:
+
+            G_new − G_old ≈ surge(b_{t-1}) − γ^{T-t+1} · surge(b_T)
+
+        We can recover the first term exactly (b2b at the predicted
+        state is in the dataset). The second term requires per-trajectory
+        metadata we don't store, and explodes for trajectories where the
+        beam expert chained b2b to extreme magnitudes (e.g. b2b > 100,
+        where 1.15^b2b reaches 10^6+). The residual is bounded
+        downstream by clipping the corrected returns to the range
+        the new env can actually produce.
         """
         b2b = tf.cast(b2b, tf.float32)
         surge_lines = tf.where(b2b >= 4.0, b2b, tf.zeros_like(b2b))
         return tf.pow(1.15, surge_lines) - 1.0
+
+    @staticmethod
+    def _correct_and_clip(returns, b2b):
+        """Apply surge correction then clip to new-env reachable range."""
+        corrected = returns + Pretrainer._surge_correction(b2b)
+        return tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
     def _load_dataset(self, batch_size):
         if not os.path.exists(self._dataset_path):
@@ -61,17 +76,25 @@ class Pretrainer:
                 [batch["b2b_combo_garbage"][..., 0] for batch in dataset.batch(100_000)],
                 axis=0,
             )
-            corrected_returns = all_returns + self._surge_correction(all_b2b)
+            corrected = all_returns + self._surge_correction(all_b2b)
+            clipped = tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
-            raw_mean = tf.reduce_mean(all_returns)
-            raw_std = tf.math.reduce_std(all_returns)
-            corr_mean = tf.reduce_mean(corrected_returns)
-            corr_std = tf.math.reduce_std(corrected_returns)
-            scale = tf.maximum(corr_std, 1.0)
+            n_total = tf.cast(tf.size(all_returns), tf.float32)
+            n_clipped_low = tf.reduce_sum(tf.cast(corrected < RETURN_CLIP_LOW, tf.float32))
+            n_clipped_high = tf.reduce_sum(tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32))
+            frac_clipped = (n_clipped_low + n_clipped_high) / n_total
+            max_b2b = tf.reduce_max(all_b2b)
+
+            clip_mean = tf.reduce_mean(clipped)
+            clip_std = tf.math.reduce_std(clipped)
+            scale = tf.maximum(clip_std, 1.0)
             self._return_scale.assign(scale)
             print(
-                f"Returns | raw: mean={float(raw_mean):.3f} std={float(raw_std):.3f} "
-                f"| surge-corrected: mean={float(corr_mean):.3f} std={float(corr_std):.3f} "
+                f"Returns | n={int(n_total)} | max_b2b in dataset={float(max_b2b):.0f} "
+                f"| clipped to [{RETURN_CLIP_LOW:.0f}, {RETURN_CLIP_HIGH:.0f}]: "
+                f"{float(n_clipped_low):.0f} low + {float(n_clipped_high):.0f} high "
+                f"({100.0 * float(frac_clipped):.2f}%) "
+                f"| post: mean={float(clip_mean):.3f} std={float(clip_std):.3f} "
                 f"| value-head scale={float(scale):.3f}",
                 flush=True,
             )
@@ -177,7 +200,7 @@ class Pretrainer:
                 tf.constant(0.0, dtype=tf.float32),
             )
 
-        returns = batch["returns"] + self._surge_correction(bcg[..., 0])
+        returns = self._correct_and_clip(batch["returns"], bcg[..., 0])
         with tf.GradientTape() as v_tape:
             values = v_model((board, pieces, bcg), training=True)
             targets = tf.reshape(returns / self._return_scale, (-1, 1))
