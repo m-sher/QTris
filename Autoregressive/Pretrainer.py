@@ -17,6 +17,22 @@ class Pretrainer:
             1.0, trainable=False, dtype=tf.float32, name="return_scale"
         )
 
+    @staticmethod
+    def _surge_correction(b2b):
+        """Add back the contribution of the removed surge potential to G_t.
+
+        The dataset's `returns` were computed under the old env where
+        ``φ`` included ``surge_coef * (1.15^b2b - 1)`` for ``b2b >= 4``.
+        The new env has ``surge_coef = 0``; potential-shaping
+        telescoping then shifts G_t by approximately
+        ``+(1.15^b2b - 1)`` at the state V predicts for. The
+        post-terminal contribution is assumed negligible (deaths
+        typically occur at low b2b).
+        """
+        b2b = tf.cast(b2b, tf.float32)
+        surge_lines = tf.where(b2b >= 4.0, b2b, tf.zeros_like(b2b))
+        return tf.pow(1.15, surge_lines) - 1.0
+
     def _load_dataset(self, batch_size):
         if not os.path.exists(self._dataset_path):
             raise FileNotFoundError(
@@ -41,13 +57,22 @@ class Pretrainer:
                 [batch["returns"] for batch in dataset.batch(100_000)],
                 axis=0,
             )
-            return_mean = tf.reduce_mean(all_returns)
-            return_std = tf.math.reduce_std(all_returns)
-            scale = tf.maximum(return_std, 1.0)
+            all_b2b = tf.concat(
+                [batch["b2b_combo_garbage"][..., 0] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            corrected_returns = all_returns + self._surge_correction(all_b2b)
+
+            raw_mean = tf.reduce_mean(all_returns)
+            raw_std = tf.math.reduce_std(all_returns)
+            corr_mean = tf.reduce_mean(corrected_returns)
+            corr_std = tf.math.reduce_std(corrected_returns)
+            scale = tf.maximum(corr_std, 1.0)
             self._return_scale.assign(scale)
             print(
-                f"Return stats: mean={float(return_mean):.3f}, "
-                f"std={float(return_std):.3f}, value-head scale={float(scale):.3f}",
+                f"Returns | raw: mean={float(raw_mean):.3f} std={float(raw_std):.3f} "
+                f"| surge-corrected: mean={float(corr_mean):.3f} std={float(corr_std):.3f} "
+                f"| value-head scale={float(scale):.3f}",
                 flush=True,
             )
 
@@ -152,7 +177,7 @@ class Pretrainer:
                 tf.constant(0.0, dtype=tf.float32),
             )
 
-        returns = batch["returns"]
+        returns = batch["returns"] + self._surge_correction(bcg[..., 0])
         with tf.GradientTape() as v_tape:
             values = v_model((board, pieces, bcg), training=True)
             targets = tf.reshape(returns / self._return_scale, (-1, 1))
