@@ -94,7 +94,17 @@ def collect_dagger(
     max_b2b = 0
     policy_disagrees = 0
 
-    def flush(buf, is_death):
+    def flush(buf, death_kind):
+        # death_kind is one of:
+        #   "beam_fail"    – beam returned action_idx < 0 from a buffered
+        #                    state; the tail is genuinely unrecoverable, so
+        #                    trim like DataGen.
+        #   "policy_fail"  – env signalled terminal while every recorded
+        #                    state had a beam-valid label; those tail
+        #                    transitions are exactly the high-signal
+        #                    correction examples DAgger exists to harvest,
+        #                    so keep them all.
+        #   "graceful_end" – ran out of num_steps mid-episode. Not a death.
         if not buf:
             return
         returns_arr = np.zeros(len(buf), dtype=np.float32)
@@ -105,7 +115,7 @@ def collect_dagger(
             last = r + gamma * last * (1.0 - d)
             returns_arr[t] = last
 
-        if is_death:
+        if death_kind == "beam_fail":
             kept_count = (
                 len(buf) - death_trim_count
                 if len(buf) > death_trim_count else 0
@@ -159,8 +169,8 @@ def collect_dagger(
 
         if action_idx < 0:
             # Beam can't label this state (no valid placements).
-            # Treat as terminal: flush as death and reset.
-            flush(episode_buf, is_death=True)
+            # Treat as terminal: flush as beam-fail death and reset.
+            flush(episode_buf, death_kind="beam_fail")
             episode_buf = []
             beam_dead += 1
             deaths += 1
@@ -181,7 +191,7 @@ def collect_dagger(
             unmatched += 1
             time_step = env._step(policy_seq)
             if time_step.is_last():
-                flush(episode_buf, is_death=True)
+                flush(episode_buf, death_kind="policy_fail")
                 episode_buf = []
                 deaths += 1
                 time_step = env.reset()
@@ -205,7 +215,7 @@ def collect_dagger(
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
         if done:
-            flush(episode_buf, is_death=True)
+            flush(episode_buf, death_kind="policy_fail")
             episode_buf = []
             deaths += 1
             time_step = env.reset()
@@ -223,7 +233,7 @@ def collect_dagger(
                 flush=True,
             )
 
-    flush(episode_buf, is_death=False)
+    flush(episode_buf, death_kind="graceful_end")
     return transitions, unmatched, beam_dead, deaths, max_b2b, policy_disagrees
 
 
