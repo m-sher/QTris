@@ -138,7 +138,7 @@ class Pretrainer:
         last_dim = tf.shape(masked_logits)[-1]
         flat_logits = tf.reshape(masked_logits, [-1, last_dim])
         flat_targets = tf.reshape(target_seq, [-1])
-        top3_flat = tf.math.in_top_k(flat_logits, flat_targets, k=3)
+        top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
         top3 = tf.cast(
             tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32
         ) * decision_mask
