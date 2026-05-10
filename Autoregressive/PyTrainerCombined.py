@@ -49,7 +49,7 @@ temperature = 1.0
 
 target_kl = 0.03
 
-expert_coef = 0.5
+expert_coef = 0.1
 expert_dataset_path = "../tetris_expert_dataset_b2b"
 
 config = {
