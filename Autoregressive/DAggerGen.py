@@ -1,25 +1,25 @@
-"""DAgger-style data collection for the autoregressive Tetris policy.
+"""DAgger-style data collection for the Tetris policy.
 
-Rolls the trained policy forward in env, queries beam search at each
-visited state for the expert action, and records (state, beam_seq)
-pairs with the same schema as DataGen.py so transitions accumulate
-seamlessly across BC + DAgger rounds in a single dataset.
+Supports both ``ar`` (autoregressive) and ``flat`` policy variants via
+``--mode``. In either case the loop is:
 
-Distinction from DataGen.py:
-- DataGen has BEAM play; (state, beam_action) are co-trajectory.
+  * Roll the trained policy forward in env.
+  * At each visited state, query beam search for the expert label.
+  * Step the env with the POLICY's choice (the DAgger invariant — this
+    is what shifts the visited-state distribution toward what the policy
+    actually sees in deployment).
+  * Record (state, beam_label) in the dataset.
+
+Output schema mirrors DataGen / DataGenFlat exactly so transitions
+accumulate seamlessly across BC + DAgger rounds in a single dataset.
+
+Distinction from DataGen / DataGenFlat:
+- DataGen* has BEAM play; (state, beam_action) are co-trajectory.
 - DAggerGen has POLICY play; we ASK beam what it would do at each
   visited state but step the env with the policy's choice. This shifts
   the state distribution toward what the policy actually visits in
   deployment, which is the canonical fix for compounding-error in BC
   on long-horizon, fragile-strategy games (Ross & Bagnell, 2010).
-
-Output schema matches DataGen exactly:
-  {boards, pieces, b2b_combo_garbage, actions, masks, sample_weights, returns}
-where `actions` is BEAM's expert sequence (the supervised label) and
-`masks` is built around BEAM's sequence — the env transitions used to
-generate `returns` reflect the policy's actual rollout, so subsequent
-re-pretraining sees both the corrected labels and the on-policy
-trajectory statistics.
 """
 
 import argparse
@@ -32,12 +32,31 @@ from tensorflow import keras
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
+from TetrisEnv.Moves import Keys
 from TetrisModel import PolicyModel
+from TetrisModelFlat import FlatPolicyModel
 from DataGen import _build_mask
+
+
+HARD_DROP_ID = Keys.HARD_DROP
+
+
+def _make_flat_mask(valid_sequences):
+    """1D placement-validity mask (matches DataGenFlat.py)."""
+    return np.any(valid_sequences == HARD_DROP_ID, axis=-1)
+
+
+def _flat_action_idx(beam_seq, valid_sequences):
+    """Scalar index into valid_sequences matching beam_seq, or -1."""
+    matches = np.all(valid_sequences == beam_seq[None, :], axis=-1)
+    if not np.any(matches):
+        return -1
+    return int(np.argmax(matches))
 
 
 def collect_dagger(
     p_model,
+    mode,
     seed,
     num_steps,
     search_depth,
@@ -63,6 +82,9 @@ def collect_dagger(
     under valid-sequence masking). Beam is queried only to provide the
     label that gets appended to the dataset; beam's choice does NOT
     drive env transitions.
+
+    ``mode`` is ``"ar"`` or ``"flat"`` and controls only the label /
+    mask format stored per transition. The rollout itself is identical.
     """
     env = PyTetrisEnv(
         queue_size=queue_size,
@@ -124,9 +146,9 @@ def collect_dagger(
             kept_count = len(buf)
 
         for t in range(kept_count):
-            board, pieces, bcg, sequence, mask, sample_weight, _r, _d = buf[t]
+            board, pieces, bcg, label, mask, sample_weight, _r, _d = buf[t]
             transitions.append(
-                (board, pieces, bcg, sequence, mask, sample_weight, returns_arr[t])
+                (board, pieces, bcg, label, mask, sample_weight, returns_arr[t])
             )
 
     for step in range(num_steps):
@@ -138,6 +160,9 @@ def collect_dagger(
 
         # Policy's greedy choice in this state — under valid-sequence
         # masking the model never emits a sequence the env can't replay.
+        # PolicyModel and FlatPolicyModel share the same predict()
+        # signature: both return (selected_sequence, ...) as the first
+        # tuple element regardless of internal factorization.
         b_in = tf.constant(board[None, ...], dtype=tf.float32)
         p_in = tf.constant(pieces[None, ...], dtype=tf.int64)
         g_in = tf.constant(bcg[None, ...], dtype=tf.float32)
@@ -179,27 +204,42 @@ def collect_dagger(
 
         beam_seq = beam_seq.astype(np.int64)
 
-        # Sanity: beam's sequence should appear in valid_sequences.
-        # If not (rare; same case as DataGen's `unmatched`), we can't
-        # build a clean per-position mask, so skip recording. Still
-        # step the env with the policy's choice — that's the DAgger
-        # invariant; we want the policy's state distribution.
-        beam_in_valid = np.any(
-            np.all(valid_sequences == beam_seq[None, :], axis=-1)
-        )
-        if not beam_in_valid:
-            unmatched += 1
-            time_step = env._step(policy_seq)
-            if time_step.is_last():
-                flush(episode_buf, death_kind="policy_fail")
-                episode_buf = []
-                deaths += 1
-                time_step = env.reset()
-            continue
-
-        # Build the per-position validity mask around BEAM's sequence,
-        # since beam_seq is what the model will be teacher-forced on.
-        mask = _build_mask(beam_seq, valid_sequences, max_len, key_dim)
+        # Build the per-mode label/mask around BEAM's sequence (the
+        # supervised target). For AR we record the full key sequence
+        # plus the per-position next-token mask; for flat we collapse
+        # to the scalar placement index plus the 1D HARD_DROP-presence
+        # mask. If beam's sequence isn't present in valid_sequences
+        # (rare; same case as DataGen's `unmatched`), we can't build a
+        # clean label, so skip recording. Still step the env with the
+        # policy's choice — that's the DAgger invariant.
+        if mode == "ar":
+            beam_in_valid = np.any(
+                np.all(valid_sequences == beam_seq[None, :], axis=-1)
+            )
+            if not beam_in_valid:
+                unmatched += 1
+                time_step = env._step(policy_seq)
+                if time_step.is_last():
+                    flush(episode_buf, death_kind="policy_fail")
+                    episode_buf = []
+                    deaths += 1
+                    time_step = env.reset()
+                continue
+            label = beam_seq
+            mask = _build_mask(beam_seq, valid_sequences, max_len, key_dim)
+        else:  # flat
+            flat_idx = _flat_action_idx(beam_seq, valid_sequences)
+            if flat_idx < 0:
+                unmatched += 1
+                time_step = env._step(policy_seq)
+                if time_step.is_last():
+                    flush(episode_buf, death_kind="policy_fail")
+                    episode_buf = []
+                    deaths += 1
+                    time_step = env.reset()
+                continue
+            label = np.int64(flat_idx)
+            mask = _make_flat_mask(valid_sequences)
 
         # Step env with POLICY's choice (DAgger invariant).
         time_step = env._step(policy_seq)
@@ -210,7 +250,7 @@ def collect_dagger(
             policy_disagrees += 1
 
         episode_buf.append(
-            (board, pieces, bcg, beam_seq, mask, np.float32(search_depth), reward, done)
+            (board, pieces, bcg, label, mask, np.float32(search_depth), reward, done)
         )
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
@@ -237,22 +277,77 @@ def collect_dagger(
     return transitions, unmatched, beam_dead, deaths, max_b2b, policy_disagrees
 
 
+def _build_ar_model(args):
+    p_model = PolicyModel(
+        batch_size=1,
+        piece_dim=args.piece_dim,
+        key_dim=args.key_dim,
+        depth=args.depth,
+        max_len=args.max_len,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout_rate=args.dropout_rate,
+        output_dim=args.key_dim,
+    )
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(args.max_len,), dtype=tf.int64),
+        )
+    )
+    return p_model
+
+
+def _build_flat_model(args):
+    num_sequences = 160 * args.num_row_tiers
+    p_model = FlatPolicyModel(
+        batch_size=1,
+        piece_dim=args.piece_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout_rate=args.dropout_rate,
+        num_sequences=num_sequences,
+    )
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
+    return p_model
+
+
 def main():
     ap = argparse.ArgumentParser(
-        description="DAgger collection for the AR policy. Rolls the "
-                    "policy in env, queries beam at each visited "
-                    "state, appends (state, beam_action) pairs to "
-                    "the existing pretrain dataset.",
+        description="DAgger collection for the AR or flat policy. Rolls "
+                    "the policy in env, queries beam at each visited "
+                    "state, appends (state, beam_action) pairs to the "
+                    "existing pretrain dataset.",
     )
     ap.add_argument(
-        "--policy-checkpoint", type=str, default="./pretrained_checkpoints/",
+        "--mode",
+        choices=["ar", "flat"],
+        default="ar",
+        help="Policy variant. 'ar' uses TetrisModel.PolicyModel + AR "
+             "dataset schema; 'flat' uses TetrisModelFlat.FlatPolicyModel "
+             "+ flat dataset schema.",
+    )
+    ap.add_argument(
+        "--policy-checkpoint", type=str, default=None,
         help="Path to a tf.train.CheckpointManager directory containing "
-             "the AR PolicyModel checkpoint to roll out.",
+             "the PolicyModel checkpoint to roll out. Defaults: "
+             "./pretrained_checkpoints/ (ar) or "
+             "./pretrained_flat_policy_checkpoints/ (flat).",
     )
     ap.add_argument(
-        "--dataset-path", type=str, default="../tetris_expert_dataset_b2b",
-        help="Dataset path to APPEND DAgger transitions into. Must "
-             "share the schema written by DataGen.py.",
+        "--dataset-path", type=str, default=None,
+        help="Dataset path to APPEND DAgger transitions into. Defaults: "
+             "../tetris_expert_dataset_b2b (ar) or "
+             "../tetris_expert_dataset_flat (flat).",
     )
     ap.add_argument("--num-steps", type=int, default=100_000)
     ap.add_argument("--seed", type=int, default=10_000_000,
@@ -282,36 +377,38 @@ def main():
     ap.add_argument("--log-every", type=int, default=1000)
     args = ap.parse_args()
 
-    p_model = PolicyModel(
-        batch_size=1,
-        piece_dim=args.piece_dim,
-        key_dim=args.key_dim,
-        depth=args.depth,
-        max_len=args.max_len,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        dropout_rate=args.dropout_rate,
-        output_dim=args.key_dim,
-    )
-    # Build the model so the checkpoint's weights have something to
-    # restore into. Match the input signature used at pretrain time.
-    p_model(
-        (
-            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
-            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
-            keras.Input(shape=(3,), dtype=tf.float32),
-            keras.Input(shape=(args.max_len,), dtype=tf.int64),
-        )
-    )
+    mode_defaults = {
+        "ar": {
+            "policy_checkpoint": "./pretrained_checkpoints/",
+            "dataset_path": "../tetris_expert_dataset_b2b",
+            "label_key": "actions",
+            "mask_key": "masks",
+            "build_model": _build_ar_model,
+        },
+        "flat": {
+            "policy_checkpoint": "./pretrained_flat_policy_checkpoints/",
+            "dataset_path": "../tetris_expert_dataset_flat",
+            "label_key": "action_indices",
+            "mask_key": "valid_masks",
+            "build_model": _build_flat_model,
+        },
+    }
+    cfg = mode_defaults[args.mode]
+    policy_checkpoint = args.policy_checkpoint or cfg["policy_checkpoint"]
+    dataset_path = args.dataset_path or cfg["dataset_path"]
+    label_key = cfg["label_key"]
+    mask_key = cfg["mask_key"]
+
+    p_model = cfg["build_model"](args)
 
     p_checkpoint = tf.train.Checkpoint(model=p_model)
     p_checkpoint_manager = tf.train.CheckpointManager(
-        p_checkpoint, args.policy_checkpoint, max_to_keep=3,
+        p_checkpoint, policy_checkpoint, max_to_keep=3,
     )
     if p_checkpoint_manager.latest_checkpoint is None:
         print(
-            f"ERROR: no policy checkpoint at {args.policy_checkpoint}. "
-            f"Pretrain via Pretrainer.py first.",
+            f"ERROR: no policy checkpoint at {policy_checkpoint}. "
+            f"Pretrain via {'Pretrainer.py' if args.mode == 'ar' else 'PretrainFlat.py'} first.",
             flush=True,
         )
         return 1
@@ -319,20 +416,20 @@ def main():
         p_checkpoint_manager.latest_checkpoint
     ).expect_partial()
     print(
-        f"Restored AR policy from {p_checkpoint_manager.latest_checkpoint}",
+        f"Restored {args.mode} policy from {p_checkpoint_manager.latest_checkpoint}",
         flush=True,
     )
 
     existing_count = 0
     existing = None
-    if os.path.exists(args.dataset_path):
+    if os.path.exists(dataset_path):
         try:
-            existing_ds = tf.data.Dataset.load(args.dataset_path)
+            existing_ds = tf.data.Dataset.load(dataset_path)
             existing = {
                 k: v.numpy()
                 for k, v in next(iter(existing_ds.batch(10_000_000))).items()
             }
-            existing_count = len(existing["actions"])
+            existing_count = len(existing[label_key])
             if "returns" not in existing:
                 print(
                     "Existing dataset has no `returns` field — starting "
@@ -358,6 +455,7 @@ def main():
     new_transitions, unmatched, beam_dead, deaths, max_b2b, policy_disagrees = (
         collect_dagger(
             p_model=p_model,
+            mode=args.mode,
             seed=args.seed + existing_count,
             num_steps=args.num_steps,
             search_depth=args.search_depth,
@@ -394,8 +492,12 @@ def main():
     boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    actions = np.stack([t[3] for t in new_transitions]).astype(np.int64)
-    masks = np.stack([t[4] for t in new_transitions]).astype(bool)
+    if args.mode == "ar":
+        labels = np.stack([t[3] for t in new_transitions]).astype(np.int64)
+        masks = np.stack([t[4] for t in new_transitions]).astype(bool)
+    else:
+        labels = np.array([t[3] for t in new_transitions]).astype(np.int64)
+        masks = np.stack([t[4] for t in new_transitions]).astype(bool)
     sample_weights = np.array([t[5] for t in new_transitions]).astype(np.float32)
     returns = np.array([t[6] for t in new_transitions]).astype(np.float32)
 
@@ -403,8 +505,8 @@ def main():
         boards = np.concatenate([existing["boards"], boards])
         pieces = np.concatenate([existing["pieces"], pieces])
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        actions = np.concatenate([existing["actions"], actions])
-        masks = np.concatenate([existing["masks"], masks])
+        labels = np.concatenate([existing[label_key], labels])
+        masks = np.concatenate([existing[mask_key], masks])
         existing_weights = existing.get(
             "sample_weights",
             np.ones(existing_count, dtype=np.float32),
@@ -413,26 +515,26 @@ def main():
         returns = np.concatenate([existing["returns"], returns])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} "
-            f"new = {len(actions)} total",
+            f"new = {len(labels)} total",
             flush=True,
         )
 
-    if os.path.exists(args.dataset_path):
-        shutil.rmtree(args.dataset_path)
+    if os.path.exists(dataset_path):
+        shutil.rmtree(dataset_path)
 
     dataset = tf.data.Dataset.from_tensor_slices(
         {
             "boards": boards,
             "pieces": pieces,
             "b2b_combo_garbage": bcg,
-            "actions": actions,
-            "masks": masks,
+            label_key: labels,
+            mask_key: masks,
             "sample_weights": sample_weights,
             "returns": returns,
         }
     )
-    dataset.save(args.dataset_path)
-    print(f"Saved {len(actions)} transitions to {args.dataset_path}", flush=True)
+    dataset.save(dataset_path)
+    print(f"Saved {len(labels)} transitions to {dataset_path}", flush=True)
     return 0
 
 
