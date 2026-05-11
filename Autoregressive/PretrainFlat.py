@@ -279,8 +279,7 @@ def main():
             num_heads=num_heads,
             num_layers=num_layers,
             dropout_rate=dropout_rate,
-            output_dim=1,
-            output_activation=None,
+            output_dim=1
         )
         v_optimizer = keras.optimizers.Adam(3e-4)
         v_model.compile(optimizer=v_optimizer, jit_compile=True)
