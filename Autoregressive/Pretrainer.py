@@ -175,14 +175,12 @@ class Pretrainer:
             tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
         )
 
-        # Top-3 on decision tokens. Robust to "equivalent key sequence"
-        # label noise — when two prefixes both reach the same final
-        # placement (e.g. left-rotate vs rotate-left), DataGen records one
-        # canonically and top-1 marks the other "wrong" even though it's
-        # equally valid. Top-3 accepts the equivalent token in the top
-        # candidates and tracks how often the right answer is *ranked*
-        # well, which is closer to what placement-level decoding cares
-        # about.
+        # Top-3 on decision tokens. Tracks how well the right answer is
+        # ranked, not just whether it's #1. Useful diagnostic for whether
+        # the model "knows about" the correct token even when not
+        # selecting it greedily — especially helpful early in training
+        # when Acc is low but the right token is consistently in the top
+        # few logits.
         last_dim = tf.shape(masked_logits)[-1]
         flat_logits = tf.reshape(masked_logits, [-1, last_dim])
         flat_targets = tf.reshape(target_seq, [-1])
