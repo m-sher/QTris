@@ -240,9 +240,9 @@ class PolicyModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
+        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
+        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.key_embedding = layers.Embedding(
@@ -541,9 +541,9 @@ class ValueModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
+        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
+        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.trunk_bcg = keras.Sequential(
@@ -727,9 +727,9 @@ class AsymmetricValueModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
+        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
+        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.trunk_a_bcg = keras.Sequential([
