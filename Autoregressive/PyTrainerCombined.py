@@ -156,7 +156,6 @@ def train_step(
         tf.cast(invalid_mask, tf.float32), axis=-1
     )  # (batch, max_len - 1)
     decision_mask = tf.cast(num_valid_actions > 1, tf.float32) * pad_mask
-    decisions_per_seq = tf.reduce_sum(decision_mask, axis=-1)  # (batch,)
 
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
@@ -188,40 +187,34 @@ def train_step(
         new_log_probs = tf.ensure_shape(
             masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
-
-        old_log_probs = log_probs_batch  # (batch, max_len - 1)
-
-        # Per-token PPO ratio and clipping: (batch, max_len - 1)
-        per_token_ratio = tf.exp(new_log_probs - old_log_probs)
-        per_token_clipped = tf.clip_by_value(
-            per_token_ratio, 1 - ppo_clip, 1 + ppo_clip
+        new_log_probs = tf.ensure_shape(
+            tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
 
-        surr1 = per_token_ratio * advantages_batch  # broadcasts (batch, 1) -> (batch, max_len - 1)
-        surr2 = per_token_clipped * advantages_batch
-
-        # Per-sequence PPO loss: average over decision tokens per sequence, then over batch
-        per_token_loss = tf.minimum(surr1, surr2) * decision_mask
-        per_seq_loss = tf.math.divide_no_nan(
-            tf.reduce_sum(per_token_loss, axis=-1), decisions_per_seq
-        )  # (batch,)
-        ppo_loss = -tf.reduce_mean(per_seq_loss)
-
-        # Per-sequence entropy: average over decision tokens per sequence, then over batch
-        per_token_entropy = tf.ensure_shape(
-            masked_dist.entropy(), (mini_batch_size, max_len - 1)
+        old_log_probs = tf.ensure_shape(
+            tf.reduce_sum(log_probs_batch * decision_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
-        per_seq_entropy = tf.math.divide_no_nan(
-            tf.reduce_sum(per_token_entropy * decision_mask, axis=-1), decisions_per_seq
-        )
-        entropy = tf.reduce_mean(per_seq_entropy)
 
-        # Per-sequence approx KL: average over decision tokens per sequence, then over batch
-        per_seq_kl = tf.math.divide_no_nan(
-            tf.reduce_sum((old_log_probs - new_log_probs) * decision_mask, axis=-1),
-            decisions_per_seq,
+        ratio = tf.ensure_shape(
+            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
         )
-        approx_kl = tf.reduce_mean(per_seq_kl)
+        clipped_ratio = tf.ensure_shape(
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
+            (mini_batch_size, 1),
+        )
+
+        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
+        surr2 = tf.ensure_shape(
+            clipped_ratio * advantages_batch, (mini_batch_size, 1)
+        )
+        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+
+        entropy = tf.reduce_mean(
+            tf.reduce_sum(masked_dist.entropy() * decision_mask, axis=-1)
+        )
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         if use_expert:
             expert_actions_batch = tf.ensure_shape(
@@ -281,20 +274,14 @@ def train_step(
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    per_seq_clipped = tf.math.divide_no_nan(
-        tf.reduce_sum(
-            tf.cast(per_token_ratio != per_token_clipped, tf.float32) * decision_mask,
-            axis=-1,
-        ),
-        decisions_per_seq,
-    )
-    clipped_frac = tf.reduce_mean(per_seq_clipped)
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
     with tf.GradientTape() as v_tape:
         values = v_model(
             (online_board_batch, online_pieces_batch, online_b2b_combo_garbage_batch),
             training=True,
         )
+        values = tf.ensure_shape(values, (mini_batch_size, 1))
 
         # Value loss
         value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
