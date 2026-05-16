@@ -1110,7 +1110,7 @@ wheels = [
 [[package]]
 name = "qtris"
 version = "0.8.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "tensorflow", extra = ["and-cuda"] },
     { name = "tetrisenv" },
