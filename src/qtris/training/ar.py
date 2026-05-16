@@ -332,7 +332,7 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
     return step_out
 
 
-def main(argv):
+def main(args):
     # Initialize model and optimizer
     p_model = PolicyModel(
         batch_size=num_envs,
@@ -481,7 +481,7 @@ def main(argv):
     print(f"Initial return_var = {return_var:.3f}", flush=True)
 
     # Collect trajectories and train
-    for gen in range(generations):
+    for gen in range(args.num_generations):
         # Collect trajectory
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
@@ -668,7 +668,3 @@ def main(argv):
 
     runner.env.close()
     wandb_run.finish()
-
-
-if __name__ == "__main__":
-    tf_agents.system.multiprocessing.handle_main(main)

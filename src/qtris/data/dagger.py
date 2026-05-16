@@ -22,7 +22,6 @@ Distinction from DataGen / DataGenFlat:
   on long-horizon, fragile-strategy games (Ross & Bagnell, 2010).
 """
 
-import argparse
 import os
 import shutil
 
@@ -321,61 +320,36 @@ def _build_flat_model(args):
     return p_model
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="DAgger collection for the AR or flat policy. Rolls "
-                    "the policy in env, queries beam at each visited "
-                    "state, appends (state, beam_action) pairs to the "
-                    "existing pretrain dataset.",
+def main(cli_args):
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        mode=cli_args.family,
+        policy_checkpoint=getattr(cli_args, "policy_checkpoint", None),
+        dataset_path=getattr(cli_args, "output", None),
+        num_steps=cli_args.steps,
+        seed=getattr(cli_args, "seed", 10_000_000),
+        search_depth=8,
+        beam_width=96,
+        queue_size=5,
+        max_len=15,
+        key_dim=12,
+        piece_dim=8,
+        depth=64,
+        num_heads=4,
+        num_layers=4,
+        dropout_rate=0.0,
+        max_height=18,
+        max_holes=50,
+        max_steps_env=9_999_999,
+        garbage_chance=0.15,
+        garbage_min=1,
+        garbage_max=4,
+        garbage_push_delay=1,
+        num_row_tiers=2,
+        death_trim_count=20,
+        gamma=0.99,
+        log_every=1000,
     )
-    ap.add_argument(
-        "--mode",
-        choices=["ar", "flat"],
-        default="ar",
-        help="Policy variant. 'ar' uses TetrisModel.PolicyModel + AR "
-             "dataset schema; 'flat' uses TetrisModelFlat.FlatPolicyModel "
-             "+ flat dataset schema.",
-    )
-    ap.add_argument(
-        "--policy-checkpoint", type=str, default=None,
-        help="Path to a tf.train.CheckpointManager directory containing "
-             "the PolicyModel checkpoint to roll out. Defaults: "
-             "checkpoints/ar_pretrained_policy/ (ar) or "
-             "checkpoints/flat_pretrained_policy/ (flat).",
-    )
-    ap.add_argument(
-        "--dataset-path", type=str, default=None,
-        help="Dataset path to APPEND DAgger transitions into. Defaults: "
-             "datasets/tetris_expert_dataset_b2b (ar) or "
-             "datasets/tetris_expert_dataset_flat (flat).",
-    )
-    ap.add_argument("--num-steps", type=int, default=100_000)
-    ap.add_argument("--seed", type=int, default=10_000_000,
-                    help="Seed offset; defaults to a value far from "
-                         "DataGen's typical seeds to avoid replaying "
-                         "identical garbage streams.")
-    ap.add_argument("--search-depth", type=int, default=8)
-    ap.add_argument("--beam-width", type=int, default=96)
-    ap.add_argument("--queue-size", type=int, default=5)
-    ap.add_argument("--max-len", type=int, default=15)
-    ap.add_argument("--key-dim", type=int, default=12)
-    ap.add_argument("--piece-dim", type=int, default=8)
-    ap.add_argument("--depth", type=int, default=64)
-    ap.add_argument("--num-heads", type=int, default=4)
-    ap.add_argument("--num-layers", type=int, default=4)
-    ap.add_argument("--dropout-rate", type=float, default=0.0)
-    ap.add_argument("--max-height", type=int, default=18)
-    ap.add_argument("--max-holes", type=int, default=50)
-    ap.add_argument("--max-steps-env", type=int, default=9_999_999)
-    ap.add_argument("--garbage-chance", type=float, default=0.15)
-    ap.add_argument("--garbage-min", type=int, default=1)
-    ap.add_argument("--garbage-max", type=int, default=4)
-    ap.add_argument("--garbage-push-delay", type=int, default=1)
-    ap.add_argument("--num-row-tiers", type=int, default=2)
-    ap.add_argument("--death-trim-count", type=int, default=20)
-    ap.add_argument("--gamma", type=float, default=0.99)
-    ap.add_argument("--log-every", type=int, default=1000)
-    args = ap.parse_args()
 
     mode_defaults = {
         "ar": {
@@ -538,5 +512,3 @@ def main():
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
