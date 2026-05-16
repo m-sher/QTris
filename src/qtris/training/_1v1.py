@@ -1,8 +1,10 @@
-USE_FLAT = False  # TODO(phase-1b): replace with args.family-based runtime dispatch (per dual-family plan)
+USE_FLAT = False  # set by main(args) before any USE_FLAT branch runs
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
+from TetrisEnv.Py1v1TetrisRunnerFlat import Py1v1TetrisRunnerFlat
 from qtris.models.ar.model import AsymmetricValueModel, PolicyModel
+from qtris.models.flat.model import FlatPolicyModel
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -101,9 +103,7 @@ def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     return advantages, returns
 
 
-# ---------------------------------------------------------------------------
-# Autoregressive train step
-# ---------------------------------------------------------------------------
+# AR train step
 @tf.function()
 def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
@@ -284,9 +284,7 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     }
 
 
-# ---------------------------------------------------------------------------
 # Flat train step
-# ---------------------------------------------------------------------------
 @tf.function()
 def train_step_flat(p_model, v_model, online_batch, entropy_coef):
     online_board_batch = tf.ensure_shape(
@@ -425,10 +423,8 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
     }
 
 
-# ---------------------------------------------------------------------------
 # Common helpers
-# ---------------------------------------------------------------------------
-_train_step_fn = train_step_flat if USE_FLAT else train_step_ar
+_train_step_fn = None  # set inside main(args)
 
 
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
@@ -473,7 +469,13 @@ def load_pool_opponent(opp_model):
     return True
 
 
-def main(argv):
+def main(args):
+    global USE_FLAT, pool_dir, _train_step_fn
+    USE_FLAT = (args.family == "flat")
+    pool_dir = "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
+    _train_step_fn = train_step_flat if USE_FLAT else train_step_ar
+    config["flat"] = USE_FLAT
+
     mode_str = "flat" if USE_FLAT else "autoregressive"
     print(f"Starting 1v1 trainer in {mode_str} mode", flush=True)
 
@@ -682,7 +684,7 @@ def main(argv):
     # -----------------------------------------------------------------------
     # Training loop
     # -----------------------------------------------------------------------
-    for gen in range(generations):
+    for gen in range(args.num_generations):
         # Collect trajectory
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
@@ -992,7 +994,3 @@ def main(argv):
 
     runner.env.close()
     wandb_run.finish()
-
-
-if __name__ == "__main__":
-    tf_agents.system.multiprocessing.handle_main(main)

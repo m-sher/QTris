@@ -1,4 +1,3 @@
-import argparse
 import tensorflow as tf
 from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
@@ -208,17 +207,17 @@ def run_eval(p1_model, p2_model, args):
     print(f"{'='*60}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="1v1 Tetris Demo")
-    parser.add_argument("--p1", required=True, help="P1 checkpoint directory")
-    parser.add_argument("--p2", required=True, help="P2 checkpoint directory")
-    parser.add_argument("--steps", type=int, default=500, help="Max steps per game")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--greedy", action="store_true", help="Use greedy action selection")
-    parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--eval-steps", type=int, default=None,
-                        help="Run headless evaluation for this many total steps, tracking win%%")
-    args = parser.parse_args()
+def main(cli_args):
+    from types import SimpleNamespace
+    args = SimpleNamespace(
+        p1=str(cli_args.checkpoint),
+        p2=str(cli_args.opponent),
+        steps=getattr(cli_args, "steps", 500),
+        seed=getattr(cli_args, "seed", 0),
+        greedy=getattr(cli_args, "greedy", False),
+        temperature=getattr(cli_args, "temperature", 1.0),
+        eval_steps=getattr(cli_args, "eval_steps", None),
+    )
 
     num_steps = args.steps
 
@@ -496,7 +495,3 @@ def main():
         screen.blit(step_text, (10, 20))
 
         pygame.display.update()
-
-
-if __name__ == "__main__":
-    main()

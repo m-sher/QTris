@@ -1,6 +1,5 @@
 from TetrisEnv.Moves import Keys
 from qtris.models.ar.model import PolicyModel, ValueModel
-import argparse
 import os
 import tensorflow as tf
 from tensorflow import keras
@@ -260,19 +259,7 @@ class Pretrainer:
                 v_checkpoint_manager.save()
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Pretrain the autoregressive policy (and optionally the "
-                    "value head)."
-    )
-    ap.add_argument(
-        "--policy-only",
-        action="store_true",
-        help="Train only the policy head; skip building, loading, and "
-             "training the value model.",
-    )
-    args = ap.parse_args()
-
+def main(args):
     piece_dim = 8
     key_dim = 12
     depth = 64
@@ -281,7 +268,7 @@ def main():
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.0
-    batch_size = 512
+    batch_size = args.batch_size
 
     p_model = PolicyModel(
         batch_size=batch_size,
@@ -340,7 +327,10 @@ def main():
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    pretrainer = Pretrainer(policy_only=args.policy_only)
+    pretrainer_kwargs = {"policy_only": args.policy_only}
+    if args.dataset is not None:
+        pretrainer_kwargs["dataset_path"] = str(args.dataset)
+    pretrainer = Pretrainer(**pretrainer_kwargs)
 
     v_checkpoint_manager = None
     if v_model is not None:
@@ -365,12 +355,8 @@ def main():
     pretrainer.train(
         p_model,
         v_model,
-        epochs=10,
+        epochs=args.num_epochs,
         batch_size=batch_size,
         p_checkpoint_manager=p_checkpoint_manager,
         v_checkpoint_manager=v_checkpoint_manager,
     )
-
-
-if __name__ == "__main__":
-    main()

@@ -298,7 +298,7 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
     return step_out
 
 
-def main(argv):
+def main(args):
     p_model = FlatPolicyModel(
         batch_size=num_envs,
         piece_dim=piece_dim,
@@ -445,7 +445,7 @@ def main(argv):
     return_var_decay = 0.99
     print(f"Initial return_var = {return_var:.3f}", flush=True)
 
-    for gen in range(generations):
+    for gen in range(args.num_generations):
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
         last_time = time.time()
 
@@ -624,7 +624,3 @@ def main(argv):
 
     runner.env.close()
     wandb_run.finish()
-
-
-if __name__ == "__main__":
-    tf_agents.system.multiprocessing.handle_main(main)

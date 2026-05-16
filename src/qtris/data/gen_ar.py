@@ -162,10 +162,10 @@ def collect(
     return transitions, unmatched, deaths, max_b2b
 
 
-def main():
-    dataset_path = "datasets/tetris_expert_dataset_b2b"
-    num_steps = 200_000
-    seed = 0
+def main(args):
+    dataset_path = str(args.output) if args.output else "datasets/tetris_expert_dataset_b2b"
+    num_steps = args.steps
+    seed = getattr(args, "seed", 0)
 
     search_depth = 8
     beam_width = 96
@@ -284,5 +284,3 @@ def main():
     print(f"Saved {len(actions)} transitions to {dataset_path}", flush=True)
 
 
-if __name__ == "__main__":
-    main()

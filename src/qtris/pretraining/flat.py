@@ -1,6 +1,5 @@
 from qtris.models.ar.model import ValueModel
 from qtris.models.flat.model import FlatPolicyModel
-import argparse
 import os
 import tensorflow as tf
 from tensorflow import keras
@@ -236,25 +235,14 @@ class FlatPretrainer:
                 v_checkpoint_manager.save()
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Pretrain the flat policy (and optionally the value head)."
-    )
-    ap.add_argument(
-        "--policy-only",
-        action="store_true",
-        help="Train only the policy head; skip building, loading, and "
-             "training the value model.",
-    )
-    args = ap.parse_args()
-
+def main(args):
     piece_dim = 8
     depth = 64
     queue_size = 5
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.0
-    batch_size = 256
+    batch_size = args.batch_size
     num_row_tiers = 2
     num_sequences = 160 * num_row_tiers
 
@@ -312,7 +300,10 @@ def main():
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    pretrainer = FlatPretrainer(policy_only=args.policy_only)
+    pretrainer_kwargs = {"policy_only": args.policy_only}
+    if args.dataset is not None:
+        pretrainer_kwargs["dataset_path"] = str(args.dataset)
+    pretrainer = FlatPretrainer(**pretrainer_kwargs)
 
     v_checkpoint_manager = None
     if v_model is not None:
@@ -337,12 +328,8 @@ def main():
     pretrainer.train(
         p_model,
         v_model,
-        epochs=10,
+        epochs=args.num_epochs,
         batch_size=batch_size,
         p_checkpoint_manager=p_checkpoint_manager,
         v_checkpoint_manager=v_checkpoint_manager,
     )
-
-
-if __name__ == "__main__":
-    main()
