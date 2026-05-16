@@ -1,362 +1,289 @@
-from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Moves, Convert
-from TetrisEnv.Pieces import PieceType
-from TetrisModel import PolicyModel
-import multiprocessing
+from TetrisEnv.Moves import Keys
+from TetrisModel import PolicyModel, ValueModel
+import argparse
+import os
 import tensorflow as tf
 from tensorflow import keras
-import numpy as np
-import glob
-from tqdm import tqdm
-import time
-import os
+
+
+RETURN_CLIP_LOW = -150.0
+RETURN_CLIP_HIGH = 100.0
 
 
 class Pretrainer:
-    def __init__(self):
-        self._new_pieces = {
-            0: PieceType.N.value,
-            1: PieceType.I.value,
-            2: PieceType.T.value,
-            3: PieceType.L.value,
-            4: PieceType.J.value,
-            5: PieceType.Z.value,
-            6: PieceType.S.value,
-            7: PieceType.O.value,
-        }
-        self.scc = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-
-    def _load_raw_data(self):
-        """
-        Loads the raw game data from text files.
-        """
-        raw_data = [[], []]
-        for file in glob.glob(
-            "E:\\MisaMino-Tetrio\\MisaMino\\tetris_ai\\logs\\game*.txt"
-        ):
-            with open(file) as f:
-                contents = f.readlines()
-                for line in contents:
-                    raw_data[int(line[0])].append(line[2:])
-            print(f"Loaded {len(contents)} lines from {file}", flush=True)
-        return raw_data
-
-    def _process_into_transitions(
-        self, raw_data: list[list[str]]
-    ) -> list[tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]]]:
-        """
-        Process the raw game data into transitions of ((state), (next_state)).
-        Raw game data has the following fields in order, separated by '#':
-        1. Player ID (removed by `_load_raw_data`)
-        2. Active piece
-        3. Hold piece
-        4. Queue of next pieces
-        5. Board (represented by a list of integers where each integer is
-                  equivalent to a binary representation of the corresponding row)
-        """
-        transitions = []
-        transitions_checked = 0
-        last_time = time.time()
-        for player_data in raw_data:
-            for i in range(len(player_data) - 1):
-                # Parse state
-                split_results = player_data[i].strip().split("#")
-                active = int(split_results[0])
-                hold = int(split_results[1])
-                queue = [int(piece) for piece in split_results[2].split(",")[:5]]
-                piece_seq = np.array(
-                    [self._new_pieces[piece] for piece in [active] + [hold] + queue],
-                    dtype=np.int32,
-                )
-                board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                state = (board, piece_seq)
-
-                # Parse next_state
-                next_split_results = player_data[i + 1].strip().split("#")
-                next_active = int(next_split_results[0])
-                next_hold = int(next_split_results[1])
-                next_queue = [
-                    int(piece) for piece in next_split_results[2].split(",")[:5]
-                ]
-                next_piece_seq = np.array(
-                    [
-                        self._new_pieces[piece]
-                        for piece in [next_active] + [next_hold] + next_queue
-                    ],
-                    dtype=np.int32,
-                )
-                next_board = np.array(
-                    [
-                        [int(bit) for bit in "{:032b}".format(int(row))[-10:][::-1]]
-                        for row in next_split_results[3].split(",")[5:-4]
-                    ],
-                    dtype=np.int32,
-                )
-                next_state = (next_board, next_piece_seq)
-
-                transitions_checked += 1
-
-                if self._is_candidate(state, next_state):
-                    transitions.append((state, next_state))
-
-                if time.time() - last_time > 5:
-                    print(
-                        f"\rtransitions checked: {transitions_checked} | Valid transitions: {len(transitions)}",
-                        end="",
-                        flush=True,
-                    )
-                    last_time = time.time()
-
-        print(
-            f"\rTotal transitions checked: {transitions_checked} | Total valid transitions: {len(transitions)}",
-            flush=True,
+    def __init__(self, dataset_path="../tetris_expert_dataset_b2b", policy_only=False):
+        self._dataset_path = dataset_path
+        self._policy_only = policy_only
+        self._scc = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="none"
+        )
+        self._return_scale = tf.Variable(
+            1.0, trainable=False, dtype=tf.float32, name="return_scale"
         )
 
-        return transitions
+    @staticmethod
+    def _surge_correction(b2b):
+        """Add back the recoverable part of the removed surge potential.
 
-    def _is_candidate(
-        self,
-        state: tuple[np.ndarray, np.ndarray],
-        next_state: tuple[np.ndarray, np.ndarray],
-    ) -> bool:
+        Old env had ``φ`` with a ``surge_coef * (1.15^b2b - 1)`` term;
+        new env removes it. Potential-shaping telescoping gives:
+
+            G_new − G_old ≈ surge(b_{t-1}) − γ^{T-t+1} · surge(b_T)
+
+        We can recover the first term exactly (b2b at the predicted
+        state is in the dataset). The second term requires per-trajectory
+        metadata we don't store, and explodes for trajectories where the
+        beam expert chained b2b to extreme magnitudes (e.g. b2b > 100,
+        where 1.15^b2b reaches 10^6+). The residual is bounded
+        downstream by clipping the corrected returns to the range
+        the new env can actually produce.
         """
-        Determine if the transition from board_t to board_t1 is a candidate for training.
-        This removes transitions between two episodes and transitions that accept garbage.
-        """
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
+        b2b = tf.cast(b2b, tf.float32)
+        surge_lines = tf.where(b2b >= 4.0, b2b, tf.zeros_like(b2b))
+        return tf.pow(1.15, surge_lines) - 1.0
 
-        # Check that the queue cycles as expected
-        # Piece sequence is [active, hold, next1, next2, next3, next4, next5]
-        if not (
-            np.array_equal(piece_seq[3:], next_piece_seq[2:-1])  # Queue cycled once
-            or (
-                piece_seq[1] == 0  # Hold started empty
-                and next_piece_seq[1] != 0  # Hold is now occupied
-                and np.array_equal(piece_seq[4:], next_piece_seq[2:-2])
-            )
-        ):  # Queue cycled twice
-            return False
+    @staticmethod
+    def _correct_and_clip(returns, b2b):
+        """Apply surge correction then clip to new-env reachable range."""
+        corrected = returns + Pretrainer._surge_correction(b2b)
+        return tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
-        # Check that the board changes in an expected way
-        cell_count_diff = np.sum(next_board) - np.sum(board)
-        if not (
-            cell_count_diff == 4  # Placed a piece without clearing lines
-            or cell_count_diff == 4 - 10  # Placed a piece and cleared one line
-            or cell_count_diff == 4 - 20  # Placed a piece and cleared two lines
-            or cell_count_diff == 4 - 30  # Placed a piece and cleared three lines
-            or cell_count_diff == 4 - 40
-        ):  # Placed a piece and cleared four lines
-            return False
-
-        return True
-
-    def _find_action(
-        self,
-        transition: tuple[tuple[np.ndarray, np.ndarray], tuple[np.ndarray, np.ndarray]],
-        test_env: PyTetrisEnv,
-    ) -> tuple[int, int, int]:
-        """
-        Determine the action taken to transition from state_t to state_t1.
-        """
-        state, next_state = transition
-
-        board, piece_seq = state
-        next_board, next_piece_seq = next_state
-
-        # Determine whether hold was used
-        if piece_seq[1] != next_piece_seq[1]:
-            hold = 1
-        else:
-            hold = 0
-
-        # Determine the action(s) that cause the transition
-        # Checking non-spins first to avoid unnecessary keypresses with spins
-        for spin in range(len(Moves._spins)):
-            for standard in range(len(Moves._standards)):
-                action = {"hold": hold, "standard": standard, "spin": spin}
-                active_piece = test_env._spawn_piece(PieceType(piece_seq[0]))
-                hold_piece = PieceType(piece_seq[1])
-                queue = [PieceType(piece) for piece in piece_seq[2:]]
-                _, _, sim_board, _, _, _ = test_env._execute_action(
-                    board, active_piece, hold_piece, queue, action
-                )
-                if np.array_equal(sim_board, next_board):
-                    return board, piece_seq, (hold, standard, spin)
-
-        # If no action is found, return action to filter
-        return board, piece_seq, (-1, -1, -1)
-
-    def process_single_transition(self, transition):
-        return self._find_action(transition, self.test_env)
-
-    def _generate_dataset(self) -> tf.data.Dataset:
-        """
-        Generate a dataset of transitions from the raw game data.
-        """
-
-        # Initialize test environment
-        self.test_env = PyTetrisEnv(queue_size=5, max_holes=100, seed=123, idx=0)
-
-        # Load transitions
-        raw_data = self._load_raw_data()
-        transition_df = self._process_into_transitions(raw_data)
-
-        with multiprocessing.Pool(processes=multiprocessing.cpu_count() - 1) as pool:
-            results = list(
-                tqdm(
-                    pool.imap(
-                        self.process_single_transition, transition_df, chunksize=512
-                    ),
-                    total=len(transition_df),
-                    desc="Processing transitions",
-                )
+    def _load_dataset(self, batch_size):
+        if not os.path.exists(self._dataset_path):
+            raise FileNotFoundError(
+                f"No dataset at {self._dataset_path}. Run DataGen.py to collect one."
             )
 
-        # Convert results from list of tuples to tuple of lists
-        repacked = tuple(map(list, zip(*results)))
-
-        # Create dataset
-        dataset = tf.data.Dataset.from_tensor_slices(repacked).filter(
-            lambda board, piece_seq, action: tf.reduce_all(action[1] != (-1, -1, -1))
-        )
-
-        # Save dataset and ensure it can be loaded
-        dataset.save("../tetris_expert_dataset")
-        dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-
-        return dataset
-
-    @tf.function
-    def _get_key_sequence(self, separate_action):
-        action = tf.gather_nd(Convert.to_ind, separate_action)
-        key_sequence = tf.gather(Convert.to_sequence, action)
-        return key_sequence
-
-    def _load_dataset(self, batch_size: int | None = 1024) -> tf.data.Dataset:
-        """
-        Load the dataset from disk if it exists, otherwise generate it.
-        """
-
-        # Check if dataset exists
-        if not os.path.exists("../tetris_expert_dataset"):
-            print("Dataset not found. Generating dataset...", flush=True)
-            # Generate dataset
-            dataset = self._generate_dataset()
-        else:
-            try:
-                dataset = tf.data.Dataset.load("../tetris_expert_dataset")
-                print("Dataset loaded successfully.", flush=True)
-            except Exception:
-                print("Dataset loading failed. Generating dataset...", flush=True)
-                # Generate dataset
-                dataset = self._generate_dataset()
-
-        dataset = (
-            dataset.map(
-                lambda board, piece_seq, separate_action: {
-                    "boards": tf.cast(board[..., None], tf.float32),
-                    "pieces": tf.cast(piece_seq, tf.int64),
-                    "actions": tf.cast(
-                        self._get_key_sequence(separate_action), tf.int64
-                    ),
-                },
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
+        dataset = tf.data.Dataset.load(self._dataset_path)
+        spec = dataset.element_spec
+        if "returns" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} lacks `returns` field. "
+                "Regenerate with the current DataGen.py (value pretraining requires returns)."
             )
-            .cache()
-            .shuffle(1000000)
-        )
+        if "sample_weights" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} lacks `sample_weights` field. "
+                "Regenerate with the current DataGen.py."
+            )
 
-        if batch_size:
-            dataset = dataset.batch(
+        if not self._policy_only:
+            all_returns = tf.concat(
+                [batch["returns"] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            all_b2b = tf.concat(
+                [batch["b2b_combo_garbage"][..., 0] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            corrected = all_returns + self._surge_correction(all_b2b)
+            clipped = tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
+
+            n_total = tf.cast(tf.size(all_returns), tf.float32)
+            n_clipped_low = tf.reduce_sum(tf.cast(corrected < RETURN_CLIP_LOW, tf.float32))
+            n_clipped_high = tf.reduce_sum(tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32))
+            frac_clipped = (n_clipped_low + n_clipped_high) / n_total
+            max_b2b = tf.reduce_max(all_b2b)
+
+            clip_mean = tf.reduce_mean(clipped)
+            clip_std = tf.math.reduce_std(clipped)
+            scale = tf.maximum(clip_std, 1.0)
+            self._return_scale.assign(scale)
+            print(
+                f"Returns | n={int(n_total)} | max_b2b in dataset={float(max_b2b):.0f} "
+                f"| clipped to [{RETURN_CLIP_LOW:.0f}, {RETURN_CLIP_HIGH:.0f}]: "
+                f"{float(n_clipped_low):.0f} low + {float(n_clipped_high):.0f} high "
+                f"({100.0 * float(frac_clipped):.2f}%) "
+                f"| post: mean={float(clip_mean):.3f} std={float(clip_std):.3f} "
+                f"| value-head scale={float(scale):.3f}",
+                flush=True,
+            )
+
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+
+        return (
+            cached
+            .shuffle(buffer_size=500_000)
+            .batch(
                 batch_size,
-                deterministic=False,
                 drop_remainder=True,
                 num_parallel_calls=tf.data.AUTOTUNE,
-            ).prefetch(tf.data.AUTOTUNE)
-
-        return dataset
-
-    @tf.function
-    def _train_step(self, model: keras.Model, batch) -> tuple[float, float]:
-        """
-        Perform a single training step.
-        """
-        board = batch["boards"]
-        piece_seq = batch["pieces"]
-        key_sequence = batch["actions"]
-        input_sequence = key_sequence[:, :-1]
-        target_sequence = key_sequence[:, 1:]
-
-        with tf.GradientTape() as tape:
-            # Forward pass
-            logits = model((board, piece_seq, input_sequence), training=True)
-            # Compute loss
-            loss = self.scc(target_sequence, logits)
-        # Compute and apply gradients
-        gradients = tape.gradient(loss, model.trainable_variables)
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
-
-        # Compute accuracy
-        accuracy = tf.reduce_mean(
-            tf.cast(
-                tf.argmax(logits, axis=-1, output_type=tf.int64) == target_sequence,
-                tf.float32,
+                deterministic=False,
             )
+            .prefetch(tf.data.AUTOTUNE)
         )
 
-        return loss, accuracy
+    @staticmethod
+    def load_expert_dataset(path, batch_size):
+        dataset = tf.data.Dataset.load(path)
+        if "sample_weights" not in dataset.element_spec:
+            def _add_default_weight(x):
+                return {**x, "sample_weights": tf.constant(1.0, dtype=tf.float32)}
+            dataset = dataset.map(_add_default_weight)
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+        return (
+            cached
+            .repeat()
+            .shuffle(buffer_size=100_000)
+            .batch(batch_size, drop_remainder=True)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    @tf.function
+    def _train_step(self, p_model, v_model, batch):
+        board = batch["boards"]
+        pieces = batch["pieces"]
+        bcg = batch["b2b_combo_garbage"]
+        actions = batch["actions"]
+        masks = batch["masks"]
+        sample_weights = batch["sample_weights"]
+
+        input_seq = actions[:, :-1]
+        target_seq = actions[:, 1:]
+        valid_mask = masks[:, 1:, :]
+
+        pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
+        num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
+        decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
+        weighted_mask = decision_mask * sample_weights[:, None]
+
+        with tf.GradientTape() as p_tape:
+            logits = p_model(
+                (board, pieces, bcg, input_seq), training=True
+            )
+            masked_logits = tf.where(
+                valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            per_token_loss = self._scc(target_seq, masked_logits)
+            policy_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(per_token_loss * weighted_mask),
+                tf.reduce_sum(weighted_mask),
+            )
+
+        p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
+        p_model.optimizer.apply_gradients(
+            zip(p_gradients, p_model.trainable_variables)
+        )
+
+        pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
+        accuracy = tf.math.divide_no_nan(
+            tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
+        )
+
+        # Top-3 on decision tokens. Tracks how well the right answer is
+        # ranked, not just whether it's #1. Useful diagnostic for whether
+        # the model "knows about" the correct token even when not
+        # selecting it greedily — especially helpful early in training
+        # when Acc is low but the right token is consistently in the top
+        # few logits.
+        last_dim = tf.shape(masked_logits)[-1]
+        flat_logits = tf.reshape(masked_logits, [-1, last_dim])
+        flat_targets = tf.reshape(target_seq, [-1])
+        top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
+        top3 = tf.cast(
+            tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32
+        ) * decision_mask
+        accuracy_top3 = tf.math.divide_no_nan(
+            tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
+        )
+
+        if self._policy_only:
+            return (
+                policy_loss, accuracy, accuracy_top3,
+                tf.constant(0.0, dtype=tf.float32),
+            )
+
+        returns = self._correct_and_clip(batch["returns"], bcg[..., 0])
+        with tf.GradientTape() as v_tape:
+            values = v_model((board, pieces, bcg), training=True)
+            targets = tf.reshape(returns / self._return_scale, (-1, 1))
+            squared_error = tf.square(values - targets)
+            value_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(squared_error * sample_weights[:, None]),
+                tf.reduce_sum(sample_weights),
+            )
+
+        v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
+        v_model.optimizer.apply_gradients(
+            zip(v_gradients, v_model.trainable_variables)
+        )
+
+        return policy_loss, accuracy, accuracy_top3, value_loss
 
     def train(
         self,
-        model: keras.Model,
-        epochs: int = 10,
-        batch_size: int = 1024,
-        checkpoint_manager=None,
+        p_model,
+        v_model=None,
+        epochs=10,
+        batch_size=256,
+        p_checkpoint_manager=None,
+        v_checkpoint_manager=None,
     ):
-        """
-        Train the model on saved dataset.
-        """
-        # Load dataset
-        dataset = self._load_dataset(batch_size)
+        if not self._policy_only and v_model is None:
+            raise ValueError(
+                "v_model is required unless Pretrainer was constructed "
+                "with policy_only=True."
+            )
 
-        # Train model
+        dataset = self._load_dataset(batch_size=batch_size)
+
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
-                # Perform training step
-                loss, accuracy = self._train_step(model, batch)
-                # Print progress every 100 steps
+                policy_loss, accuracy, accuracy_top3, value_loss = (
+                    self._train_step(p_model, v_model, batch)
+                )
                 if step % 100 == 0:
-                    print(
-                        f"Step {step + 1} | Loss: {loss:2.3f} | Accuracy: {accuracy:1.3f}",
-                        flush=True,
-                    )
-            # Save checkpoint after each epoch
-            if checkpoint_manager is not None:
-                checkpoint_manager.save()
+                    if self._policy_only:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f} | "
+                            f"Value: {float(value_loss):2.3f}",
+                            flush=True,
+                        )
+            if p_checkpoint_manager is not None:
+                p_checkpoint_manager.save()
+            if v_checkpoint_manager is not None and not self._policy_only:
+                v_checkpoint_manager.save()
 
 
 def main():
-    # Model params
+    ap = argparse.ArgumentParser(
+        description="Pretrain the autoregressive policy (and optionally the "
+                    "value head)."
+    )
+    ap.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Train only the policy head; skip building, loading, and "
+             "training the value model.",
+    )
+    args = ap.parse_args()
+
     piece_dim = 8
     key_dim = 12
     depth = 64
-    max_len = 9
+    max_len = 15
+    queue_size = 5
     num_heads = 4
     num_layers = 4
-    dropout_rate = 0.1
-    batch_size = 1024
+    dropout_rate = 0.0
+    batch_size = 512
 
-    # Initialize model and optimizer
-    model = PolicyModel(
+    p_model = PolicyModel(
         batch_size=batch_size,
         piece_dim=piece_dim,
         key_dim=key_dim,
@@ -368,29 +295,80 @@ def main():
         output_dim=key_dim,
     )
 
-    optimizer = keras.optimizers.Adam(3e-5)
-    model.compile(optimizer=optimizer, jit_compile=True)
-    print("Initialized model and optimizer.", flush=True)
+    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    dummy_board = tf.random.uniform((32, 24, 10, 1), dtype=tf.float32)
-    dummy_pieces = tf.random.uniform((32, 7), dtype=tf.int32, minval=0, maxval=8)
-    dummy_keys = tf.random.uniform((32, 9), dtype=tf.int32, minval=0, maxval=12)
-    model((dummy_board, dummy_pieces, dummy_keys), training=False)
-    model.summary()
+    v_model = None
+    v_optimizer = None
+    if not args.policy_only:
+        v_model = ValueModel(
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=1,
+        )
+        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_model.compile(optimizer=v_optimizer, jit_compile=True)
+    print("Initialized models and optimizers.", flush=True)
 
-    # Load checkpoint if it exists
-    # Initialize checkpoint manager
-    checkpoint = tf.train.Checkpoint(model=model, optimizer=optimizer)
-    # checkpoint_manager = tf.train.CheckpointManager(checkpoint, './policy_checkpoints', max_to_keep=3)
-    # checkpoint.restore(checkpoint_manager.latest_checkpoint)
-    checkpoint_manager = tf.train.CheckpointManager(
-        checkpoint, "./pretrained_checkpoints", max_to_keep=3
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
     )
-    # print("Restored checkpoint.", flush=True)
+    p_model.summary()
+    if v_model is not None:
+        v_model(
+            (
+                keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+                keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+                keras.Input(shape=(3,), dtype=tf.float32),
+            )
+        )
+        v_model.summary()
 
-    pretrainer = Pretrainer()
+    p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "./pretrained_checkpoints", max_to_keep=3
+    )
+    if p_checkpoint_manager.latest_checkpoint:
+        p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+        print("Restored pretrained policy checkpoint.", flush=True)
+
+    pretrainer = Pretrainer(policy_only=args.policy_only)
+
+    v_checkpoint_manager = None
+    if v_model is not None:
+        v_checkpoint = tf.train.Checkpoint(
+            model=v_model,
+            optimizer=v_optimizer,
+            return_scale=pretrainer._return_scale,
+        )
+        v_checkpoint_manager = tf.train.CheckpointManager(
+            v_checkpoint, "./pretrained_value_checkpoints", max_to_keep=3
+        )
+        if v_checkpoint_manager.latest_checkpoint:
+            v_checkpoint.restore(
+                v_checkpoint_manager.latest_checkpoint
+            ).expect_partial()
+            print(
+                f"Restored pretrained value checkpoint "
+                f"(return_scale={float(pretrainer._return_scale):.3f}).",
+                flush=True,
+            )
+
     pretrainer.train(
-        model, batch_size=batch_size, epochs=10, checkpoint_manager=checkpoint_manager
+        p_model,
+        v_model,
+        epochs=10,
+        batch_size=batch_size,
+        p_checkpoint_manager=p_checkpoint_manager,
+        v_checkpoint_manager=v_checkpoint_manager,
     )
 
 

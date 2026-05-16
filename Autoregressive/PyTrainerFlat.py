@@ -1,14 +1,14 @@
 from PyTetrisRunnerFlat import PyTetrisRunnerFlat
 from TetrisModelFlat import FlatPolicyModel, ValueModel
+from PretrainFlat import FlatPretrainer
 from TetrisEnv.Moves import Keys
-from RewardNormalizer import RewardNormalizer
-from ExpertDataset import ExpertDataset
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
 import tf_agents
 import wandb
 import time
+import os
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -26,7 +26,7 @@ num_sequences = 160 * num_row_tiers
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 64
+num_collection_steps = 256
 queue_size = 5
 max_holes = 50
 max_height = 18
@@ -37,20 +37,22 @@ garbage_rows_min = 1
 garbage_rows_max = 4
 
 # Training params
-mini_batch_size = 1024
+mini_batch_size = 512
 num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 
 gamma = 0.99
 lam = 0.95
-epsilon = 0.2
+ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
-expert_coef = 0.1
+entropy_coef = 0.01
 temperature = 1.0
 
-target_kl = 0.04
-early_stopping = False
+target_kl = 0.02
+early_stopping = True
+
+expert_coef = 0.1
+expert_dataset_path = "../tetris_expert_dataset_flat"
 
 config = {
     "num_envs": num_envs,
@@ -59,16 +61,17 @@ config = {
     "num_updates": num_updates,
     "gamma": gamma,
     "lam": lam,
-    "epsilon": epsilon,
+    "ppo_clip": ppo_clip,
     "value_clip": value_clip,
     "entropy_coef": entropy_coef,
     "target_kl": target_kl,
     "early_stopping": early_stopping,
+    "expert_coef": expert_coef,
 }
 
 
 @tf.function(jit_compile=True)
-def compute_gae_and_returns(values, last_values, rewards, dones, garbage_pushed, gamma, lam):
+def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
     advantages = tf.TensorArray(
         dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
     )
@@ -77,10 +80,9 @@ def compute_gae_and_returns(values, last_values, rewards, dones, garbage_pushed,
     last_val = last_values
 
     for t in tf.range(num_collection_steps - 1, -1, -1):
-        done_mask = 1.0 - dones[t]
-        delta = rewards[t] + gamma * last_val * done_mask - values[t]
-        propagate = done_mask * (1.0 - garbage_pushed[t])
-        last_adv = delta + gamma * lam * last_adv * propagate
+        mask = 1.0 - dones[t]
+        delta = rewards[t] + gamma * last_val * mask - values[t]
+        last_adv = delta + gamma * lam * last_adv * mask
         advantages = advantages.write(t, last_adv)
         last_val = values[t]
 
@@ -93,8 +95,32 @@ def compute_gae_and_returns(values, last_values, rewards, dones, garbage_pushed,
     return advantages, returns
 
 
+@tf.function(jit_compile=True)
+def compute_raw_returns(rewards, dones, gamma):
+    returns = tf.TensorArray(
+        dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
+    )
+
+    last_ret = tf.zeros(returns.element_shape, dtype=tf.float32)
+
+    for t in tf.range(num_collection_steps - 1, -1, -1):
+        mask = 1.0 - dones[t]
+        last_ret = rewards[t] + gamma * last_ret * mask
+        returns = returns.write(t, last_ret)
+
+    return tf.ensure_shape(returns.stack(), (num_collection_steps, num_envs, 1))
+
+
 @tf.function()
-def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
+def train_step(
+    p_model,
+    v_model,
+    online_batch,
+    entropy_coef,
+    expert_coef,
+    use_expert,
+    expert_batch=None,
+):
     online_board_batch = tf.ensure_shape(
         online_batch["boards"], (mini_batch_size, 24, 10, 1)
     )
@@ -117,22 +143,6 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
-
-    expert_boards = tf.ensure_shape(
-        expert_batch["boards"], (mini_batch_size, 24, 10, 1)
-    )
-    expert_pieces = tf.ensure_shape(
-        expert_batch["pieces"], (mini_batch_size, queue_size + 2)
-    )
-    expert_bcg = tf.ensure_shape(
-        expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)
-    )
-    expert_valid_masks = tf.ensure_shape(
-        expert_batch["valid_masks"], (mini_batch_size, num_sequences)
-    )
-    expert_action_indices = tf.ensure_shape(
-        expert_batch["action_indices"], (mini_batch_size,)
-    )
 
     valid_mask = tf.reduce_any(
         tf.equal(
@@ -167,7 +177,7 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
             tf.exp(new_log_probs - old_log_probs_batch), (mini_batch_size, 1)
         )
         clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - epsilon, 1 + epsilon),
+            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
             (mini_batch_size, 1),
         )
 
@@ -183,28 +193,49 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
 
         approx_kl = tf.reduce_mean(old_log_probs_batch - new_log_probs)
 
-        expert_logits = p_model(
-            (expert_boards, expert_pieces, expert_bcg),
-            training=True,
-        )
-        expert_masked_logits = tf.where(
-            expert_valid_masks, expert_logits, tf.constant(-1e9, dtype=tf.float32)
-        )
-        expert_loss = tf.reduce_mean(
-            tf.nn.sparse_softmax_cross_entropy_with_logits(
+        # Expert BC anchor
+        if use_expert:
+            expert_action_indices = tf.ensure_shape(
+                expert_batch["action_indices"], (mini_batch_size,)
+            )
+            expert_valid_masks = tf.ensure_shape(
+                expert_batch["valid_masks"], (mini_batch_size, num_sequences)
+            )
+            expert_sample_weights = tf.ensure_shape(
+                expert_batch["sample_weights"], (mini_batch_size,)
+            )
+
+            expert_logits = p_model(
+                (
+                    tf.ensure_shape(expert_batch["boards"], (mini_batch_size, 24, 10, 1)),
+                    tf.ensure_shape(expert_batch["pieces"], (mini_batch_size, queue_size + 2)),
+                    tf.ensure_shape(expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)),
+                ),
+                training=True,
+            )
+            expert_masked_logits = tf.where(
+                expert_valid_masks, expert_logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            expert_per_sample_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 labels=expert_action_indices, logits=expert_masked_logits
             )
-        )
+            expert_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(expert_per_sample_loss * expert_sample_weights),
+                tf.reduce_sum(expert_sample_weights),
+            )
+
+            expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
+            expert_accuracy = tf.reduce_mean(
+                tf.cast(expert_pred == expert_action_indices, tf.float32)
+            )
+        else:
+            expert_loss = tf.constant(0.0, dtype=tf.float32)
+            expert_accuracy = tf.constant(0.0, dtype=tf.float32)
 
         total_policy_loss = ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
 
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
-
-    expert_predicted = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
-    expert_accuracy = tf.reduce_mean(
-        tf.cast(tf.equal(expert_predicted, expert_action_indices), tf.float32)
-    )
 
     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
@@ -237,22 +268,31 @@ def train_step(p_model, v_model, online_batch, expert_batch, entropy_coef):
         "clipped_frac": clipped_frac,
         "value_loss": value_loss,
         "explained_var": explained_var,
-        "expert_loss": expert_loss,
-        "expert_accuracy": expert_accuracy,
         "board": online_board_batch[0],
         "scores": piece_scores,
+        "expert_loss": expert_loss,
+        "expert_accuracy": expert_accuracy,
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef):
+def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
+    use_expert = expert_iter is not None
     for epoch in range(num_epochs):
-        kls = []
-        for online_batch, expert_batch in tf.data.Dataset.zip((online_dataset, expert_dataset)):
-            step_out = train_step(p_model, v_model, online_batch, expert_batch, entropy_coef)
-            kls.append(step_out["approx_kl"])
+        for online_batch in online_dataset:
+            if use_expert:
+                expert_batch = next(expert_iter)
+                step_out = train_step(
+                    p_model, v_model, online_batch,
+                    entropy_coef, expert_coef, True, expert_batch,
+                )
+            else:
+                step_out = train_step(
+                    p_model, v_model, online_batch,
+                    entropy_coef, expert_coef, False,
+                )
 
-        if early_stopping and tf.reduce_mean(kls) >= 1.5 * target_kl:
-            break
+            if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                return step_out
 
     return step_out
 
@@ -279,15 +319,21 @@ def main(argv):
 
     print("Initialized models", flush=True)
 
-    p_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
     )
 
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
     print("Built models", flush=True)
 
     p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
@@ -315,19 +361,44 @@ def main(argv):
         else:
             print("No checkpoint found, training from scratch", flush=True)
 
-    v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
+    loaded_return_scale = tf.Variable(
+        1.0, trainable=False, dtype=tf.float32, name="return_scale"
+    )
+    v_checkpoint = tf.train.Checkpoint(
+        model=v_model,
+        optimizer=v_optimizer,
+        return_scale=loaded_return_scale,
+    )
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, "./value_checkpoints", max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
-    print("Restored value checkpoint", flush=True)
+
+    if v_checkpoint_manager.latest_checkpoint:
+        v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+        print(
+            f"Restored value checkpoint (return_scale={float(loaded_return_scale):.3f})",
+            flush=True,
+        )
+    else:
+        pretrained_v_ckpt = tf.train.Checkpoint(
+            model=v_model,
+            return_scale=loaded_return_scale,
+        )
+        pretrained_v_mgr = tf.train.CheckpointManager(
+            pretrained_v_ckpt, "./pretrained_flat_value_checkpoints", max_to_keep=1
+        )
+        if pretrained_v_mgr.latest_checkpoint:
+            pretrained_v_ckpt.restore(pretrained_v_mgr.latest_checkpoint).expect_partial()
+            print(
+                f"Bootstrapped value from pretrained checkpoint "
+                f"(return_scale={float(loaded_return_scale):.3f})",
+                flush=True,
+            )
+        else:
+            print("No value checkpoint found, training from scratch", flush=True)
 
     p_model.summary()
     v_model.summary()
-
-    expert_dataset_loader = ExpertDataset(max_len=max_len, queue_size=queue_size, mini_batch_size=mini_batch_size, num_row_tiers=num_row_tiers)
-    expert_dataset, num_expert = expert_dataset_loader.load_expert_data()
-    print(f"Expert dataset ready ({num_expert} samples)", flush=True)
 
     runner = PyTetrisRunnerFlat(
         queue_size=queue_size,
@@ -357,9 +428,21 @@ def main(argv):
         config=config,
     )
 
-    reward_normalizer = RewardNormalizer(
-        num_envs=num_envs, gamma=gamma, initial_var=1200.0, decay=0.99
-    )
+    if os.path.exists(expert_dataset_path):
+        expert_dataset = FlatPretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
+        expert_iter = iter(expert_dataset)
+        print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
+    else:
+        expert_iter = None
+        print(
+            f"No expert dataset found at {expert_dataset_path}; "
+            f"running PPO without expert anchoring",
+            flush=True,
+        )
+
+    return_var = float(loaded_return_scale) ** 2
+    return_var_decay = 0.99
+    print(f"Initial return_var = {return_var:.3f}", flush=True)
 
     for gen in range(generations):
         print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
@@ -386,8 +469,10 @@ def main(argv):
             all_total_reward[..., None], (num_collection_steps, num_envs, 1)
         )
 
-        reward_normalizer.update(all_rewards, all_dones)
-        scaled_rewards = reward_normalizer.normalize(all_rewards)
+        scaled_rewards = tf.clip_by_value(
+            all_rewards / (tf.sqrt(return_var) + 1e-8),
+            -10.0, 10.0
+        )
 
         print(
             f"{time.time() - last_time:2.2f} | Collected. Creating dataset...",
@@ -396,8 +481,12 @@ def main(argv):
         last_time = time.time()
 
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, scaled_rewards, all_dones, all_garbage_pushed, gamma, lam
+            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam
         )
+
+        raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
+        batch_var = tf.math.reduce_variance(raw_returns)
+        return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 
         all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
             tf.math.reduce_std(all_advantages) + 1e-8
@@ -447,7 +536,7 @@ def main(argv):
         last_time = time.time()
 
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, expert_dataset, num_epochs, entropy_coef
+            p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
         )
 
         if gen % 5 == 0:
@@ -466,10 +555,10 @@ def main(argv):
         clipped_frac = train_out["clipped_frac"]
         value_loss = train_out["value_loss"]
         explained_var = train_out["explained_var"]
-        expert_loss = train_out["expert_loss"]
-        expert_accuracy = train_out["expert_accuracy"]
         board = train_out["board"]
         scores = train_out["scores"]
+        expert_loss = train_out["expert_loss"]
+        expert_accuracy = train_out["expert_accuracy"]
 
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
@@ -481,7 +570,16 @@ def main(argv):
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
         avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0], (12, 5, 1))
+        avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
+
+        b2b_series = all_b2b_combo_garbage[..., 0]
+        combo_series = all_b2b_combo_garbage[..., 1]
+        avg_b2b = tf.reduce_mean(b2b_series)
+        max_b2b = tf.reduce_max(b2b_series)
+        avg_combo = tf.reduce_mean(combo_series)
+        surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
+
+        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
@@ -495,17 +593,23 @@ def main(argv):
                     "clipped_frac": clipped_frac,
                     "value_loss": value_loss,
                     "explained_var": explained_var,
-                    "expert_loss": expert_loss,
-                    "expert_accuracy": expert_accuracy,
-                    "return_var": reward_normalizer.return_var,
+                    "return_var": return_var,
                     "avg_probs": avg_probs,
                     "avg_reward": avg_reward,
                     "avg_attacks": avg_attacks,
                     "avg_clears": avg_clears,
                     "avg_attack_reward": avg_attack_reward,
                     "avg_total_reward": avg_total_reward,
+                    "avg_garbage_pushed": avg_garbage_pushed,
                     "avg_deaths": avg_deaths,
                     "avg_pieces": avg_pieces,
+                    "avg_b2b": avg_b2b,
+                    "max_b2b": max_b2b,
+                    "avg_combo": avg_combo,
+                    "surge_rate": surge_rate,
+                    "expert_loss": expert_loss,
+                    "expert_accuracy": expert_accuracy,
+                    "expert_coef": expert_coef,
                     "board": wandb.Image(board[..., 0]),
                     "scores": wandb.Image(norm_c_scores),
                 }
