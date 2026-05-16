@@ -6,17 +6,7 @@ import shutil
 import numpy as np
 import tensorflow as tf
 
-
-def _build_mask(sequence, valid_sequences, max_len, key_dim):
-    masks = np.zeros((max_len, key_dim), dtype=bool)
-    for pos in range(1, max_len):
-        prefix = sequence[:pos]
-        match = np.all(valid_sequences[:, :pos] == prefix, axis=-1)
-        if not match.any():
-            continue
-        next_tokens = valid_sequences[match, pos]
-        masks[pos, np.unique(next_tokens)] = True
-    return masks
+HARD_DROP_ID = Keys.HARD_DROP
 
 
 def collect(
@@ -26,7 +16,6 @@ def collect(
     beam_width,
     queue_size,
     max_len,
-    key_dim,
     max_height,
     max_holes,
     max_steps_env,
@@ -87,9 +76,9 @@ def collect(
             kept_count = len(buf)
 
         for t in range(kept_count):
-            board, pieces, bcg, sequence, mask, sample_weight, _r, _d = buf[t]
+            board, pieces, bcg, action_idx, valid_mask, sample_weight, _r, _d = buf[t]
             transitions.append(
-                (board, pieces, bcg, sequence, mask, sample_weight, returns_arr[t])
+                (board, pieces, bcg, action_idx, valid_mask, sample_weight, returns_arr[t])
             )
 
     for step in range(num_steps):
@@ -123,8 +112,9 @@ def collect(
             continue
 
         sequence = sequence.astype(np.int64)
+        matches = np.all(valid_sequences == sequence[None, :], axis=-1)
 
-        if not np.any(np.all(valid_sequences == sequence[None, :], axis=-1)):
+        if not np.any(matches):
             unmatched += 1
             time_step = env._step(sequence)
             if time_step.is_last():
@@ -134,13 +124,24 @@ def collect(
                 time_step = env.reset()
             continue
 
-        mask = _build_mask(sequence, valid_sequences, max_len, key_dim)
+        flat_action_idx = int(np.argmax(matches))
+        valid_mask = np.any(valid_sequences == HARD_DROP_ID, axis=-1)
+
         time_step = env._step(sequence)
         reward = float(time_step.reward["total_reward"])
         done = bool(time_step.is_last())
 
         episode_buf.append(
-            (board, pieces, bcg, sequence, mask, np.float32(search_depth), reward, done)
+            (
+                board,
+                pieces,
+                bcg,
+                flat_action_idx,
+                valid_mask,
+                np.float32(search_depth),
+                reward,
+                done,
+            )
         )
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
@@ -163,15 +164,14 @@ def collect(
 
 
 def main():
-    dataset_path = "../tetris_expert_dataset_b2b"
+    dataset_path = "datasets/tetris_expert_dataset_flat"
     num_steps = 200_000
     seed = 0
 
-    search_depth = 8
+    search_depth = 7
     beam_width = 96
     queue_size = 5
     max_len = 15
-    key_dim = 12
     max_height = 18
     max_holes = 50
     max_steps_env = 9999999
@@ -192,7 +192,7 @@ def main():
                 k: v.numpy()
                 for k, v in next(iter(existing_ds.batch(10_000_000))).items()
             }
-            existing_count = len(existing["actions"])
+            existing_count = len(existing["action_indices"])
             if "returns" not in existing:
                 print(
                     "Existing dataset has no `returns` field — starting fresh "
@@ -221,7 +221,6 @@ def main():
         beam_width=beam_width,
         queue_size=queue_size,
         max_len=max_len,
-        key_dim=key_dim,
         max_height=max_height,
         max_holes=max_holes,
         max_steps_env=max_steps_env,
@@ -243,8 +242,8 @@ def main():
     boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    actions = np.stack([t[3] for t in new_transitions]).astype(np.int64)
-    masks = np.stack([t[4] for t in new_transitions]).astype(bool)
+    action_indices = np.array([t[3] for t in new_transitions]).astype(np.int64)
+    valid_masks = np.stack([t[4] for t in new_transitions]).astype(bool)
     sample_weights = np.array([t[5] for t in new_transitions]).astype(np.float32)
     returns = np.array([t[6] for t in new_transitions]).astype(np.float32)
 
@@ -252,8 +251,8 @@ def main():
         boards = np.concatenate([existing["boards"], boards])
         pieces = np.concatenate([existing["pieces"], pieces])
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        actions = np.concatenate([existing["actions"], actions])
-        masks = np.concatenate([existing["masks"], masks])
+        action_indices = np.concatenate([existing["action_indices"], action_indices])
+        valid_masks = np.concatenate([existing["valid_masks"], valid_masks])
         existing_weights = existing.get(
             "sample_weights",
             np.ones(existing_count, dtype=np.float32),
@@ -262,7 +261,7 @@ def main():
         returns = np.concatenate([existing["returns"], returns])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} new = "
-            f"{len(actions)} total",
+            f"{len(action_indices)} total",
             flush=True,
         )
 
@@ -274,14 +273,14 @@ def main():
             "boards": boards,
             "pieces": pieces,
             "b2b_combo_garbage": bcg,
-            "actions": actions,
-            "masks": masks,
+            "action_indices": action_indices,
+            "valid_masks": valid_masks,
             "sample_weights": sample_weights,
             "returns": returns,
         }
     )
     dataset.save(dataset_path)
-    print(f"Saved {len(actions)} transitions to {dataset_path}", flush=True)
+    print(f"Saved {len(action_indices)} transitions to {dataset_path}", flush=True)
 
 
 if __name__ == "__main__":

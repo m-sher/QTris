@@ -1,6 +1,6 @@
 import argparse
 import tensorflow as tf
-from TetrisModel import PolicyModel
+from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame

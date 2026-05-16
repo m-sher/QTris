@@ -2,7 +2,7 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisModel import PosEncoding, DecoderLayer, ValueModel
+from qtris.models.ar.model import PosEncoding, DecoderLayer, ValueModel
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
