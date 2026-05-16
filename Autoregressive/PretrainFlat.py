@@ -1,367 +1,347 @@
-from TetrisEnv.PyTetrisRunner import PyTetrisRunner
-from TetrisEnv.Moves import Keys
+from TetrisModelFlat import FlatPolicyModel, ValueModel
+import argparse
+import os
 import tensorflow as tf
 from tensorflow import keras
-from tqdm import tqdm
-import tf_agents
-import wandb
-import time
-import json
-import multiprocessing
 
-HARD_DROP_ID = Keys.HARD_DROP
 
-piece_dim = 8
-key_dim = 12
-depth = 64
-num_heads = 4
-num_layers = 4
-dropout_rate = 0.0
-max_len = 15
-num_row_tiers = 2
-num_sequences = 160 * num_row_tiers
+RETURN_CLIP_LOW = -150.0
+RETURN_CLIP_HIGH = 100.0
 
-num_envs = 64
-num_collection_steps = 4196
-queue_size = 5
-max_holes = 50
-max_height = 18
-max_steps = 9999
-garbage_chance_min = 0.15
-garbage_chance_max = 0.15
-garbage_rows_min = 1
-garbage_rows_max = 4
 
-mini_batch_size = 1024
-num_epochs = 5
-learning_rate = 1e-4
-temperature = 1.0
-
-total_samples = num_collection_steps * num_envs
-batches_per_epoch = total_samples // mini_batch_size
-
-save_freq = 1
-DATA_DIR = "./pretrain_data"
-METRICS_PATH = "./pretrain_metrics.json"
-
-@tf.function(jit_compile=True)
-def train_step(flat_model, batch):
-    boards = tf.ensure_shape(batch["boards"], (mini_batch_size, 24, 10, 1))
-    pieces = tf.ensure_shape(batch["pieces"], (mini_batch_size, queue_size + 2))
-    b2b_combo_garbage = tf.ensure_shape(batch["b2b_combo_garbage"], (mini_batch_size, 3))
-    valid_sequences = tf.ensure_shape(
-        batch["valid_sequences"], (mini_batch_size, num_sequences, max_len)
-    )
-    action_indices = tf.ensure_shape(batch["action_indices"], (mini_batch_size,))
-
-    valid_mask = tf.reduce_any(
-        tf.equal(valid_sequences, tf.constant(HARD_DROP_ID, dtype=tf.int64)),
-        axis=-1,
-    )
-
-    with tf.GradientTape() as tape:
-        logits = flat_model(
-            (boards, pieces, b2b_combo_garbage),
-            training=True,
+class FlatPretrainer:
+    def __init__(self, dataset_path="../tetris_expert_dataset_flat", policy_only=False):
+        self._dataset_path = dataset_path
+        self._policy_only = policy_only
+        self._scc = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=True, reduction="none"
+        )
+        self._return_scale = tf.Variable(
+            1.0, trainable=False, dtype=tf.float32, name="return_scale"
         )
 
-        masked_logits = tf.where(
-            valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+    @staticmethod
+    def _surge_correction(b2b):
+        """Add back the recoverable part of the removed surge potential.
+
+        Old env had ``φ`` with a ``surge_coef * (1.15^b2b - 1)`` term;
+        new env removes it. Potential-shaping telescoping gives:
+
+            G_new − G_old ≈ surge(b_{t-1}) − γ^{T-t+1} · surge(b_T)
+
+        We can recover the first term exactly (b2b at the predicted
+        state is in the dataset). The second term requires per-trajectory
+        metadata we don't store, and explodes for trajectories where the
+        beam expert chained b2b to extreme magnitudes (e.g. b2b > 100,
+        where 1.15^b2b reaches 10^6+). The residual is bounded
+        downstream by clipping the corrected returns to the range
+        the new env can actually produce.
+        """
+        b2b = tf.cast(b2b, tf.float32)
+        surge_lines = tf.where(b2b >= 4.0, b2b, tf.zeros_like(b2b))
+        return tf.pow(1.15, surge_lines) - 1.0
+
+    @staticmethod
+    def _correct_and_clip(returns, b2b):
+        """Apply surge correction then clip to new-env reachable range."""
+        corrected = returns + FlatPretrainer._surge_correction(b2b)
+        return tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
+
+    def _load_dataset(self, batch_size):
+        if not os.path.exists(self._dataset_path):
+            raise FileNotFoundError(
+                f"No dataset at {self._dataset_path}. Run DataGenFlat.py to collect one."
+            )
+
+        dataset = tf.data.Dataset.load(self._dataset_path)
+        spec = dataset.element_spec
+        if "returns" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} lacks `returns` field. "
+                "Regenerate with the current DataGenFlat.py (value pretraining requires returns)."
+            )
+        if "sample_weights" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} lacks `sample_weights` field. "
+                "Regenerate with the current DataGenFlat.py."
+            )
+
+        if not self._policy_only:
+            all_returns = tf.concat(
+                [batch["returns"] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            all_b2b = tf.concat(
+                [batch["b2b_combo_garbage"][..., 0] for batch in dataset.batch(100_000)],
+                axis=0,
+            )
+            corrected = all_returns + self._surge_correction(all_b2b)
+            clipped = tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
+
+            n_total = tf.cast(tf.size(all_returns), tf.float32)
+            n_clipped_low = tf.reduce_sum(tf.cast(corrected < RETURN_CLIP_LOW, tf.float32))
+            n_clipped_high = tf.reduce_sum(tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32))
+            frac_clipped = (n_clipped_low + n_clipped_high) / n_total
+            max_b2b = tf.reduce_max(all_b2b)
+
+            clip_mean = tf.reduce_mean(clipped)
+            clip_std = tf.math.reduce_std(clipped)
+            scale = tf.maximum(clip_std, 1.0)
+            self._return_scale.assign(scale)
+            print(
+                f"Returns | n={int(n_total)} | max_b2b in dataset={float(max_b2b):.0f} "
+                f"| clipped to [{RETURN_CLIP_LOW:.0f}, {RETURN_CLIP_HIGH:.0f}]: "
+                f"{float(n_clipped_low):.0f} low + {float(n_clipped_high):.0f} high "
+                f"({100.0 * float(frac_clipped):.2f}%) "
+                f"| post: mean={float(clip_mean):.3f} std={float(clip_std):.3f} "
+                f"| value-head scale={float(scale):.3f}",
+                flush=True,
+            )
+
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+
+        return (
+            cached
+            .shuffle(buffer_size=500_000)
+            .batch(
+                batch_size,
+                drop_remainder=True,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+            )
+            .prefetch(tf.data.AUTOTUNE)
         )
 
-        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
-            labels=action_indices, logits=masked_logits
+    @staticmethod
+    def load_expert_dataset(path, batch_size):
+        dataset = tf.data.Dataset.load(path)
+        if "sample_weights" not in dataset.element_spec:
+            def _add_default_weight(x):
+                return {**x, "sample_weights": tf.constant(1.0, dtype=tf.float32)}
+            dataset = dataset.map(_add_default_weight)
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+        return (
+            cached
+            .repeat()
+            .shuffle(buffer_size=100_000)
+            .batch(batch_size, drop_remainder=True)
+            .prefetch(tf.data.AUTOTUNE)
         )
-        loss = tf.reduce_mean(loss)
 
-    gradients = tape.gradient(loss, flat_model.trainable_variables)
-    flat_model.optimizer.apply_gradients(
-        zip(gradients, flat_model.trainable_variables)
+    @tf.function
+    def _train_step(self, p_model, v_model, batch):
+        board = batch["boards"]
+        pieces = batch["pieces"]
+        bcg = batch["b2b_combo_garbage"]
+        action_indices = batch["action_indices"]
+        valid_masks = batch["valid_masks"]
+        sample_weights = batch["sample_weights"]
+
+        with tf.GradientTape() as p_tape:
+            logits = p_model(
+                (board, pieces, bcg), training=True
+            )
+            masked_logits = tf.where(
+                valid_masks, logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            per_sample_loss = self._scc(action_indices, masked_logits)
+            policy_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(per_sample_loss * sample_weights),
+                tf.reduce_sum(sample_weights),
+            )
+
+        p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
+        p_model.optimizer.apply_gradients(
+            zip(p_gradients, p_model.trainable_variables)
+        )
+
+        predicted = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        accuracy = tf.reduce_mean(
+            tf.cast(tf.equal(predicted, action_indices), tf.float32)
+        )
+
+        top3 = tf.math.in_top_k(action_indices, masked_logits, k=3)
+        accuracy_top3 = tf.reduce_mean(tf.cast(top3, tf.float32))
+
+        if self._policy_only:
+            return (
+                policy_loss, accuracy, accuracy_top3,
+                tf.constant(0.0, dtype=tf.float32),
+            )
+
+        returns = self._correct_and_clip(batch["returns"], bcg[..., 0])
+        with tf.GradientTape() as v_tape:
+            values = v_model((board, pieces, bcg), training=True)
+            targets = tf.reshape(returns / self._return_scale, (-1, 1))
+            squared_error = tf.square(values - targets)
+            value_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(squared_error * sample_weights[:, None]),
+                tf.reduce_sum(sample_weights),
+            )
+
+        v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
+        v_model.optimizer.apply_gradients(
+            zip(v_gradients, v_model.trainable_variables)
+        )
+
+        return policy_loss, accuracy, accuracy_top3, value_loss
+
+    def train(
+        self,
+        p_model,
+        v_model=None,
+        epochs=10,
+        batch_size=256,
+        p_checkpoint_manager=None,
+        v_checkpoint_manager=None,
+    ):
+        if not self._policy_only and v_model is None:
+            raise ValueError(
+                "v_model is required unless FlatPretrainer was constructed "
+                "with policy_only=True."
+            )
+
+        dataset = self._load_dataset(batch_size=batch_size)
+
+        for epoch in range(epochs):
+            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
+            for step, batch in enumerate(dataset):
+                policy_loss, accuracy, accuracy_top3, value_loss = (
+                    self._train_step(p_model, v_model, batch)
+                )
+                if step % 100 == 0:
+                    if self._policy_only:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f} | "
+                            f"Value: {float(value_loss):2.3f}",
+                            flush=True,
+                        )
+            if p_checkpoint_manager is not None:
+                p_checkpoint_manager.save()
+            if v_checkpoint_manager is not None and not self._policy_only:
+                v_checkpoint_manager.save()
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Pretrain the flat policy (and optionally the value head)."
     )
+    ap.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Train only the policy head; skip building, loading, and "
+             "training the value model.",
+    )
+    args = ap.parse_args()
 
-    predicted = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
-    accuracy = tf.reduce_mean(tf.cast(tf.equal(predicted, action_indices), tf.float32))
+    piece_dim = 8
+    depth = 64
+    queue_size = 5
+    num_heads = 4
+    num_layers = 4
+    dropout_rate = 0.0
+    batch_size = 256
+    num_row_tiers = 2
+    num_sequences = 160 * num_row_tiers
 
-    return {"loss": loss, "accuracy": accuracy}
-
-
-def collect_data():
-    from TetrisModel import PolicyModel, ValueModel
-
-    old_model = PolicyModel(
-        batch_size=num_envs,
+    p_model = FlatPolicyModel(
+        batch_size=batch_size,
         piece_dim=piece_dim,
-        key_dim=key_dim,
         depth=depth,
-        max_len=max_len,
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dim=key_dim,
-    )
-
-    v_model = ValueModel(
-        piece_dim=piece_dim,
-        depth=depth,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout_rate=dropout_rate,
-        output_dim=1,
-    )
-
-    old_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-            (None, max_len),
-        ]
-    )
-    v_model.build(input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3)])
-
-    old_ckpt = tf.train.Checkpoint(model=old_model)
-    old_mgr = tf.train.CheckpointManager(
-        old_ckpt, "./policy_checkpoints", max_to_keep=1
-    )
-    old_ckpt.restore(old_mgr.latest_checkpoint).expect_partial()
-    print("Restored old autoregressive policy", flush=True)
-
-    v_ckpt = tf.train.Checkpoint(model=v_model)
-    v_mgr = tf.train.CheckpointManager(v_ckpt, "./value_checkpoints", max_to_keep=1)
-    v_ckpt.restore(v_mgr.latest_checkpoint).expect_partial()
-    print("Restored value model", flush=True)
-
-    old_model.summary()
-
-    runner = PyTetrisRunner(
-        queue_size=queue_size,
-        max_holes=max_holes,
-        max_height=max_height,
-        max_steps=max_steps,
-        pathfinding=True,
-        max_len=max_len,
-        key_dim=key_dim,
-        num_steps=num_collection_steps,
-        num_envs=num_envs,
-        garbage_chance_min=garbage_chance_min,
-        garbage_chance_max=garbage_chance_max,
-        garbage_rows_min=garbage_rows_min,
-        garbage_rows_max=garbage_rows_max,
-        p_model=old_model,
-        v_model=v_model,
-        temperature=temperature,
-        seed=None,
         num_sequences=num_sequences,
-        num_row_tiers=num_row_tiers,
     )
 
-    print(f"Collecting {num_collection_steps} steps x {num_envs} envs...", flush=True)
-    t0 = time.time()
+    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
-    (
-        all_boards,
-        all_pieces,
-        all_b2b_combo_garbage,
-        _all_actions,
-        _all_log_probs,
-        _all_masks,
-        all_valid_sequences,
-        all_action_indices,
-        _all_values,
-        _all_last_values,
-        all_attacks,
-        _all_clears,
-        _all_attack_reward,
-        all_total_reward,
-        all_dones,
-        _all_garbage_pushed,
-    ) = runner.collect_trajectory(render=False, progress=True)
-
-    collect_time = time.time() - t0
-    print(f"Collection done in {collect_time:.1f}s", flush=True)
-
-    avg_attacks = float(tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0)))
-    avg_reward = float(tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0)))
-    avg_deaths = float(tf.reduce_mean(tf.reduce_sum(all_dones, axis=0)))
-    avg_pieces = float(tf.reduce_mean(
-        num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
-    ))
-
-    boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
-    pieces_flat = tf.reshape(all_pieces, (-1, (queue_size + 2)))
-    b2b_combo_garbage_flat = tf.reshape(all_b2b_combo_garbage, (-1, 3))
-    valid_sequences_flat = tf.reshape(
-        all_valid_sequences, (-1, num_sequences, max_len)
-    )
-    action_indices_flat = tf.reshape(all_action_indices, (-1,))
-
-    dataset = tf.data.Dataset.from_tensor_slices({
-        "boards": boards_flat,
-        "pieces": pieces_flat,
-        "b2b_combo_garbage": b2b_combo_garbage_flat,
-        "valid_sequences": valid_sequences_flat,
-        "action_indices": action_indices_flat,
-    })
-    tf.data.Dataset.save(dataset, DATA_DIR)
-
-    env_metrics = {
-        "avg_attacks": avg_attacks,
-        "avg_reward": avg_reward,
-        "avg_deaths": avg_deaths,
-        "avg_pieces": avg_pieces,
-    }
-
-    runner.env.close()
-
-    with open(METRICS_PATH, "w") as f:
-        json.dump(env_metrics, f)
-
-
-def load_dataset():
-    element_spec = {
-        "boards": tf.TensorSpec(shape=(24, 10, 1), dtype=tf.float32),
-        "pieces": tf.TensorSpec(shape=(queue_size + 2,), dtype=tf.int64),
-        "b2b_combo_garbage": tf.TensorSpec(shape=(3,), dtype=tf.float32),
-        "valid_sequences": tf.TensorSpec(shape=(num_sequences, max_len), dtype=tf.int64),
-        "action_indices": tf.TensorSpec(shape=(), dtype=tf.int64),
-    }
-    return (
-        tf.data.Dataset.load(DATA_DIR, element_spec=element_spec)
-        .cache()
-        .shuffle(buffer_size=total_samples)
-        .batch(
-            mini_batch_size,
-            num_parallel_calls=tf.data.AUTOTUNE,
-            deterministic=False,
-            drop_remainder=True,
+    v_model = None
+    v_optimizer = None
+    if not args.policy_only:
+        v_model = ValueModel(
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=1
         )
-        .prefetch(tf.data.AUTOTUNE)
-    )
+        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_model.compile(optimizer=v_optimizer, jit_compile=True)
+    print("Initialized models and optimizers.", flush=True)
 
-
-def train():
-    from TetrisModelFlat import FlatPolicyModel
-
-    dataset = load_dataset()
-    with open(METRICS_PATH) as f:
-        env_metrics = json.load(f)
-
-    flat_model = FlatPolicyModel(
-        batch_size=num_envs,
-        piece_dim=piece_dim,
-        depth=depth,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        dropout_rate=dropout_rate,
-        num_sequences=num_sequences,
-    )
-
-    flat_model.build(
-        input_shape=[
-            (None, 24, 10, 1),
-            (None, queue_size + 2),
-            (None, 3),
-        ]
-    )
-
-    flat_ckpt_weights = tf.train.Checkpoint(model=flat_model)
-    flat_ckpt_weights_mgr = tf.train.CheckpointManager(
-        flat_ckpt_weights, "./flat_head_policy_checkpoints", max_to_keep=1
-    )
-    if flat_ckpt_weights_mgr.latest_checkpoint:
-        flat_ckpt_weights.restore(
-            flat_ckpt_weights_mgr.latest_checkpoint
-        ).expect_partial()
-        print("Restored flat model from existing checkpoint", flush=True)
-    else:
-        ar_ckpt = tf.train.Checkpoint(model=flat_model)
-        ar_mgr = tf.train.CheckpointManager(
-            ar_ckpt, "./policy_checkpoints", max_to_keep=1
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
         )
-        ar_ckpt.restore(ar_mgr.latest_checkpoint).expect_partial()
-        print("Restored flat model encoder from autoregressive checkpoint", flush=True)
-
-    flat_model.make_patches.trainable = False
-    flat_model.piece_embedding.trainable = False
-    flat_model._bcg_dense.trainable = False
-    for layer in flat_model.board_decoder_layers:
-        layer.trainable = False
-    for layer in flat_model.piece_decoder_layers:
-        layer.trainable = False
-
-    optimizer = keras.optimizers.Adam(learning_rate, clipnorm=0.5)
-    flat_model.compile(optimizer=optimizer, jit_compile=True)
-
-    flat_ckpt = tf.train.Checkpoint(model=flat_model, optimizer=optimizer)
-    flat_mgr = tf.train.CheckpointManager(
-        flat_ckpt, "./flat_head_policy_checkpoints", max_to_keep=3
     )
+    p_model.summary()
+    if v_model is not None:
+        v_model(
+            (
+                keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+                keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+                keras.Input(shape=(3,), dtype=tf.float32),
+            )
+        )
+        v_model.summary()
 
-    print(
-        f"Flat model trainable variables: {len(flat_model.trainable_variables)}",
-        flush=True,
+    p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "./pretrained_flat_policy_checkpoints", max_to_keep=3
     )
-    flat_model.summary()
+    if p_checkpoint_manager.latest_checkpoint:
+        p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+        print("Restored pretrained policy checkpoint.", flush=True)
 
-    wandb_run = wandb.init(project="Tetris-Pretrain", config={
-        "learning_rate": learning_rate,
-        "mini_batch_size": mini_batch_size,
-        "num_epochs": num_epochs,
-        "num_envs": num_envs,
-        "num_collection_steps": num_collection_steps,
-        "total_samples": total_samples,
-        "batches_per_epoch": batches_per_epoch,
-        **env_metrics,
-    })
+    pretrainer = FlatPretrainer(policy_only=args.policy_only)
 
-    print(f"Training {num_epochs} epochs x {batches_per_epoch} batches...", flush=True)
-    train_t0 = time.time()
+    v_checkpoint_manager = None
+    if v_model is not None:
+        v_checkpoint = tf.train.Checkpoint(
+            model=v_model,
+            optimizer=v_optimizer,
+            return_scale=pretrainer._return_scale,
+        )
+        v_checkpoint_manager = tf.train.CheckpointManager(
+            v_checkpoint, "./pretrained_flat_value_checkpoints", max_to_keep=3
+        )
+        if v_checkpoint_manager.latest_checkpoint:
+            v_checkpoint.restore(
+                v_checkpoint_manager.latest_checkpoint
+            ).expect_partial()
+            print(
+                f"Restored pretrained value checkpoint "
+                f"(return_scale={float(pretrainer._return_scale):.3f}).",
+                flush=True,
+            )
 
-    for epoch in range(num_epochs):
-        epoch_loss = 0.0
-        epoch_acc = 0.0
-        step = 0
-        pbar = tqdm(dataset, desc=f"Epoch {epoch+1}/{num_epochs}", unit="batch")
-        for batch in pbar:
-            out = train_step(flat_model, batch)
-            loss_val = float(out["loss"])
-            acc_val = float(out["accuracy"])
-            epoch_loss += loss_val
-            epoch_acc += acc_val
-            step += 1
-            pbar.set_postfix(loss=f"{loss_val:.4f}", acc=f"{acc_val:.4f}")
-
-        avg_epoch_loss = epoch_loss / max(step, 1)
-        avg_epoch_acc = epoch_acc / max(step, 1)
-
-        wandb.log({
-            "epoch_loss": avg_epoch_loss,
-            "epoch_accuracy": avg_epoch_acc,
-            "epoch": epoch,
-        })
-
-        if (epoch + 1) % save_freq == 0:
-            flat_mgr.save()
-
-    flat_mgr.save()
-    train_time = time.time() - train_t0
-
-    print(
-        f"Training done in {train_time:.1f}s | "
-        f"Final loss: {avg_epoch_loss:.4f} | Final acc: {avg_epoch_acc:.4f}",
-        flush=True,
+    pretrainer.train(
+        p_model,
+        v_model,
+        epochs=10,
+        batch_size=batch_size,
+        p_checkpoint_manager=p_checkpoint_manager,
+        v_checkpoint_manager=v_checkpoint_manager,
     )
-
-    wandb_run.finish()
-
-
-def main(argv):
-    p = multiprocessing.Process(target=collect_data)
-    p.start()
-    p.join()
-
-    train()
 
 
 if __name__ == "__main__":
-    tf_agents.system.multiprocessing.handle_main(main)
+    main()

@@ -8,41 +8,6 @@ from TetrisEnv.Moves import Keys
 HARD_DROP_ID = Keys.HARD_DROP
 
 
-class ActionDecoderLayer(layers.Layer):
-    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="ActionDecoder"):
-        super().__init__(name=name)
-
-        self.cross_attention = layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.add = layers.Add()
-        self.layernorm = layers.LayerNormalization()
-
-        self.ff = keras.Sequential(
-            [
-                layers.Dense(units=2 * units, activation="relu"),
-                layers.Dense(units=units),
-                layers.Dropout(rate=dropout_rate),
-            ]
-        )
-        self.ff_layernorm = layers.LayerNormalization()
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False):
-        context, queries = inputs
-
-        attn, attn_scores = self.cross_attention(
-            query=queries, value=context, return_attention_scores=True, training=training
-        )
-        queries = self.add([queries, attn])
-        queries = self.layernorm(queries, training=training)
-
-        queries = queries + self.ff(queries, training=training)
-        queries = self.ff_layernorm(queries, training=training)
-
-        return queries, attn_scores
-
-
 class FlatPolicyModel(keras.Model):
     def __init__(
         self,
@@ -124,32 +89,50 @@ class FlatPolicyModel(keras.Model):
             for i in range(num_layers)
         ]
 
-        self._bcg_dense = keras.Sequential(
+        self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
+        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
+        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
+
+        self.trunk = keras.Sequential(
             [
-                layers.Dense(depth // 2, activation="relu"),
+                layers.Flatten(),
+                layers.Dropout(dropout_rate),
+                layers.Dense(4 * depth, activation="relu"),
+                layers.Dense(2 * depth, activation="relu"),
                 layers.Dense(depth, activation="relu"),
             ],
-            name="bcg_dense",
+            name="trunk_layers",
         )
 
-        self.action_embedding = layers.Embedding(
-            input_dim=num_sequences,
-            output_dim=depth,
-        )
+        self.top = layers.Dense(num_sequences, name="action_logits")
 
-        self.action_decoder_layers = [
-            ActionDecoderLayer(
-                units=depth,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"action_dec_{i}",
-            )
-            for i in range(num_layers)
-        ]
+    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
+        """Convert raw BCG scalars into 3 separate attention tokens.
 
-        self.action_proj = layers.Dense(1, name="action_proj")
+        Each feature (b2b, combo, garbage) gets its own learned projection
+        from a log-compressed scalar to a depth-dimensional token vector.
+        """
+        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
+        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
+        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
+        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
+        bcg_tokens = self._bcg_ln(
+            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
+        )  # (B, 3, depth)
+        return bcg_tokens
 
-    @tf.function(jit_compile=True)
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
     def process_obs(self, inputs, training=False):
         board, piece, b2b_combo_garbage = inputs
 
@@ -160,8 +143,9 @@ class FlatPolicyModel(keras.Model):
         piece_embedding = self.piece_embedding(piece, training=training)
         piece_dec = self.piece_pos_encoding(piece_embedding)
 
-        bcg_embedding = self._bcg_dense(b2b_combo_garbage, training=training)
-        piece_dec += bcg_embedding[:, None, :]
+        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
+        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
+        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
 
         for board_dec_layer, piece_dec_layer in zip(
             self.board_decoder_layers, self.piece_decoder_layers
@@ -178,21 +162,8 @@ class FlatPolicyModel(keras.Model):
 
     @tf.function(jit_compile=True)
     def score_actions(self, piece_dec, training=False):
-        batch_size = tf.shape(piece_dec)[0]
-        action_ids = tf.broadcast_to(
-            tf.range(self._num_sequences, dtype=tf.int64)[None, :],
-            [batch_size, self._num_sequences],
-        )
-        action_dec = self.action_embedding(action_ids, training=training)
-
-        for action_dec_layer in self.action_decoder_layers:
-            action_dec, _ = action_dec_layer(
-                [piece_dec, action_dec], training=training
-            )
-
-        logits = tf.squeeze(
-            self.action_proj(action_dec, training=training), axis=-1
-        )
+        trunk_out = self.trunk(piece_dec, training=training)
+        logits = self.top(trunk_out, training=training)
         return logits
 
     @tf.function(jit_compile=True)
