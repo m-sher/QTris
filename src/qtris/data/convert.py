@@ -157,12 +157,12 @@ def main():
 
     default_paths = {
         "flat_to_ar": (
-            "../tetris_expert_dataset_flat",
-            "../tetris_expert_dataset_b2b",
+            "datasets/tetris_expert_dataset_flat",
+            "datasets/tetris_expert_dataset_b2b",
         ),
         "ar_to_flat": (
-            "../tetris_expert_dataset_b2b",
-            "../tetris_expert_dataset_flat",
+            "datasets/tetris_expert_dataset_b2b",
+            "datasets/tetris_expert_dataset_flat",
         ),
     }
     in_default, out_default = default_paths[args.direction]

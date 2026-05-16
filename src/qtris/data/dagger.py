@@ -33,9 +33,9 @@ from tensorflow import keras
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
-from TetrisModel import PolicyModel
-from TetrisModelFlat import FlatPolicyModel
-from DataGen import _build_mask
+from qtris.models.ar.model import PolicyModel
+from qtris.models.flat.model import FlatPolicyModel
+from qtris.data.gen_ar import _build_mask
 
 
 HARD_DROP_ID = Keys.HARD_DROP
@@ -340,14 +340,14 @@ def main():
         "--policy-checkpoint", type=str, default=None,
         help="Path to a tf.train.CheckpointManager directory containing "
              "the PolicyModel checkpoint to roll out. Defaults: "
-             "./pretrained_checkpoints/ (ar) or "
-             "./pretrained_flat_policy_checkpoints/ (flat).",
+             "checkpoints/ar_pretrained_policy/ (ar) or "
+             "checkpoints/flat_pretrained_policy/ (flat).",
     )
     ap.add_argument(
         "--dataset-path", type=str, default=None,
         help="Dataset path to APPEND DAgger transitions into. Defaults: "
-             "../tetris_expert_dataset_b2b (ar) or "
-             "../tetris_expert_dataset_flat (flat).",
+             "datasets/tetris_expert_dataset_b2b (ar) or "
+             "datasets/tetris_expert_dataset_flat (flat).",
     )
     ap.add_argument("--num-steps", type=int, default=100_000)
     ap.add_argument("--seed", type=int, default=10_000_000,
@@ -379,15 +379,15 @@ def main():
 
     mode_defaults = {
         "ar": {
-            "policy_checkpoint": "./pretrained_checkpoints/",
-            "dataset_path": "../tetris_expert_dataset_b2b",
+            "policy_checkpoint": "checkpoints/ar_pretrained_policy",
+            "dataset_path": "datasets/tetris_expert_dataset_b2b",
             "label_key": "actions",
             "mask_key": "masks",
             "build_model": _build_ar_model,
         },
         "flat": {
-            "policy_checkpoint": "./pretrained_flat_policy_checkpoints/",
-            "dataset_path": "../tetris_expert_dataset_flat",
+            "policy_checkpoint": "checkpoints/flat_pretrained_policy",
+            "dataset_path": "datasets/tetris_expert_dataset_flat",
             "label_key": "action_indices",
             "mask_key": "valid_masks",
             "build_model": _build_flat_model,

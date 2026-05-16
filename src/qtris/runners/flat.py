@@ -6,7 +6,7 @@ import pygame
 from typing import Optional, Tuple, Any
 
 
-class PyTetrisRunnerFlat:
+class FlatRunner:
     def __init__(
         self,
         queue_size: int,

@@ -1,7 +1,8 @@
-USE_FLAT = False
+USE_FLAT = False  # TODO(phase-1b): replace with args.family-based runtime dispatch (per dual-family plan)
 
 from TetrisEnv.Moves import Keys
-from TetrisModel import AsymmetricValueModel
+from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
+from qtris.models.ar.model import AsymmetricValueModel, PolicyModel
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
@@ -11,13 +12,6 @@ import time
 import os
 import glob
 import random
-
-if USE_FLAT:
-    from TetrisEnv.Py1v1TetrisRunnerFlat import Py1v1TetrisRunnerFlat
-    from TetrisModelFlat import FlatPolicyModel
-else:
-    from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
-    from TetrisModel import PolicyModel
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -62,7 +56,7 @@ b2b_gap_coef = 0.0
 # Opponent pool params
 pool_save_interval = 25
 max_pool_size = 50
-pool_dir = "./opponent_pool_flat" if USE_FLAT else "./opponent_pool"
+pool_dir = "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
 
 config = {
     "flat": USE_FLAT,
@@ -550,13 +544,13 @@ def main(argv):
     # Checkpoint paths depend on mode
     # -----------------------------------------------------------------------
     if USE_FLAT:
-        p_ckpt_dir = "./1v1_flat_policy_checkpoints"
-        solo_bootstrap_dir = "./flat_head_policy_checkpoints"
+        p_ckpt_dir = "checkpoints/1v1_flat_policy"
+        solo_bootstrap_dir = "checkpoints/flat_policy"
     else:
-        p_ckpt_dir = "./1v1_policy_checkpoints"
-        solo_bootstrap_dir = "./policy_checkpoints"
+        p_ckpt_dir = "checkpoints/1v1_ar_policy"
+        solo_bootstrap_dir = "checkpoints/ar_policy"
 
-    v_ckpt_dir = "./1v1_value_checkpoints"
+    v_ckpt_dir = "checkpoints/1v1_ar_value"
 
     # Initialize checkpoint managers for training models
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)

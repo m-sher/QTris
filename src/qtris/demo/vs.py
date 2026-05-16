@@ -1,5 +1,5 @@
 import tensorflow as tf
-from TetrisModel import PolicyModel
+from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.Moves import Convert
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
@@ -71,7 +71,7 @@ p_model_left = PolicyModel(
 
 p_checkpoint_left = tf.train.Checkpoint(model=p_model_left)
 p_checkpoint_manager_left = tf.train.CheckpointManager(
-    p_checkpoint_left, f"./checkpoints/{left_path}", max_to_keep=3
+    p_checkpoint_left, f"checkpoints/{left_path}", max_to_keep=3
 )
 p_checkpoint_left.restore(p_checkpoint_manager_left.latest_checkpoint).expect_partial()
 
@@ -110,7 +110,7 @@ p_model_right = PolicyModel(
 
 p_checkpoint_right = tf.train.Checkpoint(model=p_model_right)
 p_checkpoint_manager_right = tf.train.CheckpointManager(
-    p_checkpoint_right, f"./checkpoints/{right_path}", max_to_keep=3
+    p_checkpoint_right, f"checkpoints/{right_path}", max_to_keep=3
 )
 p_checkpoint_right.restore(
     p_checkpoint_manager_right.latest_checkpoint
@@ -192,7 +192,7 @@ running_clears_right = 0
 prev_garbage_total_left = 0
 prev_garbage_total_right = 0
 
-piece_display = np.load("../PieceDisplay.npy")
+piece_display = np.load("PieceDisplay.npy")
 
 readable_keys = {
     1: "h",

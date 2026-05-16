@@ -1,5 +1,5 @@
-from TetrisEnv.Moves import Keys
-from TetrisModel import PolicyModel, ValueModel
+from qtris.models.ar.model import ValueModel
+from qtris.models.flat.model import FlatPolicyModel
 import argparse
 import os
 import tensorflow as tf
@@ -10,8 +10,8 @@ RETURN_CLIP_LOW = -150.0
 RETURN_CLIP_HIGH = 100.0
 
 
-class Pretrainer:
-    def __init__(self, dataset_path="../tetris_expert_dataset_b2b", policy_only=False):
+class FlatPretrainer:
+    def __init__(self, dataset_path="datasets/tetris_expert_dataset_flat", policy_only=False):
         self._dataset_path = dataset_path
         self._policy_only = policy_only
         self._scc = keras.losses.SparseCategoricalCrossentropy(
@@ -45,13 +45,13 @@ class Pretrainer:
     @staticmethod
     def _correct_and_clip(returns, b2b):
         """Apply surge correction then clip to new-env reachable range."""
-        corrected = returns + Pretrainer._surge_correction(b2b)
+        corrected = returns + FlatPretrainer._surge_correction(b2b)
         return tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
     def _load_dataset(self, batch_size):
         if not os.path.exists(self._dataset_path):
             raise FileNotFoundError(
-                f"No dataset at {self._dataset_path}. Run DataGen.py to collect one."
+                f"No dataset at {self._dataset_path}. Run DataGenFlat.py to collect one."
             )
 
         dataset = tf.data.Dataset.load(self._dataset_path)
@@ -59,12 +59,12 @@ class Pretrainer:
         if "returns" not in spec:
             raise ValueError(
                 f"Dataset at {self._dataset_path} lacks `returns` field. "
-                "Regenerate with the current DataGen.py (value pretraining requires returns)."
+                "Regenerate with the current DataGenFlat.py (value pretraining requires returns)."
             )
         if "sample_weights" not in spec:
             raise ValueError(
                 f"Dataset at {self._dataset_path} lacks `sample_weights` field. "
-                "Regenerate with the current DataGen.py."
+                "Regenerate with the current DataGenFlat.py."
             )
 
         if not self._policy_only:
@@ -138,30 +138,21 @@ class Pretrainer:
         board = batch["boards"]
         pieces = batch["pieces"]
         bcg = batch["b2b_combo_garbage"]
-        actions = batch["actions"]
-        masks = batch["masks"]
+        action_indices = batch["action_indices"]
+        valid_masks = batch["valid_masks"]
         sample_weights = batch["sample_weights"]
-
-        input_seq = actions[:, :-1]
-        target_seq = actions[:, 1:]
-        valid_mask = masks[:, 1:, :]
-
-        pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
-        num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
-        decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
-        weighted_mask = decision_mask * sample_weights[:, None]
 
         with tf.GradientTape() as p_tape:
             logits = p_model(
-                (board, pieces, bcg, input_seq), training=True
+                (board, pieces, bcg), training=True
             )
             masked_logits = tf.where(
-                valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+                valid_masks, logits, tf.constant(-1e9, dtype=tf.float32)
             )
-            per_token_loss = self._scc(target_seq, masked_logits)
+            per_sample_loss = self._scc(action_indices, masked_logits)
             policy_loss = tf.math.divide_no_nan(
-                tf.reduce_sum(per_token_loss * weighted_mask),
-                tf.reduce_sum(weighted_mask),
+                tf.reduce_sum(per_sample_loss * sample_weights),
+                tf.reduce_sum(sample_weights),
             )
 
         p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
@@ -169,28 +160,13 @@ class Pretrainer:
             zip(p_gradients, p_model.trainable_variables)
         )
 
-        pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
-        correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
-        accuracy = tf.math.divide_no_nan(
-            tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
+        predicted = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        accuracy = tf.reduce_mean(
+            tf.cast(tf.equal(predicted, action_indices), tf.float32)
         )
 
-        # Top-3 on decision tokens. Tracks how well the right answer is
-        # ranked, not just whether it's #1. Useful diagnostic for whether
-        # the model "knows about" the correct token even when not
-        # selecting it greedily — especially helpful early in training
-        # when Acc is low but the right token is consistently in the top
-        # few logits.
-        last_dim = tf.shape(masked_logits)[-1]
-        flat_logits = tf.reshape(masked_logits, [-1, last_dim])
-        flat_targets = tf.reshape(target_seq, [-1])
-        top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
-        top3 = tf.cast(
-            tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32
-        ) * decision_mask
-        accuracy_top3 = tf.math.divide_no_nan(
-            tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
-        )
+        top3 = tf.math.in_top_k(action_indices, masked_logits, k=3)
+        accuracy_top3 = tf.reduce_mean(tf.cast(top3, tf.float32))
 
         if self._policy_only:
             return (
@@ -226,7 +202,7 @@ class Pretrainer:
     ):
         if not self._policy_only and v_model is None:
             raise ValueError(
-                "v_model is required unless Pretrainer was constructed "
+                "v_model is required unless FlatPretrainer was constructed "
                 "with policy_only=True."
             )
 
@@ -262,8 +238,7 @@ class Pretrainer:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Pretrain the autoregressive policy (and optionally the "
-                    "value head)."
+        description="Pretrain the flat policy (and optionally the value head)."
     )
     ap.add_argument(
         "--policy-only",
@@ -274,25 +249,23 @@ def main():
     args = ap.parse_args()
 
     piece_dim = 8
-    key_dim = 12
     depth = 64
-    max_len = 15
     queue_size = 5
     num_heads = 4
     num_layers = 4
     dropout_rate = 0.0
-    batch_size = 512
+    batch_size = 256
+    num_row_tiers = 2
+    num_sequences = 160 * num_row_tiers
 
-    p_model = PolicyModel(
+    p_model = FlatPolicyModel(
         batch_size=batch_size,
         piece_dim=piece_dim,
-        key_dim=key_dim,
         depth=depth,
-        max_len=max_len,
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
-        output_dim=key_dim,
+        num_sequences=num_sequences,
     )
 
     p_optimizer = keras.optimizers.Adam(3e-4)
@@ -307,7 +280,7 @@ def main():
             num_heads=num_heads,
             num_layers=num_layers,
             dropout_rate=dropout_rate,
-            output_dim=1,
+            output_dim=1
         )
         v_optimizer = keras.optimizers.Adam(3e-4)
         v_model.compile(optimizer=v_optimizer, jit_compile=True)
@@ -318,7 +291,6 @@ def main():
             keras.Input(shape=(24, 10, 1), dtype=tf.float32),
             keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
             keras.Input(shape=(3,), dtype=tf.float32),
-            keras.Input(shape=(max_len,), dtype=tf.int64),
         )
     )
     p_model.summary()
@@ -334,13 +306,13 @@ def main():
 
     p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
     p_checkpoint_manager = tf.train.CheckpointManager(
-        p_checkpoint, "./pretrained_checkpoints", max_to_keep=3
+        p_checkpoint, "checkpoints/flat_pretrained_policy", max_to_keep=3
     )
     if p_checkpoint_manager.latest_checkpoint:
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    pretrainer = Pretrainer(policy_only=args.policy_only)
+    pretrainer = FlatPretrainer(policy_only=args.policy_only)
 
     v_checkpoint_manager = None
     if v_model is not None:
@@ -350,7 +322,7 @@ def main():
             return_scale=pretrainer._return_scale,
         )
         v_checkpoint_manager = tf.train.CheckpointManager(
-            v_checkpoint, "./pretrained_value_checkpoints", max_to_keep=3
+            v_checkpoint, "checkpoints/flat_pretrained_value", max_to_keep=3
         )
         if v_checkpoint_manager.latest_checkpoint:
             v_checkpoint.restore(

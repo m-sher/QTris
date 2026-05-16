@@ -1,6 +1,7 @@
 import tensorflow as tf
-from TetrisModelFlat import FlatPolicyModel
+from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.Moves import Convert
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -10,44 +11,49 @@ import imageio
 import numpy as np
 import time
 
+pathfinding = True
+
+# Model params
 num_envs = 1
 piece_dim = 8
+key_dim = 12
 depth = 64
 num_heads = 4
 num_layers = 4
-dropout_rate = 0.0
+dropout_rate = 0.1
 max_len = 15
-num_row_tiers = 2
-num_sequences = 160 * num_row_tiers
 
 num_steps = 500
 queue_size = 5
 max_holes = 100
 max_height = 18
 
-p_model = FlatPolicyModel(
+p_model = PolicyModel(
     batch_size=num_envs,
     piece_dim=piece_dim,
+    key_dim=key_dim,
     depth=depth,
+    max_len=max_len,
     num_heads=num_heads,
     num_layers=num_layers,
     dropout_rate=dropout_rate,
-    num_sequences=num_sequences,
+    output_dim=key_dim,
 )
+
+p_checkpoint = tf.train.Checkpoint(model=p_model)
+p_checkpoint_manager = tf.train.CheckpointManager(
+    p_checkpoint, "checkpoints/1v1_ar_policy_14k/", max_to_keep=3
+)
+p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
 p_model(
     (
         tf.keras.Input(shape=(24, 10, 1), dtype=tf.float32),
         tf.keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
         tf.keras.Input(shape=(3,), dtype=tf.float32),
+        tf.keras.Input(shape=(max_len,), dtype=tf.int64),
     )
 )
-
-p_checkpoint = tf.train.Checkpoint(model=p_model)
-p_checkpoint_manager = tf.train.CheckpointManager(
-    p_checkpoint, "./checkpoints/1v1_flat_policy_17k", max_to_keep=3
-)
-p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
 
 p_model.summary()
 
@@ -57,16 +63,17 @@ py_env = PyTetrisEnv(
     max_height=max_height,
     max_steps=num_steps,
     max_len=max_len,
-    pathfinding=True,
+    pathfinding=pathfinding,
     garbage_chance=0.15,
     garbage_min=1,
     garbage_max=4,
     seed=0,
     idx=0,
-    num_row_tiers=num_row_tiers,
+    num_row_tiers=2,
 )
 env = TFPyEnvironment(py_env)
 
+# Initialize pygame
 screen_w = 870
 screen_h = 800
 pygame.init()
@@ -100,6 +107,7 @@ clears = []
 actions = []
 attack_rewards = []
 total_rewards = []
+garbage_pusheds = []
 current_b2b = []
 current_combo = []
 current_garbage = []
@@ -108,7 +116,7 @@ death = 0
 running_attacks = 0
 running_clears = 0
 
-piece_display = np.load("../PieceDisplay.npy")
+piece_display = np.load("PieceDisplay.npy")
 
 readable_keys = {
     1: "h",
@@ -148,7 +156,9 @@ for t in range(num_steps):
     clear = time_step.reward["clear"].numpy()[0]
     attack_reward = time_step.reward["attack_reward"].numpy()[0]
     total_reward = time_step.reward["total_reward"].numpy()[0]
+    garbage_pushed = time_step.reward["garbage_pushed"].numpy()[0]
 
+    # Get current b2b, combo, garbage values from observation
     current_b2b_val = py_env._scorer._b2b
     current_combo_val = py_env._scorer._combo
     current_garbage_val = py_env._get_total_garbage()
@@ -162,6 +172,9 @@ for t in range(num_steps):
         if event.type == pygame.QUIT:
             pygame.quit()
 
+    if not pathfinding:
+        valid_sequences = Convert.tf_to_sequence[None, ...]
+
     key_sequence, log_prob, action_index, scores = p_model.predict(
         (board, pieces, b2b_combo_garbage),
         greedy=True,
@@ -169,18 +182,30 @@ for t in range(num_steps):
         temperature=1.0,
     )
 
+    # Handle pieces tensor shape (remove batch dimension if present)
     pieces_array = pieces.numpy()
     if pieces_array.ndim > 1:
-        pieces_array = pieces_array[0]
+        pieces_array = pieces_array[0]  # Remove batch dimension
 
-    piece_attention = tf.reduce_sum(scores, axis=[0, 2])
+    # Compute dominant piece for each board patch based on attention scores
+    # scores is list of tensors (num_layers, batch_size, seq_len, num_pieces, num_patches)
+    piece_attention = tf.reduce_sum(
+        scores, axis=[0, 2]
+    )  # Sum over layers and seq positions, keep pieces and patches
     # Slice out BCG tokens: keep only piece queries (:7) and patch keys (:60)
     piece_patch_attn = piece_attention[0, :7, :60]
-    dominant_pieces = tf.argmax(piece_patch_attn, axis=0)
-    dominant_grid = tf.reshape(dominant_pieces, (12, 5))
+    dominant_pieces = tf.argmax(
+        piece_patch_attn, axis=0
+    )  # Find dominant piece for each patch (shape: 60)
+    dominant_grid = tf.reshape(dominant_pieces, (12, 5))  # Reshape to (12, 5) grid
 
-    dominant_attention = tf.reduce_max(piece_patch_attn, axis=0)
-    dominant_attention_grid = tf.reshape(dominant_attention, (12, 5))
+    # Extract attention intensities for dominant pieces
+    dominant_attention = tf.reduce_max(
+        piece_patch_attn, axis=0
+    )  # Get attention value for dominant piece (shape: 60)
+    dominant_attention_grid = tf.reshape(
+        dominant_attention, (12, 5)
+    )  # Reshape to (12, 5) grid
 
     # BCG (b2b, combo, garbage) attention over the 60 board patches
     bcg_patch_attn = piece_attention[0, 7:10, :60].numpy()  # (3, 60)
@@ -194,52 +219,62 @@ for t in range(num_steps):
             bcg_colors_rgb[i][None, None] * norm[..., None]
         ).astype(np.uint8)
 
+    # Normalize attention intensities for brightness modulation
     attention_min = tf.reduce_min(dominant_attention_grid)
     attention_max = tf.reduce_max(dominant_attention_grid)
     attention_normalized = (dominant_attention_grid - attention_min) / (
         attention_max - attention_min + 1e-8
     )
 
-    all_piece_colors = piece_colors[pieces_array]
+    # Colorize the scores display based on dominant pieces with intensity modulation
+    all_piece_colors = piece_colors[pieces_array]  # Colors for all 7 pieces
     colored_scores = np.zeros((12, 5, 3), dtype=np.uint8)
     dominant_grid_np = dominant_grid.numpy()
     attention_np = attention_normalized.numpy()
 
-    for r in range(12):
-        for c in range(5):
+    for r in range(12):  # 12 rows
+        for c in range(5):  # 5 columns
             piece_idx = dominant_grid_np[r, c]
             intensity = attention_np[r, c]
             colored_scores[r, c] = (all_piece_colors[piece_idx] * intensity).astype(
                 np.uint8
             )
 
+    # Get piece display for all 7 pieces
     piece_sidebar = piece_display[pieces_array].reshape((28, 5))
 
+    # Colorize the piece display sidebar
     piece_type_colors = piece_colors[pieces_array]
     colored_sidebar = np.zeros((28, 5, 3), dtype=np.uint8)
-    for i in range(7):
-        for r in range(4 * i, 4 * i + 4):
-            for c in range(5):
+    for i in range(7):  # 7 pieces: active, hold, 5 queue
+        for r in range(4 * i, 4 * i + 4):  # 4 rows per piece
+            for c in range(5):  # 5 columns
                 colored_sidebar[r, c] = (
                     piece_type_colors[i] * piece_sidebar[r, c]
                 ).astype(np.uint8)
 
+    # Create garbage queue visualization
     garbage_queue = py_env._garbage_queue
-    garbage_bar_width = 10
-    garbage_bar_height = 24
+    garbage_bar_width = 10  # Thinner width in pixels for the garbage bar
+    garbage_bar_height = 24  # Height matches board height
     garbage_surface = np.zeros(
         (garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8
     )
 
-    current_row = garbage_bar_height - 1
-    for i, (num_rows, empty_column, timing) in enumerate(garbage_queue):
+    # Draw garbage sections (bottom to top, with bottom being next to push)
+    current_row = garbage_bar_height - 1  # Start from bottom
+    for i, (num_rows, empty_column, _timing) in enumerate(garbage_queue):
+        # Draw red section for this garbage instance
         start_row = max(0, current_row - num_rows + 1)
         for row in range(start_row, current_row + 1):
             if row >= 0 and row < garbage_bar_height:
-                garbage_surface[row, :] = [255, 0, 0]
+                garbage_surface[row, :] = [255, 0, 0]  # Red color
 
-        if i < len(garbage_queue) - 1 and start_row > 0:
-            current_row = start_row - 2
+        # Add separator line (1 pixel gap) between sections
+        if (
+            i < len(garbage_queue) - 1 and start_row > 0
+        ):  # Not the last section and not at top
+            current_row = start_row - 2  # Leave 1 pixel gap (black)
         else:
             current_row = start_row - 1
         if current_row < 0:
@@ -265,16 +300,19 @@ for t in range(num_steps):
     board_surf = pygame.transform.scale(board_surf, (250, 600))
     piece_surf = pygame.transform.scale(piece_surf, (125, 600))
     scores_surf = pygame.transform.scale(scores_surf, (250, 600))
-    garbage_surf = pygame.transform.scale(garbage_surf, (25, 600))
+    garbage_surf = pygame.transform.scale(
+        garbage_surf, (25, 600)
+    )  # Thinner garbage bar
 
-    board_with_border = pygame.Surface((254, 604))
-    board_with_border.fill((255, 255, 255))
-    board_with_border.blit(board_surf, (2, 2))
+    # Create board with border
+    board_with_border = pygame.Surface((254, 604))  # 2 pixels border on each side
+    board_with_border.fill((255, 255, 255))  # Black border
+    board_with_border.blit(board_surf, (2, 2))  # Blit board with 2px offset for border
 
-    screen.blit(garbage_surf, (0, 0))
-    screen.blit(board_with_border, (25, 0))
-    screen.blit(piece_surf, (285, 0))
-    screen.blit(scores_surf, (415, 0))
+    screen.blit(garbage_surf, (0, 0))  # Garbage bar on the left
+    screen.blit(board_with_border, (25, 0))  # Board with border, shifted right less
+    screen.blit(piece_surf, (285, 0))  # Piece sidebar adjusted position
+    screen.blit(scores_surf, (415, 0))  # Scores adjusted position
 
     # BCG attention panel (b2b, combo, garbage attention over board patches)
     bcg_vals = [current_b2b_val, current_combo_val, current_garbage_val]
@@ -291,10 +329,12 @@ for t in range(num_steps):
         bcg_surf = pygame.transform.scale(bcg_surf, (bcg_heatmap_w, bcg_heatmap_h))
         screen.blit(bcg_surf, (hx, bcg_heatmap_y))
 
+    # Add step counter in top left with black background (moved down to avoid slider collision)
     step_text = font.render(f"Step: {t + 1}/{num_steps}", True, (255, 255, 255))
     step_rect = step_text.get_rect()
     step_rect.topleft = (10, 25)
-    pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))
+    # Create black background for step counter
+    pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
     screen.blit(step_text, (10, 25))
 
     readable_action = "".join(
@@ -311,29 +351,40 @@ for t in range(num_steps):
     clears.append(running_clears)
     attack_rewards.append(attack_reward)
     total_rewards.append(total_reward)
+    garbage_pusheds.append(garbage_pushed)
     current_b2b.append(current_b2b_val)
     current_combo.append(current_combo_val)
     current_garbage.append(current_garbage_val)
 
     time_step = env.step(key_sequence)
 
-    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
+    # Create black background for text area to prevent overlap
+    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)  # Black background for text area
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
+    # Draw white dividing line in the middle
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
 
-    base_y = 615
+    # Render text below board with white color
+    base_y = 615  # Start below the board area
 
-    attack_reward_text = font.render(
+    # LEFT HALF: Reward Information (single column)
+    attack_rew_text = font.render(
         f"Attack Reward: {attack_reward:0.2f}", True, (255, 255, 255)
     )
-    total_reward_text = font.render(
+    total_rew_text = font.render(
         f"Total Reward: {total_reward:0.2f}", True, (255, 255, 255)
     )
+    garbage_push_text = font.render(
+        f"Garbage Pushed: {int(garbage_pushed)}", True, (255, 255, 255)
+    )
 
-    screen.blit(attack_reward_text, (10, base_y))
-    screen.blit(total_reward_text, (10, base_y + 20))
+    # Position reward texts in left half (single column)
+    screen.blit(attack_rew_text, (10, base_y))
+    screen.blit(total_rew_text, (10, base_y + 20))
+    screen.blit(garbage_push_text, (10, base_y + 40))
 
+    # RIGHT HALF: Current State Information (single column)
     attack_text = font.render(f"Attack: {int(attacks[-1])}", True, (255, 255, 255))
     app_text = font.render(f"APP: {apps[-1]:0.2f}", True, (255, 255, 255))
     clear_text = font.render(f"Clear: {int(clears[-1])}", True, (255, 255, 255))
@@ -343,14 +394,19 @@ for t in range(num_steps):
     current_combo_text = font.render(
         f"Current Combo: {current_combo_val}", True, (255, 255, 255)
     )
+    current_garbage_text = font.render(
+        f"Garbage Queue: {current_garbage_val}", True, (255, 255, 255)
+    )
     action_text = font.render(f"Action: {actions[-1]}", True, (255, 255, 255))
 
+    # Position state texts in right half (single column)
     screen.blit(attack_text, (345, base_y))
     screen.blit(app_text, (345, base_y + 20))
     screen.blit(clear_text, (345, base_y + 40))
     screen.blit(current_b2b_text, (345, base_y + 60))
     screen.blit(current_combo_text, (345, base_y + 80))
-    screen.blit(action_text, (345, base_y + 100))
+    screen.blit(current_garbage_text, (345, base_y + 100))
+    screen.blit(action_text, (345, base_y + 120))
 
     pygame.display.update()
 
@@ -362,7 +418,7 @@ print(f"Time taken: {time_taken:3.2f} seconds")
 print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
 if input("Save? ").lower() == "y":
     actual_fps = 5
-    writer = imageio.get_writer("DemoFlat.mp4", fps=30)
+    writer = imageio.get_writer("Demo.mp4", fps=30)
     for frame in frames:
         for _ in range(30 // actual_fps):
             writer.append_data(frame)
@@ -405,43 +461,6 @@ fwd_btn = Button(
     onClick=lambda: slider.setValue(min(num_steps - 1, slider.getValue() + 1)),
 )
 
-paused = True
-
-
-def toggle_pause():
-    global paused
-    paused = not paused
-    play_btn.setText("Play" if paused else "Pause")
-
-
-play_btn = Button(
-    screen,
-    605,
-    25,
-    60,
-    20,
-    text="Play",
-    fontSize=16,
-    margin=0,
-    onClick=toggle_pause,
-)
-
-speed_slider = Slider(
-    screen,
-    x=10,
-    y=60,
-    width=200,
-    height=10,
-    min=1,
-    max=60,
-    step=1,
-    initial=30,
-    colour=(125, 125, 125),
-    handleColour=(50, 50, 50),
-)
-
-last_step_time = pygame.time.get_ticks()
-
 while True:
     events = pygame.event.get()
     for event in events:
@@ -449,55 +468,50 @@ while True:
             pygame.quit()
             exit()
 
-    if not paused:
-        current_time = pygame.time.get_ticks()
-        delay = int(1000 / speed_slider.getValue())
-        if current_time - last_step_time >= delay:
-            current_val = slider.getValue()
-            if current_val < num_steps - 1:
-                slider.setValue(current_val + 1)
-                last_step_time = current_time
-            else:
-                paused = True
-                play_btn.setText("Play")
-
     screen.fill((0, 0, 0))
-
-    speed_text = font.render(
-        f"Speed: {speed_slider.getValue()} FPS", True, (255, 255, 255)
-    )
-    screen.blit(speed_text, (220, 55))
 
     ind = slider.getValue()
     frame = frames[ind]
 
     pygame.surfarray.blit_array(screen, frame.swapaxes(0, 1))
 
+    # Add step counter in top left for replay with black background (moved down to avoid slider collision)
     step_text = font.render(f"Step: {ind + 1}/{num_steps}", True, (255, 255, 255))
     step_rect = step_text.get_rect()
     step_rect.topleft = (10, 25)
-    pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))
+    # Create black background for step counter
+    pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
     screen.blit(step_text, (10, 25))
 
     pygame_widgets.update(events)
 
-    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
+    # Create black background for text area in replay mode to prevent overlap
+    text_bg_rect = pygame.Rect(0, 610, screen_w, 190)  # Black background for text area
     pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
+    # Draw white dividing line in the middle
     pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
 
-    base_y = 615
+    # Render text below board for replay with white color
+    base_y = 615  # Start below the board area
 
-    attack_reward_text = font.render(
+    # LEFT HALF: Reward Information (single column)
+    attack_rew_text = font.render(
         f"Attack Reward: {attack_rewards[ind]:0.2f}", True, (255, 255, 255)
     )
-    total_reward_text = font.render(
+    total_rew_text = font.render(
         f"Total Reward: {total_rewards[ind]:0.2f}", True, (255, 255, 255)
     )
+    garbage_push_text = font.render(
+        f"Garbage Pushed: {int(garbage_pusheds[ind])}", True, (255, 255, 255)
+    )
 
-    screen.blit(attack_reward_text, (10, base_y))
-    screen.blit(total_reward_text, (10, base_y + 20))
+    # Position reward texts in left half (single column)
+    screen.blit(attack_rew_text, (10, base_y))
+    screen.blit(total_rew_text, (10, base_y + 20))
+    screen.blit(garbage_push_text, (10, base_y + 40))
 
+    # RIGHT HALF: Current State Information (single column)
     attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))
     app_text = font.render(f"APP: {apps[ind]:0.2f}", True, (255, 255, 255))
     clear_text = font.render(f"Clear: {int(clears[ind])}", True, (255, 255, 255))
@@ -507,13 +521,18 @@ while True:
     current_combo_text = font.render(
         f"Current Combo: {current_combo[ind]}", True, (255, 255, 255)
     )
+    current_garbage_text = font.render(
+        f"Garbage Queue: {current_garbage[ind]}", True, (255, 255, 255)
+    )
     action_text = font.render(f"Action: {actions[ind]}", True, (255, 255, 255))
 
+    # Position state texts in right half (single column)
     screen.blit(attack_text, (345, base_y))
     screen.blit(app_text, (345, base_y + 20))
     screen.blit(clear_text, (345, base_y + 40))
     screen.blit(current_b2b_text, (345, base_y + 60))
     screen.blit(current_combo_text, (345, base_y + 80))
-    screen.blit(action_text, (345, base_y + 100))
+    screen.blit(current_garbage_text, (345, base_y + 100))
+    screen.blit(action_text, (345, base_y + 120))
 
     pygame.display.update()
