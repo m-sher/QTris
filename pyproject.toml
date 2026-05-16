@@ -6,7 +6,11 @@ readme = "README.md"
 requires-python = ">=3.11.11"
 dependencies = [
     "tensorflow[and-cuda]==2.15.1",
+    "tetrisenv",
     "tf-agents==0.19.0",
     "tqdm>=4.67.3",
     "wandb>=0.19.11",
 ]
+
+[tool.uv.sources]
+tetrisenv = { git = "https://github.com/m-sher/TFTetrisEnv.git" }
