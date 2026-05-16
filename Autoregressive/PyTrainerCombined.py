@@ -22,7 +22,7 @@ max_len = 15
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 256
+num_collection_steps = 64
 queue_size = 5
 max_holes = 50
 max_height = 18
@@ -36,7 +36,7 @@ num_sequences = 160 * num_row_tiers
 
 # Training params
 mini_batch_size = 512
-num_epochs = 10
+num_epochs = 4
 num_updates = num_epochs * num_envs * num_collection_steps // mini_batch_size
 early_stopping = True
 
@@ -44,12 +44,12 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.02
+entropy_coef = 0.01
 temperature = 1.0
 
 target_kl = 0.03
 
-expert_coef = 0.1
+expert_coef = 0.005
 expert_dataset_path = "../tetris_expert_dataset_b2b"
 
 config = {
@@ -139,11 +139,6 @@ def train_step(
     )
 
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
-    advantages_batch = (
-        (advantages_batch - tf.reduce_mean(advantages_batch)) /
-        (tf.math.reduce_std(advantages_batch) + 1e-9)
-    )
-
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -533,6 +528,10 @@ def main(argv):
         raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
+
+        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
+            tf.math.reduce_std(all_advantages) + 1e-8
+        )
 
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
