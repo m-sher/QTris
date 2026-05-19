@@ -4,159 +4,20 @@ from keras import layers
 from tensorflow_probability import distributions
 from TetrisEnv.Moves import Convert
 
-
-@tf.function(jit_compile=True)
-def positional_encoding(max_length, depth):
-    half_depth = depth / 2
-    positions = tf.range(max_length, dtype=tf.float32)[..., None]
-    depths = tf.range(half_depth, dtype=tf.float32)[None, ...] / half_depth
-
-    angle_rates = 1.0 / (10000**depths)
-    angle_rads = positions * angle_rates
-
-    pos_encoding = tf.concat([tf.sin(angle_rads), tf.cos(angle_rads)], axis=-1)
-    return pos_encoding
-
-
-class PosEncoding(layers.Layer):
-    def __init__(self, depth, max_length):
-        super().__init__()
-        self.depth = depth
-
-        self.pos_encoding = positional_encoding(max_length, depth)
-
-    @tf.function(jit_compile=True)
-    def call(self, seq):
-        # Already embedded seq
-        seq_len = tf.shape(seq)[1]
-
-        seq *= tf.cast(self.depth, tf.float32) ** 0.5
-        seq += self.pos_encoding[None, :seq_len]
-
-        return seq
+from qtris.nn.attention import CrossAttention, FeedForward, SelfAttention
+from qtris.nn.transformer import (
+    CrossAttentionLayer,
+    DecoderLayer,
+    EncoderLayer,
+    PosEncoding,
+    positional_encoding,
+)
+from qtris.models.encoders import make_patches, tokenize_bcg
+from qtris.models.base import QtrisModelBase
+from qtris.models.value import ValueModel  # back-compat shim, remove by end of refactor (see notes.md)
 
 
-class SelfAttention(layers.Layer):
-    def __init__(self, causal, **kwargs):
-        super().__init__()
-        self.causal = causal
-        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
-        self.add = tf.keras.layers.Add()
-        self.layernorm = tf.keras.layers.LayerNormalization()
-
-    @tf.function(jit_compile=True)
-    def call(self, x, training=False):
-        attn, attention_scores = self.mha(
-            query=x, value=x, use_causal_mask=self.causal, return_attention_scores=True
-        )
-        x = self.add([x, attn])
-        return self.layernorm(x, training=training), attention_scores
-
-
-class CrossAttention(layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.mha = tf.keras.layers.MultiHeadAttention(**kwargs)
-        self.add = tf.keras.layers.Add()
-        self.layernorm = tf.keras.layers.LayerNormalization()
-
-    @tf.function(jit_compile=True)
-    def call(self, x, y, training=False, **kwargs):
-        attn, attention_scores = self.mha(
-            query=x, value=y, return_attention_scores=True
-        )
-
-        x = self.add([x, attn])
-        return self.layernorm(x, training=training), attention_scores
-
-
-class FeedForward(layers.Layer):
-    def __init__(self, units, dropout_rate=0.1):
-        super().__init__()
-        self.seq = tf.keras.Sequential(
-            [
-                tf.keras.layers.Dense(units=2 * units, activation="relu"),
-                tf.keras.layers.Dense(units=units),
-                tf.keras.layers.Dropout(rate=dropout_rate),
-            ]
-        )
-
-        self.layernorm = tf.keras.layers.LayerNormalization()
-
-    @tf.function(jit_compile=True)
-    def call(self, x, training=False):
-        x = x + self.seq(x, training=training)
-        return self.layernorm(x, training=training)
-
-
-class CrossAttentionLayer(layers.Layer):
-    """Cross-attention + feed-forward block (no self-attention)."""
-
-    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="CrossAttnLayer"):
-        super().__init__(name=name)
-
-        self.cross_attention = CrossAttention(
-            num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False):
-        in_seq, out_seq = inputs
-
-        out_seq, attn_scores = self.cross_attention(out_seq, in_seq, training=training)
-
-        out_seq = self.ff(out_seq, training=training)
-
-        return out_seq, attn_scores
-
-
-class EncoderLayer(layers.Layer):
-    def __init__(self, units, num_heads=1, dropout_rate=0.1, name="Encoder"):
-        super().__init__(name=name)
-
-        self.self_attention = SelfAttention(
-            causal=False, num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False):
-        in_seq = inputs
-
-        out_seq, _ = self.self_attention(in_seq, training=training)
-
-        out_seq = self.ff(out_seq, training=training)
-
-        return out_seq
-
-
-class DecoderLayer(layers.Layer):
-    def __init__(self, units, causal, num_heads=1, dropout_rate=0.1, name="Decoder"):
-        super().__init__(name=name)
-
-        self.self_attention = SelfAttention(
-            causal=causal, num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.cross_attention = CrossAttention(
-            num_heads=num_heads, key_dim=units, dropout=dropout_rate
-        )
-        self.ff = FeedForward(units=units, dropout_rate=dropout_rate)
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False):
-        in_seq, out_seq = inputs
-
-        out_seq, _ = self.self_attention(out_seq, training=training)
-
-        out_seq, attn_scores = self.cross_attention(out_seq, in_seq, training=training)
-
-        out_seq = self.ff(out_seq, training=training)
-
-        return out_seq, attn_scores
-
-
-class PolicyModel(keras.Model):
+class PolicyModel(QtrisModelBase):
     def __init__(
         self,
         batch_size,
@@ -176,34 +37,7 @@ class PolicyModel(keras.Model):
         self._depth = depth
         self._max_len = max_len
 
-        self.make_patches = keras.Sequential(
-            [
-                keras.Input(shape=(24, 10, 1)),
-                layers.Rescaling(scale=2.0, offset=-1.0),
-                layers.Conv2D(
-                    filters=depth // 2,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=2,
-                    strides=2,
-                    padding="valid",
-                    activation="relu",
-                ),
-                layers.Reshape((-1, depth)),
-            ]
-        )
+        self.make_patches = make_patches(depth)
 
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
@@ -276,54 +110,6 @@ class PolicyModel(keras.Model):
         )
 
         self.top = layers.Dense(output_dim)
-
-    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
-        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
-        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
-        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
-        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
-        bcg_tokens = self._bcg_ln(
-            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
-        )  # (B, 3, depth)
-        return bcg_tokens
-
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
-    def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_scores = []
-        patches = self.make_patches(board, training=training)
-        board_dec = self.patch_pos_encoding(patches)
-
-        piece_embedding = self.piece_embedding(piece, training=training)
-        piece_dec = self.piece_pos_encoding(piece_embedding)
-
-        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
-        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
-        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
-
-        for board_dec_layer, piece_dec_layer in zip(
-            self.board_decoder_layers, self.piece_decoder_layers
-        ):
-            board_dec, last_board_attn = board_dec_layer(
-                [piece_dec, board_dec], training=training
-            )
-            piece_dec, last_piece_attn = piece_dec_layer(
-                [board_dec, piece_dec], training=training
-            )
-            piece_scores.append(last_piece_attn)
-
-        return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
     def process_keys(self, inputs, training=False):
@@ -469,185 +255,7 @@ class PolicyModel(keras.Model):
         return key_sequence, log_probs, masks, piece_scores
 
 
-class ValueModel(keras.Model):
-    def __init__(
-        self, piece_dim, depth, num_heads, num_layers, dropout_rate, output_dim
-    ):
-        super().__init__()
-
-        self._depth = depth
-
-        self.make_patches = keras.Sequential(
-            [
-                keras.Input(shape=(24, 10, 1)),
-                layers.Rescaling(scale=2.0, offset=-1.0),
-                layers.Conv2D(
-                    filters=depth // 2,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=2,
-                    strides=2,
-                    padding="valid",
-                    activation="relu",
-                ),
-                layers.Reshape((-1, depth)),
-            ]
-        )
-
-        num_patches = self.make_patches.output_shape[1]
-        self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
-
-        self.board_decoder_layers = [
-            DecoderLayer(
-                units=depth,
-                causal=False,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"board_dec_{i}",
-            )
-            for i in range(num_layers)
-        ]
-
-        self.piece_embedding = layers.Embedding(
-            input_dim=piece_dim,
-            output_dim=depth,
-        )
-
-        self.piece_pos_encoding = PosEncoding(
-            depth=depth,
-            max_length=7,
-        )
-
-        self.piece_decoder_layers = [
-            DecoderLayer(
-                units=depth,
-                causal=False,
-                num_heads=num_heads,
-                dropout_rate=dropout_rate,
-                name=f"piece_dec_{i}",
-            )
-            for i in range(num_layers)
-        ]
-
-        self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
-        self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
-
-        self.trunk_bcg = keras.Sequential(
-            [
-                layers.Flatten(),
-                layers.Dropout(dropout_rate),
-                layers.Dense(depth, activation="relu"),
-                layers.Dense(depth // 2, activation="relu"),
-            ],
-            name="trunk_bcg",
-        )
-
-        self.top = layers.Dense(output_dim)
-
-    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
-        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
-        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
-        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
-        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
-        bcg_tokens = self._bcg_ln(
-            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
-        )  # (B, 3, depth)
-        return bcg_tokens
-
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
-    def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_scores = []
-        patches = self.make_patches(board, training=training)
-        board_dec = self.patch_pos_encoding(patches)
-
-        piece_embedding = self.piece_embedding(piece, training=training)
-        piece_dec = self.piece_pos_encoding(piece_embedding)
-
-        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
-        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
-        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
-
-        for board_dec_layer, piece_dec_layer in zip(
-            self.board_decoder_layers, self.piece_decoder_layers
-        ):
-            board_dec, last_board_attn = board_dec_layer(
-                [piece_dec, board_dec], training=training
-            )
-            piece_dec, last_piece_attn = piece_dec_layer(
-                [board_dec, piece_dec], training=training
-            )
-            piece_scores.append(last_piece_attn)
-
-        return piece_dec, piece_scores
-
-    @tf.function(jit_compile=True)
-    def call(self, inputs, training=False, return_scores=False):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo_garbage), training=training
-        )
-
-        trunk_out = self.trunk_bcg(piece_dec, training=training)
-
-        output = self.top(trunk_out, training=training)
-
-        if return_scores:
-            return output, piece_scores
-        else:
-            return output
-
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-        ],
-    )
-    def predict(self, inputs):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_dec, piece_scores = self.process_obs(
-            (board, piece, b2b_combo_garbage), training=False
-        )
-
-        trunk_out = self.trunk_bcg(piece_dec, training=False)
-
-        output = self.top(trunk_out, training=False)
-
-        return output
-
-
-class AsymmetricValueModel(keras.Model):
+class AsymmetricValueModel(QtrisModelBase):
     """Value model that sees both the training player's and opponent's board state.
 
     Own board processing is identical to ValueModel (conv → cross-attention decoders).
@@ -663,34 +271,7 @@ class AsymmetricValueModel(keras.Model):
 
         self._depth = depth
 
-        self.make_patches = keras.Sequential(
-            [
-                keras.Input(shape=(24, 10, 1)),
-                layers.Rescaling(scale=2.0, offset=-1.0),
-                layers.Conv2D(
-                    filters=depth // 2,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=2,
-                    strides=2,
-                    padding="valid",
-                    activation="relu",
-                ),
-                layers.Reshape((-1, depth)),
-            ]
-        )
+        self.make_patches = make_patches(depth)
 
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
@@ -752,54 +333,6 @@ class AsymmetricValueModel(keras.Model):
             ],
             name="top",
         )
-
-    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
-        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
-        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
-        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
-        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
-        bcg_tokens = self._bcg_ln(
-            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
-        )  # (B, 3, depth)
-        return bcg_tokens
-
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
-    def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_scores = []
-        patches = self.make_patches(board, training=training)
-        board_dec = self.patch_pos_encoding(patches)
-
-        piece_embedding = self.piece_embedding(piece, training=training)
-        piece_dec = self.piece_pos_encoding(piece_embedding)
-
-        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
-        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
-        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
-
-        for board_dec_layer, piece_dec_layer in zip(
-            self.board_decoder_layers, self.piece_decoder_layers
-        ):
-            board_dec, last_board_attn = board_dec_layer(
-                [piece_dec, board_dec], training=training
-            )
-            piece_dec, last_piece_attn = piece_dec_layer(
-                [board_dec, piece_dec], training=training
-            )
-            piece_scores.append(last_piece_attn)
-
-        return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):

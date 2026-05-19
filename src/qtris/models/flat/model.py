@@ -2,13 +2,16 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from qtris.models.ar.model import PosEncoding, DecoderLayer, ValueModel
+from qtris.nn.transformer import DecoderLayer, PosEncoding
+from qtris.models.encoders import make_patches, tokenize_bcg
+from qtris.models.base import QtrisModelBase
+from qtris.models.value import ValueModel  # noqa: F401 - re-exported for trainers
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
 
 
-class FlatPolicyModel(keras.Model):
+class FlatPolicyModel(QtrisModelBase):
     def __init__(
         self,
         batch_size,
@@ -25,34 +28,7 @@ class FlatPolicyModel(keras.Model):
         self._depth = depth
         self._num_sequences = num_sequences
 
-        self.make_patches = keras.Sequential(
-            [
-                keras.Input(shape=(24, 10, 1)),
-                layers.Rescaling(scale=2.0, offset=-1.0),
-                layers.Conv2D(
-                    filters=depth // 2,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=3,
-                    strides=1,
-                    padding="same",
-                    activation="relu",
-                ),
-                layers.Conv2D(
-                    filters=depth,
-                    kernel_size=2,
-                    strides=2,
-                    padding="valid",
-                    activation="relu",
-                ),
-                layers.Reshape((-1, depth)),
-            ]
-        )
+        self.make_patches = make_patches(depth)
 
         num_patches = self.make_patches.output_shape[1]
         self.patch_pos_encoding = PosEncoding(depth=depth, max_length=num_patches)
@@ -106,59 +82,6 @@ class FlatPolicyModel(keras.Model):
         )
 
         self.top = layers.Dense(num_sequences, name="action_logits")
-
-    def _tokenize_bcg(self, b2b_combo_garbage, training=False):
-        """Convert raw BCG scalars into 3 separate attention tokens.
-
-        Each feature (b2b, combo, garbage) gets its own learned projection
-        from a log-compressed scalar to a depth-dimensional token vector.
-        """
-        bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
-        t_b2b = self._bcg_proj_b2b(bcg_log[:, 0:1], training=training)
-        t_combo = self._bcg_proj_combo(bcg_log[:, 1:2], training=training)
-        t_garbage = self._bcg_proj_garbage(bcg_log[:, 2:3], training=training)
-        bcg_tokens = self._bcg_ln(
-            tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
-        )  # (B, 3, depth)
-        return bcg_tokens
-
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
-    def process_obs(self, inputs, training=False):
-        board, piece, b2b_combo_garbage = inputs
-
-        piece_scores = []
-        patches = self.make_patches(board, training=training)
-        board_dec = self.patch_pos_encoding(patches)
-
-        piece_embedding = self.piece_embedding(piece, training=training)
-        piece_dec = self.piece_pos_encoding(piece_embedding)
-
-        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
-        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
-        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
-
-        for board_dec_layer, piece_dec_layer in zip(
-            self.board_decoder_layers, self.piece_decoder_layers
-        ):
-            board_dec, last_board_attn = board_dec_layer(
-                [piece_dec, board_dec], training=training
-            )
-            piece_dec, last_piece_attn = piece_dec_layer(
-                [board_dec, piece_dec], training=training
-            )
-            piece_scores.append(last_piece_attn)
-
-        return piece_dec, piece_scores
 
     @tf.function(jit_compile=True)
     def score_actions(self, piece_dec, training=False):
