@@ -179,11 +179,11 @@ def train_step(
 
         masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
-        per_token_new_log_probs = tf.ensure_shape(
+        new_log_probs = tf.ensure_shape(
             masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(per_token_new_log_probs * decision_mask, axis=-1)[..., None],
+            tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
             (mini_batch_size, 1),
         )
 
@@ -209,12 +209,7 @@ def train_step(
         entropy = tf.reduce_mean(
             tf.reduce_sum(masked_dist.entropy() * decision_mask, axis=-1)
         )
-        approx_kl = tf.reduce_mean(
-            tf.math.divide_no_nan(
-                tf.reduce_sum((log_probs_batch - per_token_new_log_probs) * decision_mask, axis=-1),
-                tf.reduce_sum(decision_mask, axis=-1),
-            )
-        )
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
 
         if use_expert:
             expert_actions_batch = tf.ensure_shape(
