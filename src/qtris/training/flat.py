@@ -10,6 +10,8 @@ import time
 
 from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
 from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
+from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
 import os
 
 HARD_DROP_ID = Keys.HARD_DROP
@@ -70,47 +72,6 @@ config = SingleAgentTrainConfig(
     early_stopping=early_stopping,
     expert_coef=expert_coef,
 )
-
-
-@tf.function(jit_compile=True)
-def compute_gae_and_returns(values, last_values, rewards, dones, gamma, lam):
-    advantages = tf.TensorArray(
-        dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
-    )
-
-    last_adv = tf.zeros(advantages.element_shape, dtype=tf.float32)
-    last_val = last_values
-
-    for t in tf.range(num_collection_steps - 1, -1, -1):
-        mask = 1.0 - dones[t]
-        delta = rewards[t] + gamma * last_val * mask - values[t]
-        last_adv = delta + gamma * lam * last_adv * mask
-        advantages = advantages.write(t, last_adv)
-        last_val = values[t]
-
-    advantages = tf.ensure_shape(
-        advantages.stack(), (num_collection_steps, num_envs, 1)
-    )
-
-    returns = tf.ensure_shape(advantages + values, (num_collection_steps, num_envs, 1))
-
-    return advantages, returns
-
-
-@tf.function(jit_compile=True)
-def compute_raw_returns(rewards, dones, gamma):
-    returns = tf.TensorArray(
-        dtype=tf.float32, size=num_collection_steps, element_shape=(num_envs, 1)
-    )
-
-    last_ret = tf.zeros(returns.element_shape, dtype=tf.float32)
-
-    for t in tf.range(num_collection_steps - 1, -1, -1):
-        mask = 1.0 - dones[t]
-        last_ret = rewards[t] + gamma * last_ret * mask
-        returns = returns.write(t, last_ret)
-
-    return tf.ensure_shape(returns.stack(), (num_collection_steps, num_envs, 1))
 
 
 @tf.function()
@@ -178,18 +139,9 @@ def train_step(
         ratio = tf.ensure_shape(
             tf.exp(new_log_probs - old_log_probs_batch), (mini_batch_size, 1)
         )
-        clipped_ratio = tf.ensure_shape(
-            tf.clip_by_value(ratio, 1 - ppo_clip, 1 + ppo_clip),
-            (mini_batch_size, 1),
-        )
+        surrogate, clipped_ratio = clipped_surrogate(ratio, advantages_batch, ppo_clip)
 
-        surr1 = tf.ensure_shape(ratio * advantages_batch, (mini_batch_size, 1))
-        surr2 = tf.ensure_shape(
-            clipped_ratio * advantages_batch,
-            (mini_batch_size, 1),
-        )
-
-        ppo_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+        ppo_loss = -tf.reduce_mean(surrogate)
 
         entropy = tf.reduce_mean(dist.entropy())
 
@@ -247,14 +199,7 @@ def train_step(
             training=True,
         )
 
-        value_error = tf.ensure_shape(values - returns_batch, (mini_batch_size, 1))
-        clipped_values = old_values_batch + tf.clip_by_value(
-            values - old_values_batch, -value_clip, value_clip
-        )
-        clipped_value_error = clipped_values - returns_batch
-        value_loss = tf.reduce_mean(
-            tf.maximum(tf.square(value_error), tf.square(clipped_value_error))
-        )
+        value_loss = clipped_value_loss(values, old_values_batch, returns_batch, value_clip)
 
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
@@ -483,10 +428,14 @@ def main(args):
         last_time = time.time()
 
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam
+            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam,
+            num_collection_steps=num_collection_steps, num_envs=num_envs,
         )
 
-        raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
+        raw_returns = compute_raw_returns(
+            all_rewards, all_dones, gamma,
+            num_collection_steps=num_collection_steps, num_envs=num_envs,
+        )
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 
