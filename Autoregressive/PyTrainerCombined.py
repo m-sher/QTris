@@ -179,11 +179,11 @@ def train_step(
 
         masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
-        new_log_probs = tf.ensure_shape(
+        per_token_new_log_probs = tf.ensure_shape(
             masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
         new_log_probs = tf.ensure_shape(
-            tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
+            tf.reduce_sum(per_token_new_log_probs * decision_mask, axis=-1)[..., None],
             (mini_batch_size, 1),
         )
 
@@ -209,7 +209,12 @@ def train_step(
         entropy = tf.reduce_mean(
             tf.reduce_sum(masked_dist.entropy() * decision_mask, axis=-1)
         )
-        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+        approx_kl = tf.reduce_mean(
+            tf.math.divide_no_nan(
+                tf.reduce_sum((log_probs_batch - per_token_new_log_probs) * decision_mask, axis=-1),
+                tf.reduce_sum(decision_mask, axis=-1),
+            )
+        )
 
         if use_expert:
             expert_actions_batch = tf.ensure_shape(
@@ -312,6 +317,7 @@ def train_step(
 
 def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
     use_expert = expert_iter is not None
+    updates = 0
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
             if use_expert:
@@ -325,10 +331,13 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
                     p_model, v_model, online_batch,
                     entropy_coef, expert_coef, False,
                 )
+            updates += 1
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                step_out["updates"] = updates
                 return step_out
 
+    step_out["updates"] = updates
     return step_out
 
 
@@ -602,6 +611,7 @@ def main(argv):
         scores = train_out["scores"]
         expert_loss = train_out["expert_loss"]
         expert_accuracy = train_out["expert_accuracy"]
+        updates = train_out["updates"]
 
         # Compute more metrics
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
@@ -654,6 +664,7 @@ def main(argv):
                     "surge_rate": surge_rate,
                     "expert_loss": expert_loss,
                     "expert_accuracy": expert_accuracy,
+                    "updates": updates,
                     "expert_coef": expert_coef,
                     "board": wandb.Image(board[..., 0]),
                     "scores": wandb.Image(norm_c_scores),
@@ -661,7 +672,7 @@ def main(argv):
             )
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{num_updates}",
             flush=True,
         )
         last_time = time.time()
