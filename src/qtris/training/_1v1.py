@@ -8,8 +8,9 @@ from qtris.models.flat.model import FlatPolicyModel
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
-import tf_agents
-import wandb
+
+from qtris.observability.models import OneVsOnePPOLog, OneVsOneTrainConfig
+from qtris.observability.wandb_backend import finish, init_run, log_step
 import time
 import os
 import glob
@@ -60,22 +61,22 @@ pool_save_interval = 25
 max_pool_size = 50
 pool_dir = "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
 
-config = {
-    "flat": USE_FLAT,
-    "num_envs": num_envs,
-    "num_collection_steps": num_collection_steps,
-    "mini_batch_size": mini_batch_size,
-    "num_updates": num_updates,
-    "gamma": gamma,
-    "lam": lam,
-    "ppo_clip": ppo_clip,
-    "value_clip": value_clip,
-    "entropy_coef": entropy_coef,
-    "target_kl": target_kl,
-    "b2b_gap_coef": b2b_gap_coef,
-    "pool_save_interval": pool_save_interval,
-    "max_pool_size": max_pool_size,
-}
+config = OneVsOneTrainConfig(
+    flat=USE_FLAT,
+    num_envs=num_envs,
+    num_collection_steps=num_collection_steps,
+    mini_batch_size=mini_batch_size,
+    num_updates=num_updates,
+    gamma=gamma,
+    lam=lam,
+    ppo_clip=ppo_clip,
+    value_clip=value_clip,
+    entropy_coef=entropy_coef,
+    target_kl=target_kl,
+    b2b_gap_coef=b2b_gap_coef,
+    pool_save_interval=pool_save_interval,
+    max_pool_size=max_pool_size,
+)
 
 
 @tf.function(jit_compile=True)
@@ -474,7 +475,7 @@ def main(args):
     USE_FLAT = (args.family == "flat")
     pool_dir = "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
     _train_step_fn = train_step_flat if USE_FLAT else train_step_ar
-    config["flat"] = USE_FLAT
+    config.flat = USE_FLAT
 
     mode_str = "flat" if USE_FLAT else "autoregressive"
     print(f"Starting 1v1 trainer in {mode_str} mode", flush=True)
@@ -668,7 +669,7 @@ def main(args):
     last_time = time.time()
 
     # Initialize WandB logging
-    wandb_run = wandb.init(
+    wandb_run = init_run(
         project="Tetris-1v1",
         config=config,
     )
@@ -941,48 +942,46 @@ def main(args):
             if not load_pool_opponent(opp_model):
                 opp_model.set_weights(p_model.get_weights())
 
-        wandb.log(
-            {
-                "ppo_loss": ppo_loss,
-                "entropy": entropy,
-                "approx_kl": approx_kl,
-                "clipped_frac": clipped_frac,
-                "value_loss": value_loss,
-                "explained_var": explained_var,
-                "return_var": return_var,
-                "avg_probs": avg_probs,
-                # Reward channels
-                "avg_total_reward": avg_total_reward,
-                "avg_attack_reward": avg_attack_reward,
-                "avg_attacks": avg_attacks,
-                "avg_net_attacks": avg_net_attacks,
-                "avg_clears": avg_clears,
-                "avg_garbage_pushed": avg_garbage_pushed,
-                # Derived gameplay metrics
-                "APP_reward": APP_reward,
-                "APP_gross": APP_gross,
-                "APP_net": APP_net,
-                "reward_per_clear": reward_per_clear,
-                "att_per_clear": att_per_clear,
-                "cancel_rate": cancel_rate,
-                "avg_b2b": avg_b2b,
-                "max_b2b": max_b2b,
-                "avg_combo": avg_combo,
-                "surge_rate": surge_rate,
-                # Episode structure
-                "avg_episodes": avg_episodes,
-                "avg_pieces": avg_pieces,
-                # Outcome counts
-                "total_wins": total_wins,
-                "total_losses": total_losses,
-                "total_nondec": total_nondec,
-                "win_rate": win_rate,
-                "decisive_wr": decisive_wr,
-                "wr_ema": wr_ema,
-                "board": wandb.Image(board[..., 0]),
-                "scores": wandb.Image(norm_c_scores),
-            }
-        )
+        log_step(OneVsOnePPOLog(
+            ppo_loss=ppo_loss,
+            entropy=entropy,
+            approx_kl=approx_kl,
+            clipped_frac=clipped_frac,
+            value_loss=value_loss,
+            explained_var=explained_var,
+            return_var=return_var,
+            avg_probs=avg_probs,
+            # Reward channels
+            avg_total_reward=avg_total_reward,
+            avg_attack_reward=avg_attack_reward,
+            avg_attacks=avg_attacks,
+            avg_net_attacks=avg_net_attacks,
+            avg_clears=avg_clears,
+            avg_garbage_pushed=avg_garbage_pushed,
+            # Derived gameplay
+            APP_reward=APP_reward,
+            APP_gross=APP_gross,
+            APP_net=APP_net,
+            reward_per_clear=reward_per_clear,
+            att_per_clear=att_per_clear,
+            cancel_rate=cancel_rate,
+            avg_b2b=avg_b2b,
+            max_b2b=max_b2b,
+            avg_combo=avg_combo,
+            surge_rate=surge_rate,
+            # Episode structure
+            avg_episodes=avg_episodes,
+            avg_pieces=avg_pieces,
+            # Outcome counts
+            total_wins=total_wins,
+            total_losses=total_losses,
+            total_nondec=total_nondec,
+            win_rate=win_rate,
+            decisive_wr=decisive_wr,
+            wr_ema=wr_ema,
+            board=board[..., 0],
+            scores=norm_c_scores,
+        ))
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | APP_net: {float(APP_net):.3f} | "
@@ -993,4 +992,4 @@ def main(args):
         last_time = time.time()
 
     runner.env.close()
-    wandb_run.finish()
+    finish(wandb_run)

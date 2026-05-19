@@ -5,8 +5,9 @@ from qtris.pretraining.ar import Pretrainer
 import tensorflow as tf
 from tensorflow_probability import distributions
 from tensorflow import keras
-import tf_agents
-import wandb
+
+from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
+from qtris.observability.wandb_backend import finish, init_run, log_step
 import time
 import os
 
@@ -52,19 +53,19 @@ target_kl = 0.03
 expert_coef = 0.005
 expert_dataset_path = "datasets/tetris_expert_dataset_b2b"
 
-config = {
-    "num_envs": num_envs,
-    "num_collection_steps": num_collection_steps,
-    "mini_batch_size": mini_batch_size,
-    "num_updates": num_updates,
-    "gamma": gamma,
-    "lam": lam,
-    "ppo_clip": ppo_clip,
-    "value_clip": value_clip,
-    "entropy_coef": entropy_coef,
-    "target_kl": target_kl,
-    "expert_coef": expert_coef,
-}
+config = SingleAgentTrainConfig(
+    num_envs=num_envs,
+    num_collection_steps=num_collection_steps,
+    mini_batch_size=mini_batch_size,
+    num_updates=num_updates,
+    gamma=gamma,
+    lam=lam,
+    ppo_clip=ppo_clip,
+    value_clip=value_clip,
+    entropy_coef=entropy_coef,
+    target_kl=target_kl,
+    expert_coef=expert_coef,
+)
 
 
 @tf.function(jit_compile=True)
@@ -468,11 +469,11 @@ def main(args):
     last_time = time.time()
 
     # Initialize WandB logging
-    wandb_run = wandb.init(
+    wandb_run = init_run(
         project="Tetris",
+        config=config,
         # id='iauixt1w',
         # resume='must',
-        config=config,
     )
 
     # Initialize running return variance for reward scaling (EMA)
@@ -630,35 +631,33 @@ def main(args):
         )
 
         if gen % 10 == 0:
-            wandb.log(
-                {
-                    "ppo_loss": ppo_loss,
-                    "entropy": entropy,
-                    "approx_kl": approx_kl,
-                    "clipped_frac": clipped_frac,
-                    "value_loss": value_loss,
-                    "explained_var": explained_var,
-                    "return_var": return_var,
-                    "avg_probs": avg_probs,
-                    "avg_reward": avg_reward,
-                    "avg_attacks": avg_attacks,
-                    "avg_clears": avg_clears,
-                    "avg_attack_reward": avg_attack_reward,
-                    "avg_total_reward": avg_total_reward,
-                    "avg_garbage_pushed": avg_garbage_pushed,
-                    "avg_deaths": avg_deaths,
-                    "avg_pieces": avg_pieces,
-                    "avg_b2b": avg_b2b,
-                    "max_b2b": max_b2b,
-                    "avg_combo": avg_combo,
-                    "surge_rate": surge_rate,
-                    "expert_loss": expert_loss,
-                    "expert_accuracy": expert_accuracy,
-                    "expert_coef": expert_coef,
-                    "board": wandb.Image(board[..., 0]),
-                    "scores": wandb.Image(norm_c_scores),
-                }
-            )
+            log_step(SingleAgentPPOLog(
+                ppo_loss=ppo_loss,
+                entropy=entropy,
+                approx_kl=approx_kl,
+                clipped_frac=clipped_frac,
+                value_loss=value_loss,
+                explained_var=explained_var,
+                return_var=return_var,
+                avg_probs=avg_probs,
+                avg_reward=avg_reward,
+                avg_attacks=avg_attacks,
+                avg_clears=avg_clears,
+                avg_attack_reward=avg_attack_reward,
+                avg_total_reward=avg_total_reward,
+                avg_garbage_pushed=avg_garbage_pushed,
+                avg_deaths=avg_deaths,
+                avg_pieces=avg_pieces,
+                avg_b2b=avg_b2b,
+                max_b2b=max_b2b,
+                avg_combo=avg_combo,
+                surge_rate=surge_rate,
+                expert_loss=expert_loss,
+                expert_accuracy=expert_accuracy,
+                expert_coef=expert_coef,
+                board=board[..., 0],
+                scores=norm_c_scores,
+            ))
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
@@ -667,4 +666,4 @@ def main(args):
         last_time = time.time()
 
     runner.env.close()
-    wandb_run.finish()
+    finish(wandb_run)
