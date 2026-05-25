@@ -33,7 +33,7 @@ max_len = 15
 # Environment params
 generations = 1_000_000
 num_envs = 64
-num_collection_steps = 64
+num_collection_steps = 256
 queue_size = 5
 max_holes = 50
 max_height = 18

@@ -854,8 +854,9 @@ class AsymmetricValueModel(keras.Model):
         trunk_out_b = self.trunk_b_bcg(piece_dec_b, training=False)
 
         top_out_a = self.top((trunk_out_a, trunk_out_b), training=False)
-        top_out_b = self.top((trunk_out_b, trunk_out_a), training=False)
+        # top_out_b = self.top((trunk_out_b, trunk_out_a), training=False)
 
-        output = 0.5 * (top_out_a - top_out_b)
+        # output = 0.5 * (top_out_a - top_out_b)
 
-        return output
+        # return output
+        return top_out_a
