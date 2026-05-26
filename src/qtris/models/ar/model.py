@@ -14,7 +14,6 @@ from qtris.nn.transformer import (
 )
 from qtris.models.encoders import make_patches, tokenize_bcg
 from qtris.models.base import QtrisModelBase
-from qtris.models.value import ValueModel  # back-compat shim, remove by end of refactor (see notes.md)
 
 
 class PolicyModel(QtrisModelBase):

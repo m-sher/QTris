@@ -1,6 +1,7 @@
 from TetrisEnv.PyTetrisRunner import PyTetrisRunner
 from TetrisEnv.Moves import Keys
-from qtris.models.ar.model import PolicyModel, ValueModel
+from qtris.models.ar.model import PolicyModel
+from qtris.models.value import ValueModel
 from qtris.pretraining.ar import Pretrainer
 import tensorflow as tf
 from tensorflow_probability import distributions

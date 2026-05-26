@@ -1,5 +1,6 @@
 from TetrisEnv.Moves import Keys
-from qtris.models.ar.model import PolicyModel, ValueModel
+from qtris.models.ar.model import PolicyModel
+from qtris.models.value import ValueModel
 from qtris.pretraining.base import RETURN_CLIP_HIGH, RETURN_CLIP_LOW, correct_and_clip, surge_correction
 import os
 import tensorflow as tf

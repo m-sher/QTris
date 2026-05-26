@@ -5,7 +5,6 @@ from tensorflow_probability import distributions
 from qtris.nn.transformer import DecoderLayer, PosEncoding
 from qtris.models.encoders import make_patches, tokenize_bcg
 from qtris.models.base import QtrisModelBase
-from qtris.models.value import ValueModel  # noqa: F401 - re-exported for trainers
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
