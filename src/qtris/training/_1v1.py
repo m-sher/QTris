@@ -497,11 +497,25 @@ def main(args):
         else:
             print("No policy checkpoints found, starting from scratch", flush=True)
 
-    v_checkpoint = tf.train.Checkpoint(model=v_model, optimizer=v_optimizer)
+    loaded_return_scale = tf.Variable(
+        1.0, trainable=False, dtype=tf.float32, name="return_scale"
+    )
+    v_checkpoint = tf.train.Checkpoint(
+        model=v_model,
+        optimizer=v_optimizer,
+        return_scale=loaded_return_scale,
+    )
     v_checkpoint_manager = tf.train.CheckpointManager(
         v_checkpoint, v_ckpt_dir, max_to_keep=3
     )
-    v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+    if v_checkpoint_manager.latest_checkpoint:
+        v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+        print(
+            f"Restored value checkpoint (return_scale={float(loaded_return_scale):.3f})",
+            flush=True,
+        )
+    else:
+        print("No value checkpoint found, training from scratch", flush=True)
     print("Restored checkpoints", flush=True)
 
     # -----------------------------------------------------------------------
@@ -594,8 +608,9 @@ def main(args):
     )
 
     # Initialize running return variance for reward scaling (EMA)
-    return_var = 30.0
+    return_var = float(loaded_return_scale) ** 2
     return_var_decay = 0.99
+    print(f"Initial return_var = {return_var:.3f}", flush=True)
 
     # EMA-smoothed decisive win rate for pool-save gate
     wr_ema = 0.5
@@ -664,8 +679,8 @@ def main(args):
 
         # Scale rewards by running return std
         scaled_rewards = tf.clip_by_value(
-            all_rewards / (tf.sqrt(return_var) + 1e-9),
-            -25.0, 25.0
+            all_rewards / (tf.sqrt(return_var) + 1e-8),
+            -10.0, 10.0
         )
 
         print(
@@ -680,9 +695,13 @@ def main(args):
             num_collection_steps=num_collection_steps, num_envs=num_envs,
         )
 
-        # Update running return variance (EMA)
-        batch_var = tf.math.reduce_variance(all_returns)
+        raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
+        batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
+
+        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
+            tf.math.reduce_std(all_advantages) + 1e-8
+        )
 
         # Flatten data
         boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
@@ -792,8 +811,10 @@ def main(args):
         explained_var = train_out["explained_var"]
         board = train_out["board"]
         scores = train_out["scores"]
+        updates = train_out["updates"]
 
         # Compute more metrics
+        avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
         avg_total_reward = tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0))
         avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
         avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
@@ -825,17 +846,7 @@ def main(args):
         if USE_FLAT:
             avg_probs = tf.reduce_mean(tf.exp(all_log_probs))
         else:
-            all_num_valid = tf.reduce_sum(
-                tf.cast(all_masks[:, :, 1:, :], tf.float32), axis=-1
-            )  # (steps, envs, max_len - 1)
-            all_pad_mask = tf.cast(all_actions[..., 1:] != Keys.PAD, tf.float32)
-            all_decision_mask = tf.cast(all_num_valid > 1, tf.float32) * all_pad_mask
-            all_decisions_per_seq = tf.reduce_sum(all_decision_mask, axis=-1)  # (steps, envs)
-            per_seq_probs = tf.math.divide_no_nan(
-                tf.reduce_sum(tf.exp(all_log_probs[:, :, 1:]) * all_decision_mask, axis=-1),
-                all_decisions_per_seq,
-            )
-            avg_probs = tf.reduce_mean(per_seq_probs)
+            avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
 
         c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
@@ -904,7 +915,8 @@ def main(args):
         ))
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | APP_net: {float(APP_net):.3f} | "
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | "
+            f"Updates: {updates}/{num_updates} | APP_net: {float(APP_net):.3f} | "
             f"att/row: {float(att_per_clear):.2f} | WR: {float(win_rate):.2f} | "
             f"decisive_WR: {float(decisive_wr):.2f} (n={int(total_decisive)})",
             flush=True,
