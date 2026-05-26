@@ -259,6 +259,7 @@ def train_step(
 
 def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
     use_expert = expert_iter is not None
+    updates = 0
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
             if use_expert:
@@ -272,10 +273,13 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
                     p_model, v_model, online_batch,
                     entropy_coef, expert_coef, False,
                 )
+            updates += 1
 
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                step_out["updates"] = updates
                 return step_out
 
+    step_out["updates"] = updates
     return step_out
 
 
@@ -553,6 +557,7 @@ def main(args):
         scores = train_out["scores"]
         expert_loss = train_out["expert_loss"]
         expert_accuracy = train_out["expert_accuracy"]
+        updates = train_out["updates"]
 
         # Compute more metrics
         avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
@@ -605,12 +610,13 @@ def main(args):
                 expert_loss=expert_loss,
                 expert_accuracy=expert_accuracy,
                 expert_coef=expert_coef,
+                updates=updates,
                 board=board[..., 0],
                 scores=norm_c_scores,
             ))
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward}",
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{num_updates}",
             flush=True,
         )
         last_time = time.time()

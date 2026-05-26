@@ -11,7 +11,7 @@ from tensorflow import keras
 
 from qtris.observability.models import OneVsOnePPOLog, OneVsOneTrainConfig
 from qtris.observability.wandb_backend import finish, init_run, log_step
-from qtris.training.gae import compute_gae_and_returns
+from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
 import time
 import os
@@ -50,13 +50,10 @@ gamma = 0.99
 lam = 0.95
 ppo_clip = 0.2
 value_clip = 0.5
-entropy_coef = 0.03
+entropy_coef = 0.01
 temperature = 1.0
 
-target_kl = 0.02
-
-# B2B gap shaping
-b2b_gap_coef = 0.0
+target_kl = 0.03
 
 # Opponent pool params
 pool_save_interval = 25
@@ -75,7 +72,6 @@ config = OneVsOneTrainConfig(
     value_clip=value_clip,
     entropy_coef=entropy_coef,
     target_kl=target_kl,
-    b2b_gap_coef=b2b_gap_coef,
     pool_save_interval=pool_save_interval,
     max_pool_size=max_pool_size,
 )
@@ -105,11 +101,6 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
     )
 
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
-    advantages_batch = (
-        (advantages_batch - tf.reduce_mean(advantages_batch)) / 
-        (tf.math.reduce_std(advantages_batch) + 1e-9)
-    )
-
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -134,8 +125,6 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
         tf.cast(invalid_mask, tf.float32), axis=-1
     )  # (batch, max_len - 1)
     decision_mask = tf.cast(num_valid_actions > 1, tf.float32) * pad_mask
-    # Per-sequence decision token counts for averaging
-    decisions_per_seq = tf.reduce_sum(decision_mask, axis=-1)  # (batch,)
 
     input_actions_batch = online_actions_batch[:, :-1]
     target_actions = online_actions_batch[:, 1:]
@@ -154,67 +143,47 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
 
         logits = tf.ensure_shape(
             logits, (mini_batch_size, max_len - 1, key_dim)
-        )  # batch, max_len - 1, num_actions
+        )
 
         temp_adjusted_logits = logits / temperature
 
         masked_logits = tf.where(
             invalid_mask, temp_adjusted_logits, tf.constant(-1e9, dtype=tf.float32)
-        )  # batch, max_len - 1, num_actions
+        )
 
         masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
-        # Per-token log probs: (batch, max_len - 1)
         new_log_probs = tf.ensure_shape(
             masked_dist.log_prob(target_actions), (mini_batch_size, max_len - 1)
         )
-
-        old_log_probs = log_probs_batch  # (batch, max_len - 1)
-
-        # Per-token PPO ratio and clipping: (batch, max_len - 1)
-        per_token_ratio = tf.exp(new_log_probs - old_log_probs)  # (batch, max_len - 1)
-        per_token_surrogate, per_token_clipped = clipped_surrogate(
-            per_token_ratio, advantages_batch, ppo_clip
+        new_log_probs = tf.ensure_shape(
+            tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
 
-        # Per-sequence PPO loss: average over decision tokens per sequence, then over batch
-        per_token_loss = per_token_surrogate * decision_mask
-        per_seq_loss = tf.math.divide_no_nan(
-            tf.reduce_sum(per_token_loss, axis=-1), decisions_per_seq
-        )  # (batch,)
-        ppo_loss = -tf.reduce_mean(per_seq_loss)
-
-        # Per-sequence entropy: average over decision tokens per sequence, then over batch
-        per_token_entropy = tf.ensure_shape(
-            masked_dist.entropy(), (mini_batch_size, max_len - 1)
+        old_log_probs = tf.ensure_shape(
+            tf.reduce_sum(log_probs_batch * decision_mask, axis=-1)[..., None],
+            (mini_batch_size, 1),
         )
-        per_seq_entropy = tf.math.divide_no_nan(
-            tf.reduce_sum(per_token_entropy * decision_mask, axis=-1), decisions_per_seq
-        )
-        entropy = tf.reduce_mean(per_seq_entropy)
 
-        # Per-sequence approx KL: average over decision tokens per sequence, then over batch
-        per_seq_kl = tf.math.divide_no_nan(
-            tf.reduce_sum((old_log_probs - new_log_probs) * decision_mask, axis=-1),
-            decisions_per_seq,
+        ratio = tf.ensure_shape(
+            tf.exp(new_log_probs - old_log_probs), (mini_batch_size, 1)
         )
-        approx_kl = tf.reduce_mean(per_seq_kl)
+        surrogate, clipped_ratio = clipped_surrogate(ratio, advantages_batch, ppo_clip)
+        ppo_loss = -tf.reduce_mean(surrogate)
 
-        # Compute total loss
+        entropy = tf.reduce_mean(
+            tf.reduce_sum(masked_dist.entropy() * decision_mask, axis=-1)
+        )
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+
         total_policy_loss = ppo_loss - entropy_coef * entropy
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-    per_seq_clipped = tf.math.divide_no_nan(
-        tf.reduce_sum(
-            tf.cast(per_token_ratio != per_token_clipped, tf.float32) * decision_mask,
-            axis=-1,
-        ),
-        decisions_per_seq,
-    )
-    clipped_frac = tf.reduce_mean(per_seq_clipped)
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
 
     with tf.GradientTape() as v_tape:
         values = v_model(
@@ -228,6 +197,7 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
             ),
             training=True,
         )
+        values = tf.ensure_shape(values, (mini_batch_size, 1))
 
         # Value loss
         value_loss = clipped_value_loss(values, old_values_batch, returns_batch, value_clip)
@@ -275,11 +245,6 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
         online_batch["old_log_probs"], (mini_batch_size, 1)
     )
     advantages_batch = tf.ensure_shape(online_batch["advantages"], (mini_batch_size, 1))
-    advantages_batch = (
-        (advantages_batch - tf.reduce_mean(advantages_batch)) / 
-        (tf.math.reduce_std(advantages_batch) + 1e-9)
-    )
-
     returns_batch = tf.ensure_shape(online_batch["returns"], (mini_batch_size, 1))
     old_values_batch = tf.ensure_shape(online_batch["old_values"], (mini_batch_size, 1))
 
@@ -380,12 +345,17 @@ _train_step_fn = None  # set inside main(args)
 
 
 def train_on_dataset(p_model, v_model, online_dataset, num_epochs, entropy_coef):
+    updates = 0
     for epoch in range(num_epochs):
         for online_batch in online_dataset:
             step_out = _train_step_fn(p_model, v_model, online_batch, entropy_coef)
+            updates += 1
+
             if early_stopping and step_out["approx_kl"] >= 1.5 * target_kl:
+                step_out["updates"] = updates
                 return step_out
 
+    step_out["updates"] = updates
     return step_out
 
 
@@ -593,7 +563,6 @@ def main(args):
             seed=None,
             num_sequences=num_sequences,
             num_row_tiers=num_row_tiers,
-            b2b_gap_coef=b2b_gap_coef,
         )
     else:
         runner = Py1v1TetrisRunner(
@@ -613,7 +582,6 @@ def main(args):
             seed=None,
             num_sequences=num_sequences,
             num_row_tiers=num_row_tiers,
-            b2b_gap_coef=b2b_gap_coef,
         )
 
     print("Initialized runner", flush=True)
