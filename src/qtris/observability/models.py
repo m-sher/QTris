@@ -51,7 +51,6 @@ class OneVsOneTrainConfig(PPOConfigBase):
     """1v1 self-play trainer."""
 
     flat: bool
-    b2b_gap_coef: float
     pool_save_interval: int
     max_pool_size: int
 
@@ -91,6 +90,9 @@ class PPOLogBase(BaseModel):
     max_b2b: float
     avg_combo: float
     surge_rate: float
+
+    # Training progress
+    updates: int
 
     # Visualizations (wrapped at log time)
     board: np.ndarray
