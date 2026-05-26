@@ -1,4 +1,4 @@
-from qtris.models.ar.model import ValueModel
+from qtris.models.value import ValueModel
 from qtris.models.flat.model import FlatPolicyModel
 from qtris.pretraining.base import RETURN_CLIP_HIGH, RETURN_CLIP_LOW, correct_and_clip, surge_correction
 import os

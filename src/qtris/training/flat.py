@@ -1,5 +1,5 @@
 from qtris.runners.flat import FlatRunner
-from qtris.models.ar.model import ValueModel
+from qtris.models.value import ValueModel
 from qtris.models.flat.model import FlatPolicyModel
 from qtris.pretraining.flat import FlatPretrainer
 from TetrisEnv.Moves import Keys
