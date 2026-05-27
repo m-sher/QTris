@@ -7,8 +7,11 @@ import pygame
 import pygame_widgets
 from pygame_widgets.slider import Slider
 from pygame_widgets.button import Button
-import imageio
 import numpy as np
+
+from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_COLORS_RGB, BCG_LABELS
+from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar, colorize_piece_sidebar
+from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 import time
 
 pathfinding = True
@@ -90,14 +93,6 @@ def main(args):
     bcg_heatmap_w = 50
     bcg_heatmap_h = 120
     bcg_gap = 15
-    bcg_colors_rgb = np.array(
-        [
-            [100, 200, 255],  # b2b: cyan
-            [255, 255, 100],  # combo: yellow
-            [255, 100, 100],  # garbage: red
-        ]
-    )
-    bcg_labels = ["B2B", "Combo", "Garb"]
 
     time_step = env.reset()
 
@@ -117,34 +112,9 @@ def main(args):
     running_attacks = 0
     running_clears = 0
 
-    piece_display = np.load("PieceDisplay.npy")
+    piece_display = load_piece_display()
 
-    readable_keys = {
-        1: "h",
-        2: "l",
-        3: "r",
-        4: "L",
-        5: "R",
-        6: "c",
-        7: "a",
-        8: "1",
-        9: "s",
-        10: "H",
-    }
 
-    piece_colors = np.array(
-        [
-            [0, 0, 0],
-            [0, 255, 255],
-            [0, 0, 255],
-            [255, 127, 0],
-            [255, 200, 0],
-            [0, 255, 0],
-            [255, 0, 255],
-            [255, 0, 0],
-            [127, 127, 127],
-        ]
-    )
 
     start = time.time()
     for t in range(num_steps):
@@ -208,17 +178,7 @@ def main(args):
             dominant_attention, (12, 5)
         )  # Reshape to (12, 5) grid
 
-        # BCG (b2b, combo, garbage) attention over the 60 board patches
-        bcg_patch_attn = piece_attention[0, 7:10, :60].numpy()  # (3, 60)
-        bcg_grids = bcg_patch_attn.reshape(3, 12, 5)
-        bcg_colored_heatmaps = np.zeros((3, 12, 5, 3), dtype=np.uint8)
-        for i in range(3):
-            g = bcg_grids[i]
-            g_min, g_max = g.min(), g.max()
-            norm = (g - g_min) / (g_max - g_min + 1e-8)
-            bcg_colored_heatmaps[i] = (
-                bcg_colors_rgb[i][None, None] * norm[..., None]
-            ).astype(np.uint8)
+        bcg_colored_heatmaps = compute_bcg_heatmaps(scores)
 
         # Normalize attention intensities for brightness modulation
         attention_min = tf.reduce_min(dominant_attention_grid)
@@ -228,7 +188,7 @@ def main(args):
         )
 
         # Colorize the scores display based on dominant pieces with intensity modulation
-        all_piece_colors = piece_colors[pieces_array]  # Colors for all 7 pieces
+        all_PIECE_COLORS = PIECE_COLORS[pieces_array]  # Colors for all 7 pieces
         colored_scores = np.zeros((12, 5, 3), dtype=np.uint8)
         dominant_grid_np = dominant_grid.numpy()
         attention_np = attention_normalized.numpy()
@@ -237,59 +197,22 @@ def main(args):
             for c in range(5):  # 5 columns
                 piece_idx = dominant_grid_np[r, c]
                 intensity = attention_np[r, c]
-                colored_scores[r, c] = (all_piece_colors[piece_idx] * intensity).astype(
+                colored_scores[r, c] = (all_PIECE_COLORS[piece_idx] * intensity).astype(
                     np.uint8
                 )
 
-        # Get piece display for all 7 pieces
-        piece_sidebar = piece_display[pieces_array].reshape((28, 5))
-
-        # Colorize the piece display sidebar
-        piece_type_colors = piece_colors[pieces_array]
-        colored_sidebar = np.zeros((28, 5, 3), dtype=np.uint8)
-        for i in range(7):  # 7 pieces: active, hold, 5 queue
-            for r in range(4 * i, 4 * i + 4):  # 4 rows per piece
-                for c in range(5):  # 5 columns
-                    colored_sidebar[r, c] = (
-                        piece_type_colors[i] * piece_sidebar[r, c]
-                    ).astype(np.uint8)
-
-        # Create garbage queue visualization
-        garbage_queue = py_env._garbage_queue
-        garbage_bar_width = 10  # Thinner width in pixels for the garbage bar
-        garbage_bar_height = 24  # Height matches board height
-        garbage_surface = np.zeros(
-            (garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8
-        )
-
-        # Draw garbage sections (bottom to top, with bottom being next to push)
-        current_row = garbage_bar_height - 1  # Start from bottom
-        for i, (num_rows, empty_column, _timing) in enumerate(garbage_queue):
-            # Draw red section for this garbage instance
-            start_row = max(0, current_row - num_rows + 1)
-            for row in range(start_row, current_row + 1):
-                if row >= 0 and row < garbage_bar_height:
-                    garbage_surface[row, :] = [255, 0, 0]  # Red color
-
-            # Add separator line (1 pixel gap) between sections
-            if (
-                i < len(garbage_queue) - 1 and start_row > 0
-            ):  # Not the last section and not at top
-                current_row = start_row - 2  # Leave 1 pixel gap (black)
-            else:
-                current_row = start_row - 1
-            if current_row < 0:
-                break
+        colored_sidebar = colorize_piece_sidebar(piece_display, pieces_array, PIECE_COLORS)
+        garbage_surface = draw_garbage_bar(py_env, height=24, width=10)
 
         screen.fill((0, 0, 0))
 
         board_surf = pygame.Surface((10, 24))
         piece_surf = pygame.Surface((5, 28))
         scores_surf = pygame.Surface((5, 12))
-        garbage_surf = pygame.Surface((garbage_bar_width, garbage_bar_height))
+        garbage_surf = pygame.Surface((garbage_surface.shape[1], garbage_surface.shape[0]))
 
         if vis_board is not None:
-            colored_board = piece_colors[vis_board[0, ..., 0].numpy()]
+            colored_board = PIECE_COLORS[vis_board[0, ..., 0].numpy()]
             pygame.surfarray.blit_array(board_surf, colored_board.transpose(1, 0, 2))
         else:
             pygame.surfarray.blit_array(board_surf, board[0, ..., 0].numpy().T * 255)
@@ -320,7 +243,7 @@ def main(args):
         for i in range(3):
             hx = bcg_panel_x + i * (bcg_heatmap_w + bcg_gap)
             label_text = small_font.render(
-                f"{bcg_labels[i]}: {bcg_vals[i]}", True, (255, 255, 255)
+                f"{BCG_LABELS[i]}: {bcg_vals[i]}", True, (255, 255, 255)
             )
             screen.blit(label_text, (hx, bcg_label_y))
             bcg_surf = pygame.Surface((5, 12))
@@ -339,7 +262,7 @@ def main(args):
         screen.blit(step_text, (10, 25))
 
         readable_action = "".join(
-            [readable_keys.get(k, "") for k in key_sequence.numpy()[0]]
+            [READABLE_KEYS.get(k, "") for k in key_sequence.numpy()[0]]
         )
 
         actions.append(readable_action)
@@ -417,13 +340,7 @@ def main(args):
 
     print(f"Time taken: {time_taken:3.2f} seconds")
     print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
-    if input("Save? ").lower() == "y":
-        actual_fps = 5
-        writer = imageio.get_writer("Demo.mp4", fps=30)
-        for frame in frames:
-            for _ in range(30 // actual_fps):
-                writer.append_data(frame)
-        writer.close()
+    save_frames_as_video(frames, "Demo.mp4")
 
     slider = Slider(
         screen,
