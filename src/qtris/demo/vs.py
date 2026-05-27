@@ -7,9 +7,12 @@ import pygame
 import pygame_widgets
 from pygame_widgets.slider import Slider
 from pygame_widgets.button import Button
-import imageio
 import numpy as np
 import time
+
+from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS
+from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
+from qtris.demo.utils import load_piece_display, save_frames_as_video
 
 # Model params
 num_envs = 1
@@ -168,34 +171,9 @@ def main(args):
     prev_garbage_total_left = 0
     prev_garbage_total_right = 0
 
-    piece_display = np.load("PieceDisplay.npy")
+    piece_display = load_piece_display()
 
-    readable_keys = {
-        1: "h",
-        2: "l",
-        3: "r",
-        4: "L",
-        5: "R",
-        6: "c",
-        7: "a",
-        8: "1",
-        9: "s",
-        10: "H",
-    }
 
-    piece_colors = np.array(
-        [
-            [0, 0, 0],
-            [0, 255, 255],
-            [0, 0, 255],
-            [255, 127, 0],
-            [255, 200, 0],
-            [0, 255, 0],
-            [255, 0, 255],
-            [255, 0, 0],
-            [127, 127, 127],
-        ]
-    )
 
     start = time.time()
     for t in range(num_steps):
@@ -356,7 +334,7 @@ def main(args):
         )
 
         # Colorize the scores display based on dominant pieces with intensity modulation - LEFT
-        all_piece_colors_left = piece_colors[pieces_array_left]  # Colors for all 7 pieces
+        all_PIECE_COLORS_left = PIECE_COLORS[pieces_array_left]  # Colors for all 7 pieces
         colored_scores_left = np.zeros((12, 5, 3), dtype=np.uint8)
         dominant_grid_np_left = dominant_grid_left.numpy()
         attention_np_left = attention_normalized_left.numpy()
@@ -366,21 +344,10 @@ def main(args):
                 piece_idx = dominant_grid_np_left[r, c]
                 intensity = attention_np_left[r, c]
                 colored_scores_left[r, c] = (
-                    all_piece_colors_left[piece_idx] * intensity
+                    all_PIECE_COLORS_left[piece_idx] * intensity
                 ).astype(np.uint8)
 
-        # Get piece display for all 7 pieces - LEFT
-        piece_sidebar_left = piece_display[pieces_array_left].reshape((28, 5))
-
-        # Colorize the piece display sidebar - LEFT
-        piece_type_colors_left = piece_colors[pieces_array_left]
-        colored_sidebar_left = np.zeros((28, 5, 3), dtype=np.uint8)
-        for i in range(7):  # 7 pieces: active, hold, 5 queue
-            for r in range(4 * i, 4 * i + 4):  # 4 rows per piece
-                for c in range(5):  # 5 columns
-                    colored_sidebar_left[r, c] = (
-                        piece_type_colors_left[i] * piece_sidebar_left[r, c]
-                    ).astype(np.uint8)
+        colored_sidebar_left = colorize_piece_sidebar(piece_display, pieces_array_left, PIECE_COLORS)
 
         # Handle pieces tensor shape - RIGHT
         pieces_array_right = pieces_right.numpy()
@@ -414,7 +381,7 @@ def main(args):
         ) / (attention_max_right - attention_min_right + 1e-8)
 
         # Colorize the scores display based on dominant pieces with intensity modulation - RIGHT
-        all_piece_colors_right = piece_colors[pieces_array_right]  # Colors for all 7 pieces
+        all_PIECE_COLORS_right = PIECE_COLORS[pieces_array_right]  # Colors for all 7 pieces
         colored_scores_right = np.zeros((12, 5, 3), dtype=np.uint8)
         dominant_grid_np_right = dominant_grid_right.numpy()
         attention_np_right = attention_normalized_right.numpy()
@@ -424,73 +391,15 @@ def main(args):
                 piece_idx = dominant_grid_np_right[r, c]
                 intensity = attention_np_right[r, c]
                 colored_scores_right[r, c] = (
-                    all_piece_colors_right[piece_idx] * intensity
+                    all_PIECE_COLORS_right[piece_idx] * intensity
                 ).astype(np.uint8)
 
-        # Get piece display for all 7 pieces - RIGHT
-        piece_sidebar_right = piece_display[pieces_array_right].reshape((28, 5))
+        colored_sidebar_right = colorize_piece_sidebar(piece_display, pieces_array_right, PIECE_COLORS)
 
-        # Colorize the piece display sidebar - RIGHT
-        piece_type_colors_right = piece_colors[pieces_array_right]
-        colored_sidebar_right = np.zeros((28, 5, 3), dtype=np.uint8)
-        for i in range(7):  # 7 pieces: active, hold, 5 queue
-            for r in range(4 * i, 4 * i + 4):  # 4 rows per piece
-                for c in range(5):  # 5 columns
-                    colored_sidebar_right[r, c] = (
-                        piece_type_colors_right[i] * piece_sidebar_right[r, c]
-                    ).astype(np.uint8)
-
-        # Create garbage queue visualization - LEFT
-        garbage_queue_left = py_env_left._garbage_queue
-        garbage_bar_width = 10  # Thinner width in pixels for the garbage bar
-        garbage_bar_height = 24  # Height matches board height
-        garbage_surface_left = np.zeros(
-            (garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8
-        )
-
-        # Draw garbage sections (bottom to top, with bottom being next to push) - LEFT
-        current_row = garbage_bar_height - 1  # Start from bottom
-        for i, (num_rows, empty_column) in enumerate(garbage_queue_left):
-            # Draw red section for this garbage instance
-            start_row = max(0, current_row - num_rows + 1)
-            for row in range(start_row, current_row + 1):
-                if row >= 0 and row < garbage_bar_height:
-                    garbage_surface_left[row, :] = [255, 0, 0]  # Red color
-
-            # Add separator line (1 pixel gap) between sections
-            if (
-                i < len(garbage_queue_left) - 1 and start_row > 0
-            ):  # Not the last section and not at top
-                current_row = start_row - 2  # Leave 1 pixel gap (black)
-            else:
-                current_row = start_row - 1
-            if current_row < 0:
-                break
-
-        # Create garbage queue visualization - RIGHT
-        garbage_queue_right = py_env_right._garbage_queue
-        garbage_surface_right = np.zeros(
-            (garbage_bar_height, garbage_bar_width, 3), dtype=np.uint8
-        )
-
-        # Draw garbage sections (bottom to top, with bottom being next to push) - RIGHT
-        current_row = garbage_bar_height - 1  # Start from bottom
-        for i, (num_rows, empty_column) in enumerate(garbage_queue_right):
-            # Draw red section for this garbage instance
-            start_row = max(0, current_row - num_rows + 1)
-            for row in range(start_row, current_row + 1):
-                if row >= 0 and row < garbage_bar_height:
-                    garbage_surface_right[row, :] = [255, 0, 0]  # Red color
-
-            # Add separator line (1 pixel gap) between sections
-            if (
-                i < len(garbage_queue_right) - 1 and start_row > 0
-            ):  # Not the last section and not at top
-                current_row = start_row - 2  # Leave 1 pixel gap (black)
-            else:
-                current_row = start_row - 1
-            if current_row < 0:
-                break
+        garbage_bar_width = 10
+        garbage_bar_height = 24
+        garbage_surface_left = draw_garbage_bar(py_env_left, height=garbage_bar_height, width=garbage_bar_width)
+        garbage_surface_right = draw_garbage_bar(py_env_right, height=garbage_bar_height, width=garbage_bar_width)
 
         screen.fill((0, 0, 0))
 
@@ -501,7 +410,7 @@ def main(args):
         garbage_surf_left = pygame.Surface((garbage_bar_width, garbage_bar_height))
 
         if vis_board_left is not None:
-            colored_board_left = piece_colors[vis_board_left[0, ..., 0].numpy()]
+            colored_board_left = PIECE_COLORS[vis_board_left[0, ..., 0].numpy()]
             pygame.surfarray.blit_array(
                 board_surf_left, colored_board_left.transpose(1, 0, 2)
             )
@@ -532,7 +441,7 @@ def main(args):
         garbage_surf_right = pygame.Surface((garbage_bar_width, garbage_bar_height))
 
         if vis_board_right is not None:
-            colored_board_right = piece_colors[vis_board_right[0, ..., 0].numpy()]
+            colored_board_right = PIECE_COLORS[vis_board_right[0, ..., 0].numpy()]
             pygame.surfarray.blit_array(
                 board_surf_right, colored_board_right.transpose(1, 0, 2)
             )
@@ -591,10 +500,10 @@ def main(args):
         screen.blit(step_text, (10, 25))
 
         readable_action_left = "".join(
-            [readable_keys.get(k, "") for k in key_sequence_left.numpy()[0]]
+            [READABLE_KEYS.get(k, "") for k in key_sequence_left.numpy()[0]]
         )
         readable_action_right = "".join(
-            [readable_keys.get(k, "") for k in key_sequence_right.numpy()[0]]
+            [READABLE_KEYS.get(k, "") for k in key_sequence_right.numpy()[0]]
         )
 
         actions_left.append(readable_action_left)
@@ -785,13 +694,7 @@ def main(args):
 
     print(f"Time taken: {time_taken:3.2f} seconds")
     print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
-    if input("Save? ").lower() == "y":
-        actual_fps = 5
-        writer = imageio.get_writer("Demo.mp4", fps=30)
-        for frame in frames:
-            for _ in range(30 // actual_fps):
-                writer.append_data(frame)
-        writer.close()
+    save_frames_as_video(frames, "DemoVS.mp4")
 
     slider = Slider(
         screen,
