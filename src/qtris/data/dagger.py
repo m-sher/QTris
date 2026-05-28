@@ -322,32 +322,37 @@ def _build_flat_model(args):
 
 def main(cli_args):
     from types import SimpleNamespace
+    from qtris.config import ModelConfig, EnvConfig, DataGenConfig
+
+    m = ModelConfig()
+    e = EnvConfig()
+    d = DataGenConfig()
     args = SimpleNamespace(
         mode=cli_args.family,
         policy_checkpoint=getattr(cli_args, "policy_checkpoint", None),
         dataset_path=getattr(cli_args, "output", None),
         num_steps=cli_args.steps,
         seed=getattr(cli_args, "seed", 10_000_000),
-        search_depth=8,
-        beam_width=96,
-        queue_size=5,
-        max_len=15,
-        key_dim=12,
-        piece_dim=8,
-        depth=64,
-        num_heads=4,
-        num_layers=4,
-        dropout_rate=0.0,
-        max_height=18,
-        max_holes=50,
+        search_depth=d.search_depth,
+        beam_width=d.beam_width,
+        queue_size=m.queue_size,
+        max_len=m.max_len,
+        key_dim=m.key_dim,
+        piece_dim=m.piece_dim,
+        depth=m.depth,
+        num_heads=m.num_heads,
+        num_layers=m.num_layers,
+        dropout_rate=m.dropout_rate,
+        max_height=e.max_height,
+        max_holes=e.max_holes,
         max_steps_env=9_999_999,
-        garbage_chance=0.15,
-        garbage_min=1,
-        garbage_max=4,
-        garbage_push_delay=1,
-        num_row_tiers=2,
-        death_trim_count=20,
-        gamma=0.99,
+        garbage_chance=e.garbage_chance,
+        garbage_min=e.garbage_min,
+        garbage_max=e.garbage_max,
+        garbage_push_delay=e.garbage_push_delay,
+        num_row_tiers=m.num_row_tiers,
+        death_trim_count=d.death_trim_count,
+        gamma=d.gamma,
         log_every=1000,
     )
 
