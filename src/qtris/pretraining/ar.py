@@ -1,14 +1,21 @@
 from TetrisEnv.Moves import Keys
 from qtris.models.ar.model import PolicyModel
 from qtris.models.value import ValueModel
-from qtris.pretraining.base import RETURN_CLIP_HIGH, RETURN_CLIP_LOW, correct_and_clip, surge_correction
+from qtris.pretraining.base import (
+    RETURN_CLIP_HIGH,
+    RETURN_CLIP_LOW,
+    correct_and_clip,
+    surge_correction,
+)
 import os
 import tensorflow as tf
 from tensorflow import keras
 
 
 class Pretrainer:
-    def __init__(self, dataset_path="datasets/tetris_expert_dataset_b2b", policy_only=False):
+    def __init__(
+        self, dataset_path="datasets/tetris_expert_dataset_b2b", policy_only=False
+    ):
         self._dataset_path = dataset_path
         self._policy_only = policy_only
         self._scc = keras.losses.SparseCategoricalCrossentropy(
@@ -43,15 +50,22 @@ class Pretrainer:
                 axis=0,
             )
             all_b2b = tf.concat(
-                [batch["b2b_combo_garbage"][..., 0] for batch in dataset.batch(100_000)],
+                [
+                    batch["b2b_combo_garbage"][..., 0]
+                    for batch in dataset.batch(100_000)
+                ],
                 axis=0,
             )
             corrected = all_returns + surge_correction(all_b2b)
             clipped = tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
             n_total = tf.cast(tf.size(all_returns), tf.float32)
-            n_clipped_low = tf.reduce_sum(tf.cast(corrected < RETURN_CLIP_LOW, tf.float32))
-            n_clipped_high = tf.reduce_sum(tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32))
+            n_clipped_low = tf.reduce_sum(
+                tf.cast(corrected < RETURN_CLIP_LOW, tf.float32)
+            )
+            n_clipped_high = tf.reduce_sum(
+                tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32)
+            )
             frac_clipped = (n_clipped_low + n_clipped_high) / n_total
             max_b2b = tf.reduce_max(all_b2b)
 
@@ -74,8 +88,7 @@ class Pretrainer:
             pass
 
         return (
-            cached
-            .shuffle(buffer_size=500_000)
+            cached.shuffle(buffer_size=500_000)
             .batch(
                 batch_size,
                 drop_remainder=True,
@@ -89,15 +102,16 @@ class Pretrainer:
     def load_expert_dataset(path, batch_size):
         dataset = tf.data.Dataset.load(path)
         if "sample_weights" not in dataset.element_spec:
+
             def _add_default_weight(x):
                 return {**x, "sample_weights": tf.constant(1.0, dtype=tf.float32)}
+
             dataset = dataset.map(_add_default_weight)
         cached = dataset.cache()
         for _ in cached:
             pass
         return (
-            cached
-            .repeat()
+            cached.repeat()
             .shuffle(buffer_size=100_000)
             .batch(batch_size, drop_remainder=True)
             .prefetch(tf.data.AUTOTUNE)
@@ -122,9 +136,7 @@ class Pretrainer:
         weighted_mask = decision_mask * sample_weights[:, None]
 
         with tf.GradientTape() as p_tape:
-            logits = p_model(
-                (board, pieces, bcg, input_seq), training=True
-            )
+            logits = p_model((board, pieces, bcg, input_seq), training=True)
             masked_logits = tf.where(
                 valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
             )
@@ -135,9 +147,7 @@ class Pretrainer:
             )
 
         p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
-        p_model.optimizer.apply_gradients(
-            zip(p_gradients, p_model.trainable_variables)
-        )
+        p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
         pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
         correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
@@ -155,16 +165,19 @@ class Pretrainer:
         flat_logits = tf.reshape(masked_logits, [-1, last_dim])
         flat_targets = tf.reshape(target_seq, [-1])
         top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
-        top3 = tf.cast(
-            tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32
-        ) * decision_mask
+        top3 = (
+            tf.cast(tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32)
+            * decision_mask
+        )
         accuracy_top3 = tf.math.divide_no_nan(
             tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
         )
 
         if self._policy_only:
             return (
-                policy_loss, accuracy, accuracy_top3,
+                policy_loss,
+                accuracy,
+                accuracy_top3,
                 tf.constant(0.0, dtype=tf.float32),
             )
 
@@ -179,9 +192,7 @@ class Pretrainer:
             )
 
         v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
-        v_model.optimizer.apply_gradients(
-            zip(v_gradients, v_model.trainable_variables)
-        )
+        v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
 
         return policy_loss, accuracy, accuracy_top3, value_loss
 
@@ -205,8 +216,8 @@ class Pretrainer:
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
             for step, batch in enumerate(dataset):
-                policy_loss, accuracy, accuracy_top3, value_loss = (
-                    self._train_step(p_model, v_model, batch)
+                policy_loss, accuracy, accuracy_top3, value_loss = self._train_step(
+                    p_model, v_model, batch
                 )
                 if step % 100 == 0:
                     if self._policy_only:

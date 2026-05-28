@@ -161,9 +161,15 @@ def train_step(
 
             expert_logits = p_model(
                 (
-                    tf.ensure_shape(expert_batch["boards"], (mini_batch_size, 24, 10, 1)),
-                    tf.ensure_shape(expert_batch["pieces"], (mini_batch_size, queue_size + 2)),
-                    tf.ensure_shape(expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)),
+                    tf.ensure_shape(
+                        expert_batch["boards"], (mini_batch_size, 24, 10, 1)
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["pieces"], (mini_batch_size, queue_size + 2)
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["b2b_combo_garbage"], (mini_batch_size, 3)
+                    ),
                 ),
                 training=True,
             )
@@ -186,7 +192,9 @@ def train_step(
             expert_loss = tf.constant(0.0, dtype=tf.float32)
             expert_accuracy = tf.constant(0.0, dtype=tf.float32)
 
-        total_policy_loss = ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
+        total_policy_loss = (
+            ppo_loss - entropy_coef * entropy + expert_coef * expert_loss
+        )
 
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
     p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
@@ -199,7 +207,9 @@ def train_step(
             training=True,
         )
 
-        value_loss = clipped_value_loss(values, old_values_batch, returns_batch, value_clip)
+        value_loss = clipped_value_loss(
+            values, old_values_batch, returns_batch, value_clip
+        )
 
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
@@ -222,7 +232,9 @@ def train_step(
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
+def train_on_dataset(
+    p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
+):
     use_expert = expert_iter is not None
     updates = 0
     for epoch in range(num_epochs):
@@ -230,13 +242,22 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
             if use_expert:
                 expert_batch = next(expert_iter)
                 step_out = train_step(
-                    p_model, v_model, online_batch,
-                    entropy_coef, expert_coef, True, expert_batch,
+                    p_model,
+                    v_model,
+                    online_batch,
+                    entropy_coef,
+                    expert_coef,
+                    True,
+                    expert_batch,
                 )
             else:
                 step_out = train_step(
-                    p_model, v_model, online_batch,
-                    entropy_coef, expert_coef, False,
+                    p_model,
+                    v_model,
+                    online_batch,
+                    entropy_coef,
+                    expert_coef,
+                    False,
                 )
             updates += 1
 
@@ -339,7 +360,9 @@ def main(args):
             pretrained_v_ckpt, "checkpoints/flat_pretrained_value", max_to_keep=1
         )
         if pretrained_v_mgr.latest_checkpoint:
-            pretrained_v_ckpt.restore(pretrained_v_mgr.latest_checkpoint).expect_partial()
+            pretrained_v_ckpt.restore(
+                pretrained_v_mgr.latest_checkpoint
+            ).expect_partial()
             print(
                 f"Bootstrapped value from pretrained checkpoint "
                 f"(return_scale={float(loaded_return_scale):.3f})",
@@ -380,7 +403,9 @@ def main(args):
     )
 
     if os.path.exists(expert_dataset_path):
-        expert_dataset = FlatPretrainer.load_expert_dataset(expert_dataset_path, mini_batch_size)
+        expert_dataset = FlatPretrainer.load_expert_dataset(
+            expert_dataset_path, mini_batch_size
+        )
         expert_iter = iter(expert_dataset)
         print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
     else:
@@ -421,8 +446,7 @@ def main(args):
         )
 
         scaled_rewards = tf.clip_by_value(
-            all_rewards / (tf.sqrt(return_var) + 1e-8),
-            -10.0, 10.0
+            all_rewards / (tf.sqrt(return_var) + 1e-8), -10.0, 10.0
         )
 
         print(
@@ -432,13 +456,22 @@ def main(args):
         last_time = time.time()
 
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam,
-            num_collection_steps=num_collection_steps, num_envs=num_envs,
+            all_values,
+            all_last_values,
+            scaled_rewards,
+            all_dones,
+            gamma,
+            lam,
+            num_collection_steps=num_collection_steps,
+            num_envs=num_envs,
         )
 
         raw_returns = compute_raw_returns(
-            all_rewards, all_dones, gamma,
-            num_collection_steps=num_collection_steps, num_envs=num_envs,
+            all_rewards,
+            all_dones,
+            gamma,
+            num_collection_steps=num_collection_steps,
+            num_envs=num_envs,
         )
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
@@ -491,7 +524,13 @@ def main(args):
         last_time = time.time()
 
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
+            p_model,
+            v_model,
+            online_dataset,
+            expert_iter,
+            num_epochs,
+            entropy_coef,
+            expert_coef,
         )
 
         if gen % 5 == 0:
@@ -535,40 +574,44 @@ def main(args):
         avg_combo = tf.reduce_mean(combo_series)
         surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
 
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
+        c_scores = tf.reshape(
+            tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1)
+        )
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
 
         if gen % 4 == 0:
-            log_step(SingleAgentPPOLog(
-                ppo_loss=ppo_loss,
-                entropy=entropy,
-                approx_kl=approx_kl,
-                clipped_frac=clipped_frac,
-                value_loss=value_loss,
-                explained_var=explained_var,
-                return_var=return_var,
-                avg_probs=avg_probs,
-                avg_reward=avg_reward,
-                avg_attacks=avg_attacks,
-                avg_clears=avg_clears,
-                avg_attack_reward=avg_attack_reward,
-                avg_total_reward=avg_total_reward,
-                avg_garbage_pushed=avg_garbage_pushed,
-                avg_deaths=avg_deaths,
-                avg_pieces=avg_pieces,
-                avg_b2b=avg_b2b,
-                max_b2b=max_b2b,
-                avg_combo=avg_combo,
-                surge_rate=surge_rate,
-                expert_loss=expert_loss,
-                expert_accuracy=expert_accuracy,
-                expert_coef=expert_coef,
-                updates=updates,
-                board=board[..., 0],
-                scores=norm_c_scores,
-            ))
+            log_step(
+                SingleAgentPPOLog(
+                    ppo_loss=ppo_loss,
+                    entropy=entropy,
+                    approx_kl=approx_kl,
+                    clipped_frac=clipped_frac,
+                    value_loss=value_loss,
+                    explained_var=explained_var,
+                    return_var=return_var,
+                    avg_probs=avg_probs,
+                    avg_reward=avg_reward,
+                    avg_attacks=avg_attacks,
+                    avg_clears=avg_clears,
+                    avg_attack_reward=avg_attack_reward,
+                    avg_total_reward=avg_total_reward,
+                    avg_garbage_pushed=avg_garbage_pushed,
+                    avg_deaths=avg_deaths,
+                    avg_pieces=avg_pieces,
+                    avg_b2b=avg_b2b,
+                    max_b2b=max_b2b,
+                    avg_combo=avg_combo,
+                    surge_rate=surge_rate,
+                    expert_loss=expert_loss,
+                    expert_accuracy=expert_accuracy,
+                    expert_coef=expert_coef,
+                    updates=updates,
+                    board=board[..., 0],
+                    scores=norm_c_scores,
+                )
+            )
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{num_updates}",

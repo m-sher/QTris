@@ -10,7 +10,11 @@ import numpy as np
 import time
 
 from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_COLORS_RGB, BCG_LABELS
-from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar, colorize_piece_sidebar
+from qtris.demo.rendering import (
+    compute_bcg_heatmaps,
+    draw_garbage_bar,
+    colorize_piece_sidebar,
+)
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 
 num_envs = 1
@@ -27,6 +31,7 @@ num_steps = 500
 queue_size = 5
 max_holes = 100
 max_height = 18
+
 
 def main(args):
     p_model = FlatPolicyModel(
@@ -106,8 +111,6 @@ def main(args):
 
     piece_display = load_piece_display()
 
-
-
     start = time.time()
     for t in range(num_steps):
         board = time_step.observation["board"]
@@ -174,7 +177,9 @@ def main(args):
                     np.uint8
                 )
 
-        colored_sidebar = colorize_piece_sidebar(piece_display, pieces_array, PIECE_COLORS)
+        colored_sidebar = colorize_piece_sidebar(
+            piece_display, pieces_array, PIECE_COLORS
+        )
 
         garbage_surface = draw_garbage_bar(py_env, height=24, width=10)
 
@@ -183,7 +188,9 @@ def main(args):
         board_surf = pygame.Surface((10, 24))
         piece_surf = pygame.Surface((5, 28))
         scores_surf = pygame.Surface((5, 12))
-        garbage_surf = pygame.Surface((garbage_surface.shape[1], garbage_surface.shape[0]))
+        garbage_surf = pygame.Surface(
+            (garbage_surface.shape[1], garbage_surface.shape[0])
+        )
 
         if vis_board is not None:
             colored_board = PIECE_COLORS[vis_board[0, ..., 0].numpy()]
@@ -334,12 +341,10 @@ def main(args):
 
     paused = True
 
-
     def toggle_pause():
         global paused
         paused = not paused
         play_btn.setText("Play" if paused else "Pause")
-
 
     play_btn = Button(
         screen,

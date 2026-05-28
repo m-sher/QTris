@@ -2,7 +2,9 @@ import tensorflow as tf
 
 
 class RewardNormalizer:
-    def __init__(self, num_envs, gamma=0.99, initial_var=1.0, decay=0.99, epsilon=1e-8, clip=10.0):
+    def __init__(
+        self, num_envs, gamma=0.99, initial_var=1.0, decay=0.99, epsilon=1e-8, clip=10.0
+    ):
         self.num_envs = num_envs
         self.gamma = gamma
         self.decay = decay
@@ -16,7 +18,9 @@ class RewardNormalizer:
 
     def _compute_discounted_returns(self, rewards, dones):
         num_steps = tf.shape(rewards)[0]
-        all_returns = tf.TensorArray(dtype=tf.float32, size=num_steps, element_shape=(self.num_envs, 1))
+        all_returns = tf.TensorArray(
+            dtype=tf.float32, size=num_steps, element_shape=(self.num_envs, 1)
+        )
 
         ret = self.env_returns.value()
 

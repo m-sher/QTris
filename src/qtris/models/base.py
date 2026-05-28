@@ -11,6 +11,7 @@ submodule attributes the method reads:
     (read by self._tokenize_bcg, which subclasses define as a one-line
     wrapper around qtris.models.encoders.tokenize_bcg).
 """
+
 import tensorflow as tf
 import keras
 

@@ -3,6 +3,7 @@
 Functions here produce numpy arrays for display; callers blit them to
 pygame surfaces. No pygame dependency in this module.
 """
+
 import numpy as np
 import tensorflow as tf
 

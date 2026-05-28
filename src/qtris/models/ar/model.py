@@ -74,8 +74,12 @@ class PolicyModel(QtrisModelBase):
         ]
 
         self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
+        self._bcg_proj_combo = layers.Dense(
+            depth, activation="relu", name="bcg_proj_combo"
+        )
+        self._bcg_proj_garbage = layers.Dense(
+            depth, activation="relu", name="bcg_proj_garbage"
+        )
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.key_embedding = layers.Embedding(
@@ -176,7 +180,9 @@ class PolicyModel(QtrisModelBase):
         temp_adjusted_logits = logits / temperature
 
         masked_logits = tf.where(
-            mask, temp_adjusted_logits[:, ind - 1, :], tf.constant(-1e9, dtype=tf.float32)
+            mask,
+            temp_adjusted_logits[:, ind - 1, :],
+            tf.constant(-1e9, dtype=tf.float32),
         )
 
         dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
@@ -204,7 +210,7 @@ class PolicyModel(QtrisModelBase):
             ),
             tf.TensorSpec(shape=None, dtype=tf.bool),
             tf.TensorSpec(shape=(None, None, None), dtype=tf.int64),
-            tf.TensorSpec(shape=None, dtype=tf.float32)
+            tf.TensorSpec(shape=None, dtype=tf.float32),
         ],
     )
     def predict(self, inputs, greedy=False, valid_sequences=None, temperature=1.0):
@@ -308,19 +314,21 @@ class AsymmetricValueModel(QtrisModelBase):
         ]
 
         self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
+        self._bcg_proj_combo = layers.Dense(
+            depth, activation="relu", name="bcg_proj_combo"
+        )
+        self._bcg_proj_garbage = layers.Dense(
+            depth, activation="relu", name="bcg_proj_garbage"
+        )
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
-        self.trunk_a_bcg = keras.Sequential([
-            layers.Flatten(),
-            layers.Dense(depth, activation="relu")
-        ])
+        self.trunk_a_bcg = keras.Sequential(
+            [layers.Flatten(), layers.Dense(depth, activation="relu")]
+        )
 
-        self.trunk_b_bcg = keras.Sequential([
-            layers.Flatten(),
-            layers.Dense(depth, activation="relu")
-        ])
+        self.trunk_b_bcg = keras.Sequential(
+            [layers.Flatten(), layers.Dense(depth, activation="relu")]
+        )
 
         self.top = keras.Sequential(
             [
@@ -328,7 +336,7 @@ class AsymmetricValueModel(QtrisModelBase):
                 layers.Dropout(dropout_rate),
                 layers.Dense(depth, activation="relu"),
                 layers.Dense(depth // 2, activation="relu"),
-                layers.Dense(output_dim)
+                layers.Dense(output_dim),
             ],
             name="top",
         )

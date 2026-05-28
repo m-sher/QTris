@@ -10,7 +10,11 @@ from pygame_widgets.button import Button
 import numpy as np
 
 from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_COLORS_RGB, BCG_LABELS
-from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar, colorize_piece_sidebar
+from qtris.demo.rendering import (
+    compute_bcg_heatmaps,
+    draw_garbage_bar,
+    colorize_piece_sidebar,
+)
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 import time
 
@@ -30,6 +34,7 @@ num_steps = 500
 queue_size = 5
 max_holes = 100
 max_height = 18
+
 
 def main(args):
     p_model = PolicyModel(
@@ -113,8 +118,6 @@ def main(args):
     running_clears = 0
 
     piece_display = load_piece_display()
-
-
 
     start = time.time()
     for t in range(num_steps):
@@ -201,7 +204,9 @@ def main(args):
                     np.uint8
                 )
 
-        colored_sidebar = colorize_piece_sidebar(piece_display, pieces_array, PIECE_COLORS)
+        colored_sidebar = colorize_piece_sidebar(
+            piece_display, pieces_array, PIECE_COLORS
+        )
         garbage_surface = draw_garbage_bar(py_env, height=24, width=10)
 
         screen.fill((0, 0, 0))
@@ -209,7 +214,9 @@ def main(args):
         board_surf = pygame.Surface((10, 24))
         piece_surf = pygame.Surface((5, 28))
         scores_surf = pygame.Surface((5, 12))
-        garbage_surf = pygame.Surface((garbage_surface.shape[1], garbage_surface.shape[0]))
+        garbage_surf = pygame.Surface(
+            (garbage_surface.shape[1], garbage_surface.shape[0])
+        )
 
         if vis_board is not None:
             colored_board = PIECE_COLORS[vis_board[0, ..., 0].numpy()]
@@ -231,7 +238,9 @@ def main(args):
         # Create board with border
         board_with_border = pygame.Surface((254, 604))  # 2 pixels border on each side
         board_with_border.fill((255, 255, 255))  # Black border
-        board_with_border.blit(board_surf, (2, 2))  # Blit board with 2px offset for border
+        board_with_border.blit(
+            board_surf, (2, 2)
+        )  # Blit board with 2px offset for border
 
         screen.blit(garbage_surf, (0, 0))  # Garbage bar on the left
         screen.blit(board_with_border, (25, 0))  # Board with border, shifted right less
@@ -258,7 +267,9 @@ def main(args):
         step_rect = step_text.get_rect()
         step_rect.topleft = (10, 25)
         # Create black background for step counter
-        pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
+        pygame.draw.rect(
+            screen, (0, 0, 0), step_rect.inflate(10, 4)
+        )  # Padding around text
         screen.blit(step_text, (10, 25))
 
         readable_action = "".join(
@@ -283,7 +294,9 @@ def main(args):
         time_step = env.step(key_sequence)
 
         # Create black background for text area to prevent overlap
-        text_bg_rect = pygame.Rect(0, 610, screen_w, 190)  # Black background for text area
+        text_bg_rect = pygame.Rect(
+            0, 610, screen_w, 190
+        )  # Black background for text area
         pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
         # Draw white dividing line in the middle
@@ -398,13 +411,17 @@ def main(args):
         step_rect = step_text.get_rect()
         step_rect.topleft = (10, 25)
         # Create black background for step counter
-        pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
+        pygame.draw.rect(
+            screen, (0, 0, 0), step_rect.inflate(10, 4)
+        )  # Padding around text
         screen.blit(step_text, (10, 25))
 
         pygame_widgets.update(events)
 
         # Create black background for text area in replay mode to prevent overlap
-        text_bg_rect = pygame.Rect(0, 610, screen_w, 190)  # Black background for text area
+        text_bg_rect = pygame.Rect(
+            0, 610, screen_w, 190
+        )  # Black background for text area
         pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
         # Draw white dividing line in the middle

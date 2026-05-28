@@ -32,3 +32,8 @@ packages = ["src/qtris"]
 
 [tool.uv.sources]
 tetrisenv = { git = "https://github.com/m-sher/TFTetrisEnv.git" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.14",
+]

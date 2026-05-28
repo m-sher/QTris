@@ -52,7 +52,9 @@ def load_policy(checkpoint_dir):
         checkpoint.restore(manager.latest_checkpoint).expect_partial()
         print(f"Loaded checkpoint from {checkpoint_dir}", flush=True)
     else:
-        print(f"No checkpoint found in {checkpoint_dir}, using random weights", flush=True)
+        print(
+            f"No checkpoint found in {checkpoint_dir}, using random weights", flush=True
+        )
     return model
 
 
@@ -100,11 +102,15 @@ def run_eval(p1_model, p2_model, args):
 
             p1_keys, _, _, _ = p1_model.predict(
                 (board1, pieces1, bcg1),
-                greedy=args.greedy, valid_sequences=seqs1, temperature=args.temperature,
+                greedy=args.greedy,
+                valid_sequences=seqs1,
+                temperature=args.temperature,
             )
             p2_keys, _, _, _ = p2_model.predict(
                 (board2, pieces2, bcg2),
-                greedy=args.greedy, valid_sequences=seqs2, temperature=args.temperature,
+                greedy=args.greedy,
+                valid_sequences=seqs2,
+                temperature=args.temperature,
             )
 
             combined = tf.concat([p1_keys, p2_keys], axis=-1)
@@ -142,16 +148,17 @@ def run_eval(p1_model, p2_model, args):
         env.close()
 
     elapsed = time.time() - start
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Evaluation complete: {games} games, {steps_done} steps, {elapsed:.1f}s")
-    print(f"  P1 wins: {p1_wins:>4d} ({p1_wins/games*100:.1f}%)")
-    print(f"  P2 wins: {p2_wins:>4d} ({p2_wins/games*100:.1f}%)")
-    print(f"  Draws:   {draws:>4d} ({draws/games*100:.1f}%)")
-    print(f"{'='*60}")
+    print(f"  P1 wins: {p1_wins:>4d} ({p1_wins / games * 100:.1f}%)")
+    print(f"  P2 wins: {p2_wins:>4d} ({p2_wins / games * 100:.1f}%)")
+    print(f"  Draws:   {draws:>4d} ({draws / games * 100:.1f}%)")
+    print(f"{'=' * 60}")
 
 
 def main(cli_args):
     from types import SimpleNamespace
+
     args = SimpleNamespace(
         p1=str(cli_args.checkpoint),
         p2=str(cli_args.opponent),
@@ -215,8 +222,22 @@ def main(cli_args):
     time_step = env.reset()
 
     frames = []
-    p1_stats = {"attacks": [], "clears": [], "b2b": [], "combo": [], "garbage": [], "app": []}
-    p2_stats = {"attacks": [], "clears": [], "b2b": [], "combo": [], "garbage": [], "app": []}
+    p1_stats = {
+        "attacks": [],
+        "clears": [],
+        "b2b": [],
+        "combo": [],
+        "garbage": [],
+        "app": [],
+    }
+    p2_stats = {
+        "attacks": [],
+        "clears": [],
+        "b2b": [],
+        "combo": [],
+        "garbage": [],
+        "app": [],
+    }
     p1_running_attacks = 0
     p2_running_attacks = 0
     p1_running_clears = 0
@@ -242,11 +263,15 @@ def main(cli_args):
         # Generate actions
         p1_keys, _, _, p1_scores = p1_model.predict(
             (board1, pieces1, bcg1),
-            greedy=args.greedy, valid_sequences=seqs1, temperature=args.temperature,
+            greedy=args.greedy,
+            valid_sequences=seqs1,
+            temperature=args.temperature,
         )
         p2_keys, _, _, p2_scores = p2_model.predict(
             (board2, pieces2, bcg2),
-            greedy=args.greedy, valid_sequences=seqs2, temperature=args.temperature,
+            greedy=args.greedy,
+            valid_sequences=seqs2,
+            temperature=args.temperature,
         )
         p1_bcg_heatmaps = compute_bcg_heatmaps(p1_scores)
         p2_bcg_heatmaps = compute_bcg_heatmaps(p2_scores)
@@ -380,7 +405,10 @@ def main(cli_args):
 
         if winner:
             win_text = big_font.render(winner, True, (255, 255, 0))
-            screen.blit(win_text, (screen_w // 2 - win_text.get_width() // 2, top_y + board_h // 2))
+            screen.blit(
+                win_text,
+                (screen_w // 2 - win_text.get_width() // 2, top_y + board_h // 2),
+            )
 
         pygame.display.update()
         frames.append(pygame.surfarray.array3d(screen).swapaxes(0, 1))
@@ -395,23 +423,46 @@ def main(cli_args):
 
     elapsed = time.time() - start
     actual_steps = t + 1
-    print(f"Time: {elapsed:.2f}s | Steps: {actual_steps} | {elapsed/actual_steps:.3f}s/step")
+    print(
+        f"Time: {elapsed:.2f}s | Steps: {actual_steps} | {elapsed / actual_steps:.3f}s/step"
+    )
     print(f"Result: {winner or 'Timeout'}")
 
     save_frames_as_video(frames, "Demo1v1.mp4")
 
     # Replay slider
     slider = Slider(
-        screen, x=10, y=5, width=screen_w - 80, height=10,
-        min=0, max=len(frames) - 1, step=1,
-        colour=(125, 125, 125), handleColour=(50, 50, 50),
+        screen,
+        x=10,
+        y=5,
+        width=screen_w - 80,
+        height=10,
+        min=0,
+        max=len(frames) - 1,
+        step=1,
+        colour=(125, 125, 125),
+        handleColour=(50, 50, 50),
     )
     back_btn = Button(
-        screen, screen_w - 60, 0, 28, 20, text="<", fontSize=16, margin=0,
+        screen,
+        screen_w - 60,
+        0,
+        28,
+        20,
+        text="<",
+        fontSize=16,
+        margin=0,
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
     fwd_btn = Button(
-        screen, screen_w - 28, 0, 28, 20, text=">", fontSize=16, margin=0,
+        screen,
+        screen_w - 28,
+        0,
+        28,
+        20,
+        text=">",
+        fontSize=16,
+        margin=0,
         onClick=lambda: slider.setValue(min(len(frames) - 1, slider.getValue() + 1)),
     )
 

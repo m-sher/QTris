@@ -138,8 +138,7 @@ def collect_dagger(
 
         if death_kind == "beam_fail":
             kept_count = (
-                len(buf) - death_trim_count
-                if len(buf) > death_trim_count else 0
+                len(buf) - death_trim_count if len(buf) > death_trim_count else 0
             )
         else:
             kept_count = len(buf)
@@ -179,9 +178,7 @@ def collect_dagger(
             board=env._board,
             active_piece=env._active_piece.piece_type.value,
             hold_piece=env._hold_piece.value,
-            queue=np.array(
-                [p.value for p in env._queue], dtype=np.int32
-            ),
+            queue=np.array([p.value for p in env._queue], dtype=np.int32),
             b2b=int(env._scorer._b2b),
             combo=int(env._scorer._combo),
             total_garbage=int(env._get_total_garbage()),
@@ -382,7 +379,9 @@ def main(cli_args):
 
     p_checkpoint = tf.train.Checkpoint(model=p_model)
     p_checkpoint_manager = tf.train.CheckpointManager(
-        p_checkpoint, policy_checkpoint, max_to_keep=3,
+        p_checkpoint,
+        policy_checkpoint,
+        max_to_keep=3,
     )
     if p_checkpoint_manager.latest_checkpoint is None:
         print(
@@ -391,9 +390,7 @@ def main(cli_args):
             flush=True,
         )
         return 1
-    p_checkpoint.restore(
-        p_checkpoint_manager.latest_checkpoint
-    ).expect_partial()
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
     print(
         f"Restored {args.mode} policy from {p_checkpoint_manager.latest_checkpoint}",
         flush=True,
@@ -515,5 +512,3 @@ def main(cli_args):
     dataset.save(dataset_path)
     print(f"Saved {len(labels)} transitions to {dataset_path}", flush=True)
     return 0
-
-

@@ -29,12 +29,12 @@ queue_size = 5
 max_holes = 100
 max_height = 19
 
+
 def main(args):
     left_path = str(args.left)
     left_pathfinding = True
     right_path = str(args.right)
     right_pathfinding = True
-
 
     p_model_left = PolicyModel(
         batch_size=num_envs,
@@ -52,10 +52,17 @@ def main(args):
     p_checkpoint_manager_left = tf.train.CheckpointManager(
         p_checkpoint_left, f"checkpoints/{left_path}", max_to_keep=3
     )
-    p_checkpoint_left.restore(p_checkpoint_manager_left.latest_checkpoint).expect_partial()
+    p_checkpoint_left.restore(
+        p_checkpoint_manager_left.latest_checkpoint
+    ).expect_partial()
 
     p_model_left.build(
-        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3), (None, max_len)]
+        input_shape=[
+            (None, 24, 10, 1),
+            (None, queue_size + 2),
+            (None, 3),
+            (None, max_len),
+        ]
     )
 
     p_model_left.summary()
@@ -96,7 +103,12 @@ def main(args):
     ).expect_partial()
 
     p_model_right.build(
-        input_shape=[(None, 24, 10, 1), (None, queue_size + 2), (None, 3), (None, max_len)]
+        input_shape=[
+            (None, 24, 10, 1),
+            (None, queue_size + 2),
+            (None, 3),
+            (None, max_len),
+        ]
     )
 
     p_model_right.summary()
@@ -172,8 +184,6 @@ def main(args):
     prev_garbage_total_right = 0
 
     piece_display = load_piece_display()
-
-
 
     start = time.time()
     for t in range(num_steps):
@@ -263,10 +273,12 @@ def main(args):
         if not right_pathfinding:
             valid_sequences_right = Convert.tf_to_sequence[None, ...]
 
-        key_sequence_left, log_probs_left, masks_left, scores_left = p_model_left.predict(
-            (board_left, pieces_left, b2b_combo_left),
-            greedy=True,
-            valid_sequences=valid_sequences_left,
+        key_sequence_left, log_probs_left, masks_left, scores_left = (
+            p_model_left.predict(
+                (board_left, pieces_left, b2b_combo_left),
+                greedy=True,
+                valid_sequences=valid_sequences_left,
+            )
         )
 
         key_sequence_right, log_probs_right, masks_right, scores_right = (
@@ -329,12 +341,14 @@ def main(args):
         # Normalize attention intensities for brightness modulation - LEFT
         attention_min_left = tf.reduce_min(dominant_attention_grid_left)
         attention_max_left = tf.reduce_max(dominant_attention_grid_left)
-        attention_normalized_left = (dominant_attention_grid_left - attention_min_left) / (
-            attention_max_left - attention_min_left + 1e-8
-        )
+        attention_normalized_left = (
+            dominant_attention_grid_left - attention_min_left
+        ) / (attention_max_left - attention_min_left + 1e-8)
 
         # Colorize the scores display based on dominant pieces with intensity modulation - LEFT
-        all_PIECE_COLORS_left = PIECE_COLORS[pieces_array_left]  # Colors for all 7 pieces
+        all_PIECE_COLORS_left = PIECE_COLORS[
+            pieces_array_left
+        ]  # Colors for all 7 pieces
         colored_scores_left = np.zeros((12, 5, 3), dtype=np.uint8)
         dominant_grid_np_left = dominant_grid_left.numpy()
         attention_np_left = attention_normalized_left.numpy()
@@ -347,7 +361,9 @@ def main(args):
                     all_PIECE_COLORS_left[piece_idx] * intensity
                 ).astype(np.uint8)
 
-        colored_sidebar_left = colorize_piece_sidebar(piece_display, pieces_array_left, PIECE_COLORS)
+        colored_sidebar_left = colorize_piece_sidebar(
+            piece_display, pieces_array_left, PIECE_COLORS
+        )
 
         # Handle pieces tensor shape - RIGHT
         pieces_array_right = pieces_right.numpy()
@@ -381,7 +397,9 @@ def main(args):
         ) / (attention_max_right - attention_min_right + 1e-8)
 
         # Colorize the scores display based on dominant pieces with intensity modulation - RIGHT
-        all_PIECE_COLORS_right = PIECE_COLORS[pieces_array_right]  # Colors for all 7 pieces
+        all_PIECE_COLORS_right = PIECE_COLORS[
+            pieces_array_right
+        ]  # Colors for all 7 pieces
         colored_scores_right = np.zeros((12, 5, 3), dtype=np.uint8)
         dominant_grid_np_right = dominant_grid_right.numpy()
         attention_np_right = attention_normalized_right.numpy()
@@ -394,12 +412,18 @@ def main(args):
                     all_PIECE_COLORS_right[piece_idx] * intensity
                 ).astype(np.uint8)
 
-        colored_sidebar_right = colorize_piece_sidebar(piece_display, pieces_array_right, PIECE_COLORS)
+        colored_sidebar_right = colorize_piece_sidebar(
+            piece_display, pieces_array_right, PIECE_COLORS
+        )
 
         garbage_bar_width = 10
         garbage_bar_height = 24
-        garbage_surface_left = draw_garbage_bar(py_env_left, height=garbage_bar_height, width=garbage_bar_width)
-        garbage_surface_right = draw_garbage_bar(py_env_right, height=garbage_bar_height, width=garbage_bar_width)
+        garbage_surface_left = draw_garbage_bar(
+            py_env_left, height=garbage_bar_height, width=garbage_bar_width
+        )
+        garbage_surface_right = draw_garbage_bar(
+            py_env_right, height=garbage_bar_height, width=garbage_bar_width
+        )
 
         screen.fill((0, 0, 0))
 
@@ -466,7 +490,9 @@ def main(args):
         garbage_surf_right = pygame.transform.scale(garbage_surf_right, (25, 600))
 
         # Create boards with borders
-        board_with_border_left = pygame.Surface((254, 604))  # 2 pixels border on each side
+        board_with_border_left = pygame.Surface(
+            (254, 604)
+        )  # 2 pixels border on each side
         board_with_border_left.fill((255, 255, 255))  # White border
         board_with_border_left.blit(board_surf_left, (2, 2))
 
@@ -611,8 +637,12 @@ def main(args):
         current_combo_text_left = font.render(
             f"Current Combo: {current_combo_val_left}", True, (255, 255, 255)
         )
-        action_text_left = font.render(f"Action: {actions_left[-1]}", True, (255, 255, 255))
-        death_text_left = font.render(f"Deaths: {sum(deaths_left)}", True, (255, 255, 255))
+        action_text_left = font.render(
+            f"Action: {actions_left[-1]}", True, (255, 255, 255)
+        )
+        death_text_left = font.render(
+            f"Deaths: {sum(deaths_left)}", True, (255, 255, 255)
+        )
 
         # Position left player state texts
         screen.blit(attack_text_left, (335, base_y))
@@ -660,7 +690,9 @@ def main(args):
         attack_text_right = font.render(
             f"Attack: {int(attacks_right[-1])}", True, (255, 255, 255)
         )
-        app_text_right = font.render(f"APP: {apps_right[-1]:0.2f}", True, (255, 255, 255))
+        app_text_right = font.render(
+            f"APP: {apps_right[-1]:0.2f}", True, (255, 255, 255)
+        )
         clear_text_right = font.render(
             f"Clear: {int(clears_right[-1])}", True, (255, 255, 255)
         )
@@ -752,7 +784,9 @@ def main(args):
         step_rect = step_text.get_rect()
         step_rect.topleft = (10, 25)
         # Create black background for step counter
-        pygame.draw.rect(screen, (0, 0, 0), step_rect.inflate(10, 4))  # Padding around text
+        pygame.draw.rect(
+            screen, (0, 0, 0), step_rect.inflate(10, 4)
+        )  # Padding around text
         screen.blit(step_text, (10, 25))
 
         pygame_widgets.update(events)
@@ -782,7 +816,9 @@ def main(args):
             f"Hole Penalty: {hole_penalties_left[ind]:0.2f}", True, (255, 255, 255)
         )
         skyline_pen_text_left = font.render(
-            f"Skyline Penalty: {skyline_penalties_left[ind]:0.2f}", True, (255, 255, 255)
+            f"Skyline Penalty: {skyline_penalties_left[ind]:0.2f}",
+            True,
+            (255, 255, 255),
         )
         bumpy_pen_text_left = font.render(
             f"Bumpy Penalty: {bumpy_penalties_left[ind]:0.2f}", True, (255, 255, 255)
@@ -804,7 +840,9 @@ def main(args):
         attack_text_left = font.render(
             f"Attack: {int(attacks_left[ind])}", True, (255, 255, 255)
         )
-        app_text_left = font.render(f"APP: {apps_left[ind]:0.2f}", True, (255, 255, 255))
+        app_text_left = font.render(
+            f"APP: {apps_left[ind]:0.2f}", True, (255, 255, 255)
+        )
         clear_text_left = font.render(
             f"Clear: {int(clears_left[ind])}", True, (255, 255, 255)
         )
@@ -845,7 +883,9 @@ def main(args):
             f"Hole Penalty: {hole_penalties_right[ind]:0.2f}", True, (255, 255, 255)
         )
         skyline_pen_text_right = font.render(
-            f"Skyline Penalty: {skyline_penalties_right[ind]:0.2f}", True, (255, 255, 255)
+            f"Skyline Penalty: {skyline_penalties_right[ind]:0.2f}",
+            True,
+            (255, 255, 255),
         )
         bumpy_pen_text_right = font.render(
             f"Bumpy Penalty: {bumpy_penalties_right[ind]:0.2f}", True, (255, 255, 255)
@@ -867,7 +907,9 @@ def main(args):
         attack_text_right = font.render(
             f"Attack: {int(attacks_right[ind])}", True, (255, 255, 255)
         )
-        app_text_right = font.render(f"APP: {apps_right[ind]:0.2f}", True, (255, 255, 255))
+        app_text_right = font.render(
+            f"APP: {apps_right[ind]:0.2f}", True, (255, 255, 255)
+        )
         clear_text_right = font.render(
             f"Clear: {int(clears_right[ind])}", True, (255, 255, 255)
         )

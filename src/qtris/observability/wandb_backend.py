@@ -5,6 +5,7 @@ serializes a PPOLog model (incl. wrapping numpy image fields as wandb.Image)
 and emits a single `wandb.log` call. Callers no longer construct dicts or
 import wandb directly for normal training metrics.
 """
+
 from __future__ import annotations
 
 from typing import Any
