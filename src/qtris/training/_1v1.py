@@ -1,5 +1,3 @@
-USE_FLAT = False  # set by main(args) before any USE_FLAT branch runs
-
 from TetrisEnv.Moves import Keys
 from TetrisEnv.Py1v1TetrisRunner import Py1v1TetrisRunner
 from TetrisEnv.Py1v1TetrisRunnerFlat import Py1v1TetrisRunnerFlat
@@ -18,6 +16,7 @@ import os
 import glob
 import random
 
+USE_FLAT = False  # set by main(args) before any USE_FLAT branch runs
 HARD_DROP_ID = Keys.HARD_DROP
 
 # Model params

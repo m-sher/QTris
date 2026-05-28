@@ -741,7 +741,7 @@ def main(args):
         handleColour=(50, 50, 50),
     )
 
-    back_btn = Button(
+    Button(
         screen,
         1243,  # Adjusted position for new screen width
         0,
@@ -753,7 +753,7 @@ def main(args):
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
 
-    fwd_btn = Button(
+    Button(
         screen,
         1275,  # Adjusted position for new screen width
         0,

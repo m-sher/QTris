@@ -9,13 +9,13 @@ from pygame_widgets.button import Button
 import numpy as np
 import time
 
-from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_COLORS_RGB, BCG_LABELS
+from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_LABELS
 from qtris.demo.rendering import (
     compute_bcg_heatmaps,
     draw_garbage_bar,
     colorize_piece_sidebar,
 )
-from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
+from qtris.demo.utils import load_piece_display, save_frames_as_video
 
 num_envs = 1
 piece_dim = 8
@@ -315,7 +315,7 @@ def main(args):
         handleColour=(50, 50, 50),
     )
 
-    back_btn = Button(
+    Button(
         screen,
         605,
         0,
@@ -327,7 +327,7 @@ def main(args):
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
 
-    fwd_btn = Button(
+    Button(
         screen,
         637,
         0,

@@ -1,6 +1,5 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
-from TetrisEnv.Moves import Keys
 import os
 import shutil
 import numpy as np
