@@ -9,9 +9,9 @@ from pygame_widgets.button import Button
 import numpy as np
 import time
 
-from qtris.demo.constants import BCG_COLORS_RGB, BCG_LABELS, PIECE_COLORS, READABLE_KEYS
+from qtris.demo.constants import BCG_LABELS, PIECE_COLORS
 from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar
-from qtris.demo.utils import load_checkpoint, save_frames_as_video
+from qtris.demo.utils import save_frames_as_video
 
 # Model params
 piece_dim = 8
@@ -315,7 +315,7 @@ def main(cli_args):
         # P1 board (left)
         p1_x = margin
         vis1 = py_env._env1._vis_board
-        colored1 = piece_colors[vis1]
+        colored1 = PIECE_COLORS[vis1]
         board1_surf = pygame.Surface((10, 24))
         pygame.surfarray.blit_array(board1_surf, colored1.transpose(1, 0, 2))
         board1_surf = pygame.transform.scale(board1_surf, (board_w, board_h))
@@ -336,7 +336,7 @@ def main(cli_args):
         # P2 board (right)
         p2_x = margin + panel_w + gap
         vis2 = py_env._env2._vis_board
-        colored2 = piece_colors[vis2]
+        colored2 = PIECE_COLORS[vis2]
         board2_surf = pygame.Surface((10, 24))
         pygame.surfarray.blit_array(board2_surf, colored2.transpose(1, 0, 2))
         board2_surf = pygame.transform.scale(board2_surf, (board_w, board_h))
@@ -443,7 +443,7 @@ def main(cli_args):
         colour=(125, 125, 125),
         handleColour=(50, 50, 50),
     )
-    back_btn = Button(
+    Button(
         screen,
         screen_w - 60,
         0,
@@ -454,7 +454,7 @@ def main(cli_args):
         margin=0,
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
-    fwd_btn = Button(
+    Button(
         screen,
         screen_w - 28,
         0,

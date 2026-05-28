@@ -3,7 +3,7 @@ import keras
 from keras import layers
 from tensorflow_probability import distributions
 from qtris.nn.transformer import DecoderLayer, PosEncoding
-from qtris.models.encoders import make_patches, tokenize_bcg
+from qtris.models.encoders import make_patches
 from qtris.models.base import QtrisModelBase
 from TetrisEnv.Moves import Keys
 

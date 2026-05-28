@@ -2,17 +2,12 @@ import tensorflow as tf
 import keras
 from keras import layers
 from tensorflow_probability import distributions
-from TetrisEnv.Moves import Convert
 
-from qtris.nn.attention import CrossAttention, FeedForward, SelfAttention
 from qtris.nn.transformer import (
-    CrossAttentionLayer,
     DecoderLayer,
-    EncoderLayer,
     PosEncoding,
-    positional_encoding,
 )
-from qtris.models.encoders import make_patches, tokenize_bcg
+from qtris.models.encoders import make_patches
 from qtris.models.base import QtrisModelBase
 
 

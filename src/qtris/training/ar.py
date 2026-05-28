@@ -407,10 +407,10 @@ def main(args):
         key_dim=model_cfg.key_dim,
         num_steps=ppo_cfg.num_collection_steps,
         num_envs=ppo_cfg.num_envs,
-        garbage_chance_min=garbage_chance_min,
-        garbage_chance_max=garbage_chance_max,
-        garbage_rows_min=garbage_rows_min,
-        garbage_rows_max=garbage_rows_max,
+        garbage_chance_min=env_cfg.garbage_chance,
+        garbage_chance_max=env_cfg.garbage_chance,
+        garbage_rows_min=env_cfg.garbage_min,
+        garbage_rows_max=env_cfg.garbage_max,
         p_model=p_model,
         v_model=v_model,
         temperature=ppo_cfg.temperature,
@@ -565,9 +565,9 @@ def main(args):
             v_model,
             online_dataset,
             expert_iter,
-            num_epochs,
-            entropy_coef,
-            expert_coef,
+            ppo_cfg.num_epochs,
+            ppo_cfg.entropy_coef,
+            ppo_cfg.expert_coef,
         )
 
         # Save checkpoint
@@ -654,7 +654,7 @@ def main(args):
             )
 
         print(
-            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{num_updates}",
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{config.num_updates}",
             flush=True,
         )
         last_time = time.time()
