@@ -1,0 +1,663 @@
+from TetrisEnv.PyTetrisRunner import PyTetrisRunner
+from TetrisEnv.Moves import Keys
+from qtris.models.ar.model import PolicyModel
+from qtris.models.value import ValueModel
+from qtris.pretraining.ar import Pretrainer
+import tensorflow as tf
+from tensorflow_probability import distributions
+from tensorflow import keras
+
+from qtris.config import ModelConfig, PPOConfig, EnvConfig
+from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
+from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
+from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
+import time
+import os
+
+# Configs (AR defaults)
+model_cfg = ModelConfig()
+ppo_cfg = PPOConfig()
+env_cfg = EnvConfig()
+
+
+expert_dataset_path = "datasets/tetris_expert_dataset_b2b"
+
+config = SingleAgentTrainConfig(
+    num_envs=ppo_cfg.num_envs,
+    num_collection_steps=ppo_cfg.num_collection_steps,
+    mini_batch_size=ppo_cfg.mini_batch_size,
+    num_updates=ppo_cfg.num_epochs
+    * ppo_cfg.num_envs
+    * ppo_cfg.num_collection_steps
+    // ppo_cfg.mini_batch_size,
+    gamma=ppo_cfg.gamma,
+    lam=ppo_cfg.lam,
+    ppo_clip=ppo_cfg.ppo_clip,
+    value_clip=ppo_cfg.value_clip,
+    entropy_coef=ppo_cfg.entropy_coef,
+    target_kl=ppo_cfg.target_kl,
+    expert_coef=ppo_cfg.expert_coef,
+)
+
+
+@tf.function()
+def train_step(
+    p_model,
+    v_model,
+    online_batch,
+    entropy_coef,
+    expert_coef,
+    use_expert,
+    expert_batch=None,
+):
+    online_board_batch = tf.ensure_shape(
+        online_batch["boards"], (ppo_cfg.mini_batch_size, 24, 10, 1)
+    )
+    online_pieces_batch = tf.ensure_shape(
+        online_batch["pieces"], (ppo_cfg.mini_batch_size, model_cfg.queue_size + 2)
+    )
+    online_b2b_combo_garbage_batch = tf.ensure_shape(
+        online_batch["b2b_combo_garbage"], (ppo_cfg.mini_batch_size, 3)
+    )
+    online_actions_batch = tf.ensure_shape(
+        online_batch["actions"], (ppo_cfg.mini_batch_size, model_cfg.max_len)
+    )
+
+    log_probs_batch = tf.ensure_shape(
+        online_batch["old_log_probs"][:, 1:],
+        (ppo_cfg.mini_batch_size, model_cfg.max_len - 1),
+    )
+    mask_batch = tf.ensure_shape(
+        online_batch["masks"],
+        (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim),
+    )
+
+    advantages_batch = tf.ensure_shape(
+        online_batch["advantages"], (ppo_cfg.mini_batch_size, 1)
+    )
+    returns_batch = tf.ensure_shape(
+        online_batch["returns"], (ppo_cfg.mini_batch_size, 1)
+    )
+    old_values_batch = tf.ensure_shape(
+        online_batch["old_values"], (ppo_cfg.mini_batch_size, 1)
+    )
+
+    invalid_mask = mask_batch[
+        :, 1:, :
+    ]  # batch, model_cfg.max_len - 1, model_cfg.key_dim
+    pad_mask = tf.cast(
+        online_actions_batch[:, 1:] != Keys.PAD, tf.float32
+    )  # batch, model_cfg.max_len - 1
+
+    num_valid_actions = tf.reduce_sum(
+        tf.cast(invalid_mask, tf.float32), axis=-1
+    )  # (batch, model_cfg.max_len - 1)
+    decision_mask = tf.cast(num_valid_actions > 1, tf.float32) * pad_mask
+
+    input_actions_batch = online_actions_batch[:, :-1]
+    target_actions = online_actions_batch[:, 1:]
+
+    with tf.GradientTape() as p_tape:
+        logits, piece_scores, key_scores = p_model(
+            (
+                online_board_batch,
+                online_pieces_batch,
+                online_b2b_combo_garbage_batch,
+                input_actions_batch,
+            ),
+            training=True,
+            return_scores=True,
+        )
+
+        logits = tf.ensure_shape(
+            logits, (ppo_cfg.mini_batch_size, model_cfg.max_len - 1, model_cfg.key_dim)
+        )  # batch, model_cfg.max_len - 1, num_actions
+
+        temp_adjusted_logits = logits / ppo_cfg.temperature
+
+        masked_logits = tf.where(
+            invalid_mask, temp_adjusted_logits, tf.constant(-1e9, dtype=tf.float32)
+        )  # batch, model_cfg.max_len - 1, num_actions
+
+        masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
+
+        new_log_probs = tf.ensure_shape(
+            masked_dist.log_prob(target_actions),
+            (ppo_cfg.mini_batch_size, model_cfg.max_len - 1),
+        )
+        new_log_probs = tf.ensure_shape(
+            tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
+            (ppo_cfg.mini_batch_size, 1),
+        )
+
+        old_log_probs = tf.ensure_shape(
+            tf.reduce_sum(log_probs_batch * decision_mask, axis=-1)[..., None],
+            (ppo_cfg.mini_batch_size, 1),
+        )
+
+        ratio = tf.ensure_shape(
+            tf.exp(new_log_probs - old_log_probs), (ppo_cfg.mini_batch_size, 1)
+        )
+        surrogate, clipped_ratio = clipped_surrogate(
+            ratio, advantages_batch, ppo_cfg.ppo_clip
+        )
+        ppo_loss = -tf.reduce_mean(surrogate)
+
+        entropy = tf.reduce_mean(
+            tf.reduce_sum(masked_dist.entropy() * decision_mask, axis=-1)
+        )
+        approx_kl = tf.reduce_mean(old_log_probs - new_log_probs)
+
+        if use_expert:
+            expert_actions_batch = tf.ensure_shape(
+                expert_batch["actions"], (ppo_cfg.mini_batch_size, model_cfg.max_len)
+            )
+            expert_masks_batch = tf.ensure_shape(
+                expert_batch["masks"],
+                (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim),
+            )
+            expert_input_seq = expert_actions_batch[:, :-1]
+            expert_target_seq = expert_actions_batch[:, 1:]
+            expert_valid_mask = expert_masks_batch[:, 1:, :]
+
+            expert_pad_mask = tf.cast(expert_target_seq != Keys.PAD, tf.float32)
+            expert_num_valid = tf.reduce_sum(
+                tf.cast(expert_valid_mask, tf.float32), axis=-1
+            )
+            expert_decision_mask = (
+                tf.cast(expert_num_valid > 1, tf.float32) * expert_pad_mask
+            )
+            expert_sample_weights = tf.ensure_shape(
+                expert_batch["sample_weights"], (ppo_cfg.mini_batch_size,)
+            )
+            expert_weighted_mask = expert_decision_mask * expert_sample_weights[:, None]
+
+            expert_logits = p_model(
+                (
+                    tf.ensure_shape(
+                        expert_batch["boards"], (ppo_cfg.mini_batch_size, 24, 10, 1)
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["pieces"],
+                        (ppo_cfg.mini_batch_size, model_cfg.queue_size + 2),
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["b2b_combo_garbage"], (ppo_cfg.mini_batch_size, 3)
+                    ),
+                    expert_input_seq,
+                ),
+                training=True,
+            )
+            expert_masked_logits = tf.where(
+                expert_valid_mask, expert_logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            expert_per_token_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
+                labels=expert_target_seq, logits=expert_masked_logits
+            )
+            expert_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(expert_per_token_loss * expert_weighted_mask),
+                tf.reduce_sum(expert_weighted_mask),
+            )
+
+            expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
+            expert_correct = (
+                tf.cast(expert_pred == expert_target_seq, tf.float32)
+                * expert_decision_mask
+            )
+            expert_accuracy = tf.math.divide_no_nan(
+                tf.reduce_sum(expert_correct), tf.reduce_sum(expert_decision_mask)
+            )
+        else:
+            expert_loss = tf.constant(0.0, dtype=tf.float32)
+            expert_accuracy = tf.constant(0.0, dtype=tf.float32)
+
+        total_policy_loss = (
+            ppo_loss
+            - ppo_cfg.entropy_coef * entropy
+            + ppo_cfg.expert_coef * expert_loss
+        )
+
+    # Apply policy gradients
+    p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
+    p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
+
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+
+    with tf.GradientTape() as v_tape:
+        values = v_model(
+            (online_board_batch, online_pieces_batch, online_b2b_combo_garbage_batch),
+            training=True,
+        )
+        values = tf.ensure_shape(values, (ppo_cfg.mini_batch_size, 1))
+
+        # Value loss
+        value_loss = clipped_value_loss(
+            values, old_values_batch, returns_batch, ppo_cfg.value_clip
+        )
+
+    # Apply value gradients
+    v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
+    v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
+
+    ret_var = tf.math.reduce_variance(returns_batch)
+    res_var = tf.math.reduce_variance(returns_batch - values)
+    explained_var = tf.reduce_mean(1.0 - tf.math.divide_no_nan(res_var, ret_var))
+
+    return {
+        "ppo_loss": ppo_loss,
+        "entropy": entropy,
+        "approx_kl": approx_kl,
+        "clipped_frac": clipped_frac,
+        "value_loss": value_loss,
+        "explained_var": explained_var,
+        "board": online_board_batch[0],
+        "scores": piece_scores,
+        "expert_loss": expert_loss,
+        "expert_accuracy": expert_accuracy,
+    }
+
+
+def train_on_dataset(
+    p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
+):
+    use_expert = expert_iter is not None
+    updates = 0
+    for epoch in range(ppo_cfg.num_epochs):
+        for online_batch in online_dataset:
+            if use_expert:
+                expert_batch = next(expert_iter)
+                step_out = train_step(
+                    p_model,
+                    v_model,
+                    online_batch,
+                    ppo_cfg.entropy_coef,
+                    ppo_cfg.expert_coef,
+                    True,
+                    expert_batch,
+                )
+            else:
+                step_out = train_step(
+                    p_model,
+                    v_model,
+                    online_batch,
+                    ppo_cfg.entropy_coef,
+                    ppo_cfg.expert_coef,
+                    False,
+                )
+            updates += 1
+
+            if (
+                ppo_cfg.early_stopping
+                and step_out["approx_kl"] >= 1.5 * ppo_cfg.target_kl
+            ):
+                step_out["updates"] = updates
+                return step_out
+
+    step_out["updates"] = updates
+    return step_out
+
+
+def main(args):
+    # Initialize model and optimizer
+    p_model = PolicyModel(
+        batch_size=ppo_cfg.num_envs,
+        piece_dim=model_cfg.piece_dim,
+        key_dim=model_cfg.key_dim,
+        depth=model_cfg.depth,
+        max_len=model_cfg.max_len,
+        num_heads=model_cfg.num_heads,
+        num_layers=model_cfg.num_layers,
+        dropout_rate=model_cfg.dropout_rate,
+        output_dim=model_cfg.key_dim,
+    )
+
+    v_model = ValueModel(
+        piece_dim=model_cfg.piece_dim,
+        depth=model_cfg.depth,
+        num_heads=model_cfg.num_heads,
+        num_layers=model_cfg.num_layers,
+        dropout_rate=model_cfg.dropout_rate,
+        output_dim=1,
+    )
+
+    print("Initialized models", flush=True)
+
+    p_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
+    p_model.compile(optimizer=p_optimizer, jit_compile=True)
+
+    v_optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
+    v_model.compile(optimizer=v_optimizer, jit_compile=True)
+
+    # Initialize checkpoint manager
+    p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "checkpoints/ar_policy", max_to_keep=3
+    )
+    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+
+    loaded_return_scale = tf.Variable(
+        1.0, trainable=False, dtype=tf.float32, name="return_scale"
+    )
+    v_checkpoint = tf.train.Checkpoint(
+        model=v_model,
+        optimizer=v_optimizer,
+        return_scale=loaded_return_scale,
+    )
+    v_checkpoint_manager = tf.train.CheckpointManager(
+        v_checkpoint, "checkpoints/ar_value", max_to_keep=3
+    )
+
+    if v_checkpoint_manager.latest_checkpoint:
+        v_checkpoint.restore(v_checkpoint_manager.latest_checkpoint).expect_partial()
+        print(
+            f"Restored value checkpoint (return_scale={float(loaded_return_scale):.3f})",
+            flush=True,
+        )
+    else:
+        pretrained_v_ckpt = tf.train.Checkpoint(
+            model=v_model,
+            return_scale=loaded_return_scale,
+        )
+        pretrained_v_mgr = tf.train.CheckpointManager(
+            pretrained_v_ckpt, "checkpoints/ar_pretrained_value", max_to_keep=1
+        )
+        if pretrained_v_mgr.latest_checkpoint:
+            pretrained_v_ckpt.restore(
+                pretrained_v_mgr.latest_checkpoint
+            ).expect_partial()
+            print(
+                f"Bootstrapped value from pretrained checkpoint "
+                f"(return_scale={float(loaded_return_scale):.3f})",
+                flush=True,
+            )
+        else:
+            print("No value checkpoint found, training from scratch", flush=True)
+    print("Restored checkpoints", flush=True)
+
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(model_cfg.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(model_cfg.max_len,), dtype=tf.int64),
+        )
+    )
+
+    v_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(model_cfg.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
+    print("Built models", flush=True)
+
+    p_model.summary()
+    v_model.summary()
+
+    # Initialize runner
+    runner = PyTetrisRunner(
+        queue_size=model_cfg.queue_size,
+        max_holes=env_cfg.max_holes,
+        max_height=env_cfg.max_height,
+        max_steps=env_cfg.max_steps,
+        pathfinding=True,
+        max_len=model_cfg.max_len,
+        key_dim=model_cfg.key_dim,
+        num_steps=ppo_cfg.num_collection_steps,
+        num_envs=ppo_cfg.num_envs,
+        garbage_chance_min=env_cfg.garbage_chance,
+        garbage_chance_max=env_cfg.garbage_chance,
+        garbage_rows_min=env_cfg.garbage_min,
+        garbage_rows_max=env_cfg.garbage_max,
+        p_model=p_model,
+        v_model=v_model,
+        temperature=ppo_cfg.temperature,
+        seed=None,
+        num_sequences=model_cfg.num_sequences,
+        num_row_tiers=model_cfg.num_row_tiers,
+    )
+
+    print("Initialized runner", flush=True)
+
+    if os.path.exists(expert_dataset_path):
+        expert_dataset = Pretrainer.load_expert_dataset(
+            expert_dataset_path, ppo_cfg.mini_batch_size
+        )
+        expert_iter = iter(expert_dataset)
+        print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
+    else:
+        expert_iter = None
+        print(
+            f"No expert dataset found at {expert_dataset_path}; "
+            f"running PPO without expert anchoring",
+            flush=True,
+        )
+
+    last_time = time.time()
+
+    # Initialize WandB logging
+    wandb_run = init_run(
+        project="Tetris",
+        config=config,
+        # id='iauixt1w',
+        # resume='must',
+    )
+
+    # Initialize running return variance for reward scaling (EMA)
+    return_var = float(loaded_return_scale) ** 2
+    return_var_decay = 0.99
+    print(f"Initial return_var = {return_var:.3f}", flush=True)
+
+    # Collect trajectories and train
+    for gen in range(args.num_generations):
+        # Collect trajectory
+        print(f"{time.time() - last_time:2.2f} | Collecting trajectory...", flush=True)
+        last_time = time.time()
+
+        (
+            all_boards,
+            all_pieces,
+            all_b2b_combo_garbage,
+            all_actions,
+            all_log_probs,
+            all_masks,
+            all_valid_sequences,
+            all_action_indices,
+            all_values,
+            all_last_values,
+            all_attacks,
+            all_clears,
+            all_attack_reward,
+            all_total_reward,
+            all_dones,
+            all_garbage_pushed,
+        ) = runner.collect_trajectory(render=False)
+
+        all_rewards = tf.ensure_shape(
+            all_total_reward[..., None],
+            (ppo_cfg.num_collection_steps, ppo_cfg.num_envs, 1),
+        )
+
+        # Scale rewards by running return std
+        scaled_rewards = tf.clip_by_value(
+            all_rewards / (tf.sqrt(return_var) + 1e-8), -10.0, 10.0
+        )
+
+        print(
+            f"{time.time() - last_time:2.2f} | Collected. Creating dataset...",
+            flush=True,
+        )
+        last_time = time.time()
+        # Compute advantages and returns
+        all_advantages, all_returns = compute_gae_and_returns(
+            all_values,
+            all_last_values,
+            scaled_rewards,
+            all_dones,
+            ppo_cfg.gamma,
+            ppo_cfg.lam,
+            num_collection_steps=ppo_cfg.num_collection_steps,
+            num_envs=ppo_cfg.num_envs,
+        )
+
+        raw_returns = compute_raw_returns(
+            all_rewards,
+            all_dones,
+            ppo_cfg.gamma,
+            num_collection_steps=ppo_cfg.num_collection_steps,
+            num_envs=ppo_cfg.num_envs,
+        )
+        batch_var = tf.math.reduce_variance(raw_returns)
+        return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
+
+        all_advantages = (all_advantages - tf.reduce_mean(all_advantages)) / (
+            tf.math.reduce_std(all_advantages) + 1e-8
+        )
+
+        # Flatten data
+        boards_flat = tf.reshape(all_boards, (-1, 24, 10, 1))
+        pieces_flat = tf.reshape(all_pieces, (-1, (model_cfg.queue_size + 2)))
+        b2b_combo_garbage_flat = tf.reshape(all_b2b_combo_garbage, (-1, 3))
+        actions_flat = tf.reshape(all_actions, (-1, model_cfg.max_len))
+        log_probs_flat = tf.reshape(all_log_probs, (-1, model_cfg.max_len))
+        masks_flat = tf.reshape(all_masks, (-1, model_cfg.max_len, model_cfg.key_dim))
+        advantages_flat = tf.reshape(all_advantages, (-1, 1))
+        returns_flat = tf.reshape(all_returns, (-1, 1))
+        values_flat = tf.reshape(all_values, (-1, 1))
+
+        # Create TF dataset from data
+        online_dataset = (
+            tf.data.Dataset.from_tensor_slices(
+                {
+                    "boards": boards_flat,
+                    "pieces": pieces_flat,
+                    "b2b_combo_garbage": b2b_combo_garbage_flat,
+                    "actions": actions_flat,
+                    "old_log_probs": log_probs_flat,
+                    "masks": masks_flat,
+                    "advantages": advantages_flat,
+                    "returns": returns_flat,
+                    "old_values": values_flat,
+                }
+            )
+            .cache()
+            .shuffle(buffer_size=boards_flat.shape[0])
+            .batch(
+                ppo_cfg.mini_batch_size,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+                drop_remainder=True,
+            )
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+        print(
+            f"{time.time() - last_time:2.2f} | Dataset made. Training on dataset...",
+            flush=True,
+        )
+        last_time = time.time()
+
+        # Train on collected data
+        train_out = train_on_dataset(
+            p_model,
+            v_model,
+            online_dataset,
+            expert_iter,
+            ppo_cfg.num_epochs,
+            ppo_cfg.entropy_coef,
+            ppo_cfg.expert_coef,
+        )
+
+        # Save checkpoint
+        p_checkpoint_manager.save()
+        v_checkpoint_manager.save()
+
+        print(
+            f"{time.time() - last_time:2.2f} | Trained on dataset. Logging metrics...",
+            flush=True,
+        )
+        last_time = time.time()
+
+        # Unpack metrics
+        ppo_loss = train_out["ppo_loss"]
+        entropy = train_out["entropy"]
+        approx_kl = train_out["approx_kl"]
+        clipped_frac = train_out["clipped_frac"]
+        value_loss = train_out["value_loss"]
+        explained_var = train_out["explained_var"]
+        board = train_out["board"]
+        scores = train_out["scores"]
+        expert_loss = train_out["expert_loss"]
+        expert_accuracy = train_out["expert_accuracy"]
+        updates = train_out["updates"]
+
+        # Compute more metrics
+        avg_reward = tf.reduce_mean(tf.reduce_sum(all_rewards, axis=0))
+        avg_attacks = tf.reduce_mean(tf.reduce_sum(all_attacks, axis=0))
+        avg_clears = tf.reduce_mean(tf.reduce_sum(all_clears, axis=0))
+        avg_attack_reward = tf.reduce_mean(tf.reduce_sum(all_attack_reward, axis=0))
+        avg_total_reward = tf.reduce_mean(tf.reduce_sum(all_total_reward, axis=0))
+        avg_garbage_pushed = tf.reduce_mean(tf.reduce_sum(all_garbage_pushed, axis=0))
+        avg_deaths = tf.reduce_mean(tf.reduce_sum(all_dones, axis=0))
+        avg_pieces = tf.reduce_mean(
+            ppo_cfg.num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
+        )
+        avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
+
+        # B2B / combo distribution from the pre-step observations
+        b2b_series = all_b2b_combo_garbage[..., 0]
+        combo_series = all_b2b_combo_garbage[..., 1]
+        avg_b2b = tf.reduce_mean(b2b_series)
+        max_b2b = tf.reduce_max(b2b_series)
+        avg_combo = tf.reduce_mean(combo_series)
+        surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
+
+        c_scores = tf.reshape(
+            tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1)
+        )
+        norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
+            tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
+        )
+
+        if gen % 10 == 0:
+            log_step(
+                SingleAgentPPOLog(
+                    ppo_loss=ppo_loss,
+                    entropy=entropy,
+                    approx_kl=approx_kl,
+                    clipped_frac=clipped_frac,
+                    value_loss=value_loss,
+                    explained_var=explained_var,
+                    return_var=return_var,
+                    avg_probs=avg_probs,
+                    avg_reward=avg_reward,
+                    avg_attacks=avg_attacks,
+                    avg_clears=avg_clears,
+                    avg_attack_reward=avg_attack_reward,
+                    avg_total_reward=avg_total_reward,
+                    avg_garbage_pushed=avg_garbage_pushed,
+                    avg_deaths=avg_deaths,
+                    avg_pieces=avg_pieces,
+                    avg_b2b=avg_b2b,
+                    max_b2b=max_b2b,
+                    avg_combo=avg_combo,
+                    surge_rate=surge_rate,
+                    expert_loss=expert_loss,
+                    expert_accuracy=expert_accuracy,
+                    expert_coef=ppo_cfg.expert_coef,
+                    updates=updates,
+                    board=board[..., 0],
+                    scores=norm_c_scores,
+                )
+            )
+
+        print(
+            f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{config.num_updates}",
+            flush=True,
+        )
+        last_time = time.time()
+
+    runner.env.close()
+    finish(wandb_run)

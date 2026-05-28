@@ -2,5 +2,8 @@
 **/__pycache__
 **/wandb
 **/nohup.out
-/tetris_expert_dataset
+datasets/
 **/**checkpoint**
+build/
+*.egg-info/
+tetrio/

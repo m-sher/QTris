@@ -1,0 +1,239 @@
+from TetrisEnv.Moves import Keys
+from qtris.models.ar.model import PolicyModel
+from qtris.models.value import ValueModel
+from qtris.pretraining.base import PretrainerBase, correct_and_clip
+import tensorflow as tf
+from tensorflow import keras
+
+
+class Pretrainer(PretrainerBase):
+    def __init__(
+        self, dataset_path="datasets/tetris_expert_dataset_b2b", policy_only=False
+    ):
+        super().__init__(dataset_path, policy_only)
+
+    @tf.function
+    def _train_step(self, p_model, v_model, batch):
+        board = batch["boards"]
+        pieces = batch["pieces"]
+        bcg = batch["b2b_combo_garbage"]
+        actions = batch["actions"]
+        masks = batch["masks"]
+        sample_weights = batch["sample_weights"]
+
+        input_seq = actions[:, :-1]
+        target_seq = actions[:, 1:]
+        valid_mask = masks[:, 1:, :]
+
+        pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
+        num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
+        decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
+        weighted_mask = decision_mask * sample_weights[:, None]
+
+        with tf.GradientTape() as p_tape:
+            logits = p_model((board, pieces, bcg, input_seq), training=True)
+            masked_logits = tf.where(
+                valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
+            )
+            per_token_loss = self._scc(target_seq, masked_logits)
+            policy_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(per_token_loss * weighted_mask),
+                tf.reduce_sum(weighted_mask),
+            )
+
+        p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
+        p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
+
+        pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
+        correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
+        accuracy = tf.math.divide_no_nan(
+            tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
+        )
+
+        # Top-3 on decision tokens. Tracks how well the right answer is
+        # ranked, not just whether it's #1. Useful diagnostic for whether
+        # the model "knows about" the correct token even when not
+        # selecting it greedily - especially helpful early in training
+        # when Acc is low but the right token is consistently in the top
+        # few logits.
+        last_dim = tf.shape(masked_logits)[-1]
+        flat_logits = tf.reshape(masked_logits, [-1, last_dim])
+        flat_targets = tf.reshape(target_seq, [-1])
+        top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
+        top3 = (
+            tf.cast(tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32)
+            * decision_mask
+        )
+        accuracy_top3 = tf.math.divide_no_nan(
+            tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
+        )
+
+        if self._policy_only:
+            return (
+                policy_loss,
+                accuracy,
+                accuracy_top3,
+                tf.constant(0.0, dtype=tf.float32),
+            )
+
+        returns = correct_and_clip(batch["returns"], bcg[..., 0])
+        with tf.GradientTape() as v_tape:
+            values = v_model((board, pieces, bcg), training=True)
+            targets = tf.reshape(returns / self._return_scale, (-1, 1))
+            squared_error = tf.square(values - targets)
+            value_loss = tf.math.divide_no_nan(
+                tf.reduce_sum(squared_error * sample_weights[:, None]),
+                tf.reduce_sum(sample_weights),
+            )
+
+        v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
+        v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
+
+        return policy_loss, accuracy, accuracy_top3, value_loss
+
+    def train(
+        self,
+        p_model,
+        v_model=None,
+        epochs=10,
+        batch_size=256,
+        p_checkpoint_manager=None,
+        v_checkpoint_manager=None,
+    ):
+        if not self._policy_only and v_model is None:
+            raise ValueError(
+                "v_model is required unless Pretrainer was constructed "
+                "with policy_only=True."
+            )
+
+        dataset = self._load_dataset(batch_size=batch_size)
+
+        for epoch in range(epochs):
+            print(f"Epoch {epoch + 1}/{epochs}", flush=True)
+            for step, batch in enumerate(dataset):
+                policy_loss, accuracy, accuracy_top3, value_loss = self._train_step(
+                    p_model, v_model, batch
+                )
+                if step % 100 == 0:
+                    if self._policy_only:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f}",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
+                            f"Acc: {float(accuracy):1.3f} | "
+                            f"Acc@3: {float(accuracy_top3):1.3f} | "
+                            f"Value: {float(value_loss):2.3f}",
+                            flush=True,
+                        )
+            if p_checkpoint_manager is not None:
+                p_checkpoint_manager.save()
+            if v_checkpoint_manager is not None and not self._policy_only:
+                v_checkpoint_manager.save()
+
+
+def main(args):
+    piece_dim = 8
+    key_dim = 12
+    depth = 64
+    max_len = 15
+    queue_size = 5
+    num_heads = 4
+    num_layers = 4
+    dropout_rate = 0.0
+    batch_size = args.batch_size
+
+    p_model = PolicyModel(
+        batch_size=batch_size,
+        piece_dim=piece_dim,
+        key_dim=key_dim,
+        depth=depth,
+        max_len=max_len,
+        num_heads=num_heads,
+        num_layers=num_layers,
+        dropout_rate=dropout_rate,
+        output_dim=key_dim,
+    )
+
+    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_model.compile(optimizer=p_optimizer, jit_compile=True)
+
+    v_model = None
+    v_optimizer = None
+    if not args.policy_only:
+        v_model = ValueModel(
+            piece_dim=piece_dim,
+            depth=depth,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout_rate=dropout_rate,
+            output_dim=1,
+        )
+        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_model.compile(optimizer=v_optimizer, jit_compile=True)
+    print("Initialized models and optimizers.", flush=True)
+
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(max_len,), dtype=tf.int64),
+        )
+    )
+    p_model.summary()
+    if v_model is not None:
+        v_model(
+            (
+                keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+                keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+                keras.Input(shape=(3,), dtype=tf.float32),
+            )
+        )
+        v_model.summary()
+
+    p_checkpoint = tf.train.Checkpoint(model=p_model, optimizer=p_optimizer)
+    p_checkpoint_manager = tf.train.CheckpointManager(
+        p_checkpoint, "checkpoints/ar_pretrained_policy", max_to_keep=3
+    )
+    if p_checkpoint_manager.latest_checkpoint:
+        p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+        print("Restored pretrained policy checkpoint.", flush=True)
+
+    pretrainer_kwargs = {"policy_only": args.policy_only}
+    if args.dataset is not None:
+        pretrainer_kwargs["dataset_path"] = str(args.dataset)
+    pretrainer = Pretrainer(**pretrainer_kwargs)
+
+    v_checkpoint_manager = None
+    if v_model is not None:
+        v_checkpoint = tf.train.Checkpoint(
+            model=v_model,
+            optimizer=v_optimizer,
+            return_scale=pretrainer._return_scale,
+        )
+        v_checkpoint_manager = tf.train.CheckpointManager(
+            v_checkpoint, "checkpoints/ar_pretrained_value", max_to_keep=3
+        )
+        if v_checkpoint_manager.latest_checkpoint:
+            v_checkpoint.restore(
+                v_checkpoint_manager.latest_checkpoint
+            ).expect_partial()
+            print(
+                f"Restored pretrained value checkpoint "
+                f"(return_scale={float(pretrainer._return_scale):.3f}).",
+                flush=True,
+            )
+
+    pretrainer.train(
+        p_model,
+        v_model,
+        epochs=args.num_epochs,
+        batch_size=batch_size,
+        p_checkpoint_manager=p_checkpoint_manager,
+        v_checkpoint_manager=v_checkpoint_manager,
+    )
