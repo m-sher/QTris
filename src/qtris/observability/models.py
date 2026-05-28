@@ -16,6 +16,7 @@ Hierarchy:
 Pydantic version: v1 (pinned because tf-agents 0.19.0 requires typing-extensions==4.5.0,
 which is incompatible with pydantic v2). Translate to v2 syntax if tf-agents is bumped.
 """
+
 from __future__ import annotations
 
 from typing import Any

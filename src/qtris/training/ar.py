@@ -21,15 +21,16 @@ ppo_cfg = PPOConfig()
 env_cfg = EnvConfig()
 
 
-
-
 expert_dataset_path = "datasets/tetris_expert_dataset_b2b"
 
 config = SingleAgentTrainConfig(
     num_envs=ppo_cfg.num_envs,
     num_collection_steps=ppo_cfg.num_collection_steps,
     mini_batch_size=ppo_cfg.mini_batch_size,
-    num_updates=ppo_cfg.num_epochs * ppo_cfg.num_envs * ppo_cfg.num_collection_steps // ppo_cfg.mini_batch_size,
+    num_updates=ppo_cfg.num_epochs
+    * ppo_cfg.num_envs
+    * ppo_cfg.num_collection_steps
+    // ppo_cfg.mini_batch_size,
     gamma=ppo_cfg.gamma,
     lam=ppo_cfg.lam,
     ppo_clip=ppo_cfg.ppo_clip,
@@ -64,17 +65,27 @@ def train_step(
     )
 
     log_probs_batch = tf.ensure_shape(
-        online_batch["old_log_probs"][:, 1:], (ppo_cfg.mini_batch_size, model_cfg.max_len - 1)
+        online_batch["old_log_probs"][:, 1:],
+        (ppo_cfg.mini_batch_size, model_cfg.max_len - 1),
     )
     mask_batch = tf.ensure_shape(
-        online_batch["masks"], (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim)
+        online_batch["masks"],
+        (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim),
     )
 
-    advantages_batch = tf.ensure_shape(online_batch["advantages"], (ppo_cfg.mini_batch_size, 1))
-    returns_batch = tf.ensure_shape(online_batch["returns"], (ppo_cfg.mini_batch_size, 1))
-    old_values_batch = tf.ensure_shape(online_batch["old_values"], (ppo_cfg.mini_batch_size, 1))
+    advantages_batch = tf.ensure_shape(
+        online_batch["advantages"], (ppo_cfg.mini_batch_size, 1)
+    )
+    returns_batch = tf.ensure_shape(
+        online_batch["returns"], (ppo_cfg.mini_batch_size, 1)
+    )
+    old_values_batch = tf.ensure_shape(
+        online_batch["old_values"], (ppo_cfg.mini_batch_size, 1)
+    )
 
-    invalid_mask = mask_batch[:, 1:, :]  # batch, model_cfg.max_len - 1, model_cfg.key_dim
+    invalid_mask = mask_batch[
+        :, 1:, :
+    ]  # batch, model_cfg.max_len - 1, model_cfg.key_dim
     pad_mask = tf.cast(
         online_actions_batch[:, 1:] != Keys.PAD, tf.float32
     )  # batch, model_cfg.max_len - 1
@@ -112,7 +123,8 @@ def train_step(
         masked_dist = distributions.Categorical(logits=masked_logits, dtype=tf.int64)
 
         new_log_probs = tf.ensure_shape(
-            masked_dist.log_prob(target_actions), (ppo_cfg.mini_batch_size, model_cfg.max_len - 1)
+            masked_dist.log_prob(target_actions),
+            (ppo_cfg.mini_batch_size, model_cfg.max_len - 1),
         )
         new_log_probs = tf.ensure_shape(
             tf.reduce_sum(new_log_probs * decision_mask, axis=-1)[..., None],
@@ -127,7 +139,9 @@ def train_step(
         ratio = tf.ensure_shape(
             tf.exp(new_log_probs - old_log_probs), (ppo_cfg.mini_batch_size, 1)
         )
-        surrogate, clipped_ratio = clipped_surrogate(ratio, advantages_batch, ppo_cfg.ppo_clip)
+        surrogate, clipped_ratio = clipped_surrogate(
+            ratio, advantages_batch, ppo_cfg.ppo_clip
+        )
         ppo_loss = -tf.reduce_mean(surrogate)
 
         entropy = tf.reduce_mean(
@@ -140,7 +154,8 @@ def train_step(
                 expert_batch["actions"], (ppo_cfg.mini_batch_size, model_cfg.max_len)
             )
             expert_masks_batch = tf.ensure_shape(
-                expert_batch["masks"], (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim)
+                expert_batch["masks"],
+                (ppo_cfg.mini_batch_size, model_cfg.max_len, model_cfg.key_dim),
             )
             expert_input_seq = expert_actions_batch[:, :-1]
             expert_target_seq = expert_actions_batch[:, 1:]
@@ -150,7 +165,9 @@ def train_step(
             expert_num_valid = tf.reduce_sum(
                 tf.cast(expert_valid_mask, tf.float32), axis=-1
             )
-            expert_decision_mask = tf.cast(expert_num_valid > 1, tf.float32) * expert_pad_mask
+            expert_decision_mask = (
+                tf.cast(expert_num_valid > 1, tf.float32) * expert_pad_mask
+            )
             expert_sample_weights = tf.ensure_shape(
                 expert_batch["sample_weights"], (ppo_cfg.mini_batch_size,)
             )
@@ -158,9 +175,16 @@ def train_step(
 
             expert_logits = p_model(
                 (
-                    tf.ensure_shape(expert_batch["boards"], (ppo_cfg.mini_batch_size, 24, 10, 1)),
-                    tf.ensure_shape(expert_batch["pieces"], (ppo_cfg.mini_batch_size, model_cfg.queue_size + 2)),
-                    tf.ensure_shape(expert_batch["b2b_combo_garbage"], (ppo_cfg.mini_batch_size, 3)),
+                    tf.ensure_shape(
+                        expert_batch["boards"], (ppo_cfg.mini_batch_size, 24, 10, 1)
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["pieces"],
+                        (ppo_cfg.mini_batch_size, model_cfg.queue_size + 2),
+                    ),
+                    tf.ensure_shape(
+                        expert_batch["b2b_combo_garbage"], (ppo_cfg.mini_batch_size, 3)
+                    ),
                     expert_input_seq,
                 ),
                 training=True,
@@ -177,9 +201,10 @@ def train_step(
             )
 
             expert_pred = tf.argmax(expert_masked_logits, axis=-1, output_type=tf.int64)
-            expert_correct = tf.cast(
-                expert_pred == expert_target_seq, tf.float32
-            ) * expert_decision_mask
+            expert_correct = (
+                tf.cast(expert_pred == expert_target_seq, tf.float32)
+                * expert_decision_mask
+            )
             expert_accuracy = tf.math.divide_no_nan(
                 tf.reduce_sum(expert_correct), tf.reduce_sum(expert_decision_mask)
             )
@@ -187,7 +212,11 @@ def train_step(
             expert_loss = tf.constant(0.0, dtype=tf.float32)
             expert_accuracy = tf.constant(0.0, dtype=tf.float32)
 
-        total_policy_loss = ppo_loss - ppo_cfg.entropy_coef * entropy + ppo_cfg.expert_coef * expert_loss
+        total_policy_loss = (
+            ppo_loss
+            - ppo_cfg.entropy_coef * entropy
+            + ppo_cfg.expert_coef * expert_loss
+        )
 
     # Apply policy gradients
     p_gradients = p_tape.gradient(total_policy_loss, p_model.trainable_variables)
@@ -203,7 +232,9 @@ def train_step(
         values = tf.ensure_shape(values, (ppo_cfg.mini_batch_size, 1))
 
         # Value loss
-        value_loss = clipped_value_loss(values, old_values_batch, returns_batch, ppo_cfg.value_clip)
+        value_loss = clipped_value_loss(
+            values, old_values_batch, returns_batch, ppo_cfg.value_clip
+        )
 
     # Apply value gradients
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
@@ -227,7 +258,9 @@ def train_step(
     }
 
 
-def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef):
+def train_on_dataset(
+    p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
+):
     use_expert = expert_iter is not None
     updates = 0
     for epoch in range(ppo_cfg.num_epochs):
@@ -235,17 +268,29 @@ def train_on_dataset(p_model, v_model, online_dataset, expert_iter, num_epochs, 
             if use_expert:
                 expert_batch = next(expert_iter)
                 step_out = train_step(
-                    p_model, v_model, online_batch,
-                    ppo_cfg.entropy_coef, ppo_cfg.expert_coef, True, expert_batch,
+                    p_model,
+                    v_model,
+                    online_batch,
+                    ppo_cfg.entropy_coef,
+                    ppo_cfg.expert_coef,
+                    True,
+                    expert_batch,
                 )
             else:
                 step_out = train_step(
-                    p_model, v_model, online_batch,
-                    ppo_cfg.entropy_coef, ppo_cfg.expert_coef, False,
+                    p_model,
+                    v_model,
+                    online_batch,
+                    ppo_cfg.entropy_coef,
+                    ppo_cfg.expert_coef,
+                    False,
                 )
             updates += 1
 
-            if ppo_cfg.early_stopping and step_out["approx_kl"] >= 1.5 * ppo_cfg.target_kl:
+            if (
+                ppo_cfg.early_stopping
+                and step_out["approx_kl"] >= 1.5 * ppo_cfg.target_kl
+            ):
                 step_out["updates"] = updates
                 return step_out
 
@@ -318,7 +363,9 @@ def main(args):
             pretrained_v_ckpt, "checkpoints/ar_pretrained_value", max_to_keep=1
         )
         if pretrained_v_mgr.latest_checkpoint:
-            pretrained_v_ckpt.restore(pretrained_v_mgr.latest_checkpoint).expect_partial()
+            pretrained_v_ckpt.restore(
+                pretrained_v_mgr.latest_checkpoint
+            ).expect_partial()
             print(
                 f"Bootstrapped value from pretrained checkpoint "
                 f"(return_scale={float(loaded_return_scale):.3f})",
@@ -375,7 +422,9 @@ def main(args):
     print("Initialized runner", flush=True)
 
     if os.path.exists(expert_dataset_path):
-        expert_dataset = Pretrainer.load_expert_dataset(expert_dataset_path, ppo_cfg.mini_batch_size)
+        expert_dataset = Pretrainer.load_expert_dataset(
+            expert_dataset_path, ppo_cfg.mini_batch_size
+        )
         expert_iter = iter(expert_dataset)
         print(f"Loaded expert dataset from {expert_dataset_path}", flush=True)
     else:
@@ -427,13 +476,13 @@ def main(args):
         ) = runner.collect_trajectory(render=False)
 
         all_rewards = tf.ensure_shape(
-            all_total_reward[..., None], (ppo_cfg.num_collection_steps, ppo_cfg.num_envs, 1)
+            all_total_reward[..., None],
+            (ppo_cfg.num_collection_steps, ppo_cfg.num_envs, 1),
         )
 
         # Scale rewards by running return std
         scaled_rewards = tf.clip_by_value(
-            all_rewards / (tf.sqrt(return_var) + 1e-8),
-            -10.0, 10.0
+            all_rewards / (tf.sqrt(return_var) + 1e-8), -10.0, 10.0
         )
 
         print(
@@ -443,13 +492,22 @@ def main(args):
         last_time = time.time()
         # Compute advantages and returns
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, scaled_rewards, all_dones, ppo_cfg.gamma, ppo_cfg.lam,
-            num_collection_steps=ppo_cfg.num_collection_steps, num_envs=ppo_cfg.num_envs,
+            all_values,
+            all_last_values,
+            scaled_rewards,
+            all_dones,
+            ppo_cfg.gamma,
+            ppo_cfg.lam,
+            num_collection_steps=ppo_cfg.num_collection_steps,
+            num_envs=ppo_cfg.num_envs,
         )
 
         raw_returns = compute_raw_returns(
-            all_rewards, all_dones, ppo_cfg.gamma,
-            num_collection_steps=ppo_cfg.num_collection_steps, num_envs=ppo_cfg.num_envs,
+            all_rewards,
+            all_dones,
+            ppo_cfg.gamma,
+            num_collection_steps=ppo_cfg.num_collection_steps,
+            num_envs=ppo_cfg.num_envs,
         )
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
@@ -503,7 +561,13 @@ def main(args):
 
         # Train on collected data
         train_out = train_on_dataset(
-            p_model, v_model, online_dataset, expert_iter, num_epochs, entropy_coef, expert_coef
+            p_model,
+            v_model,
+            online_dataset,
+            expert_iter,
+            num_epochs,
+            entropy_coef,
+            expert_coef,
         )
 
         # Save checkpoint
@@ -550,40 +614,44 @@ def main(args):
         avg_combo = tf.reduce_mean(combo_series)
         surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
 
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
+        c_scores = tf.reshape(
+            tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1)
+        )
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
 
         if gen % 10 == 0:
-            log_step(SingleAgentPPOLog(
-                ppo_loss=ppo_loss,
-                entropy=entropy,
-                approx_kl=approx_kl,
-                clipped_frac=clipped_frac,
-                value_loss=value_loss,
-                explained_var=explained_var,
-                return_var=return_var,
-                avg_probs=avg_probs,
-                avg_reward=avg_reward,
-                avg_attacks=avg_attacks,
-                avg_clears=avg_clears,
-                avg_attack_reward=avg_attack_reward,
-                avg_total_reward=avg_total_reward,
-                avg_garbage_pushed=avg_garbage_pushed,
-                avg_deaths=avg_deaths,
-                avg_pieces=avg_pieces,
-                avg_b2b=avg_b2b,
-                max_b2b=max_b2b,
-                avg_combo=avg_combo,
-                surge_rate=surge_rate,
-                expert_loss=expert_loss,
-                expert_accuracy=expert_accuracy,
-                expert_coef=ppo_cfg.expert_coef,
-                updates=updates,
-                board=board[..., 0],
-                scores=norm_c_scores,
-            ))
+            log_step(
+                SingleAgentPPOLog(
+                    ppo_loss=ppo_loss,
+                    entropy=entropy,
+                    approx_kl=approx_kl,
+                    clipped_frac=clipped_frac,
+                    value_loss=value_loss,
+                    explained_var=explained_var,
+                    return_var=return_var,
+                    avg_probs=avg_probs,
+                    avg_reward=avg_reward,
+                    avg_attacks=avg_attacks,
+                    avg_clears=avg_clears,
+                    avg_attack_reward=avg_attack_reward,
+                    avg_total_reward=avg_total_reward,
+                    avg_garbage_pushed=avg_garbage_pushed,
+                    avg_deaths=avg_deaths,
+                    avg_pieces=avg_pieces,
+                    avg_b2b=avg_b2b,
+                    max_b2b=max_b2b,
+                    avg_combo=avg_combo,
+                    surge_rate=surge_rate,
+                    expert_loss=expert_loss,
+                    expert_accuracy=expert_accuracy,
+                    expert_coef=ppo_cfg.expert_coef,
+                    updates=updates,
+                    board=board[..., 0],
+                    scores=norm_c_scores,
+                )
+            )
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | Updates: {updates}/{num_updates}",

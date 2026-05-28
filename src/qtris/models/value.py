@@ -6,6 +6,7 @@ doesn't need to cross-import from `ar/model.py`. The previous home was
 in `qtris/models/ar/model.py` so existing trainer/pretrainer imports
 keep working.
 """
+
 import tensorflow as tf
 import keras
 from keras import layers
@@ -61,8 +62,12 @@ class ValueModel(QtrisModelBase):
         ]
 
         self._bcg_proj_b2b = layers.Dense(depth, activation="relu", name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation="relu", name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation="relu", name="bcg_proj_garbage")
+        self._bcg_proj_combo = layers.Dense(
+            depth, activation="relu", name="bcg_proj_combo"
+        )
+        self._bcg_proj_garbage = layers.Dense(
+            depth, activation="relu", name="bcg_proj_garbage"
+        )
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.trunk_bcg = keras.Sequential(

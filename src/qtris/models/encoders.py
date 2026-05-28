@@ -5,6 +5,7 @@ These were duplicated 4x across PolicyModel / ValueModel / AsymmetricValueModel
 board is 24x10x1 and the BCG state is a 3-tuple of scalars), so they live under
 `qtris.models.` rather than `qtris.nn.`.
 """
+
 import tensorflow as tf
 import keras
 from keras import layers

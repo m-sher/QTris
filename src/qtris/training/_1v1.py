@@ -141,9 +141,7 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
             return_scores=True,
         )
 
-        logits = tf.ensure_shape(
-            logits, (mini_batch_size, max_len - 1, key_dim)
-        )
+        logits = tf.ensure_shape(logits, (mini_batch_size, max_len - 1, key_dim))
 
         temp_adjusted_logits = logits / temperature
 
@@ -200,7 +198,9 @@ def train_step_ar(p_model, v_model, online_batch, entropy_coef):
         values = tf.ensure_shape(values, (mini_batch_size, 1))
 
         # Value loss
-        value_loss = clipped_value_loss(values, old_values_batch, returns_batch, value_clip)
+        value_loss = clipped_value_loss(
+            values, old_values_batch, returns_batch, value_clip
+        )
 
     # Apply value gradients
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
@@ -319,7 +319,9 @@ def train_step_flat(p_model, v_model, online_batch, entropy_coef):
             training=True,
         )
 
-        value_loss = clipped_value_loss(values, old_values_batch, returns_batch, value_clip)
+        value_loss = clipped_value_loss(
+            values, old_values_batch, returns_batch, value_clip
+        )
 
     v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
     v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
@@ -393,8 +395,10 @@ def load_pool_opponent(opp_model):
 
 def main(args):
     global USE_FLAT, pool_dir, _train_step_fn
-    USE_FLAT = (args.family == "flat")
-    pool_dir = "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
+    USE_FLAT = args.family == "flat"
+    pool_dir = (
+        "checkpoints/opponent_pool_flat" if USE_FLAT else "checkpoints/opponent_pool"
+    )
     _train_step_fn = train_step_flat if USE_FLAT else train_step_ar
     config.flat = USE_FLAT
 
@@ -493,7 +497,10 @@ def main(args):
         )
         if solo_p_manager.latest_checkpoint:
             solo_p_checkpoint.restore(solo_p_manager.latest_checkpoint).expect_partial()
-            print(f"Bootstrapped policy from solo checkpoint ({solo_bootstrap_dir})", flush=True)
+            print(
+                f"Bootstrapped policy from solo checkpoint ({solo_bootstrap_dir})",
+                flush=True,
+            )
         else:
             print("No policy checkpoints found, starting from scratch", flush=True)
 
@@ -556,7 +563,10 @@ def main(args):
     # Initialize opponent: copy current policy weights (or load from pool)
     if not load_pool_opponent(opp_model):
         opp_model.set_weights(p_model.get_weights())
-        print("No pool checkpoints found, opponent initialized from current policy", flush=True)
+        print(
+            "No pool checkpoints found, opponent initialized from current policy",
+            flush=True,
+        )
 
     # -----------------------------------------------------------------------
     # Initialize runner
@@ -679,8 +689,7 @@ def main(args):
 
         # Scale rewards by running return std
         scaled_rewards = tf.clip_by_value(
-            all_rewards / (tf.sqrt(return_var) + 1e-8),
-            -10.0, 10.0
+            all_rewards / (tf.sqrt(return_var) + 1e-8), -10.0, 10.0
         )
 
         print(
@@ -691,8 +700,14 @@ def main(args):
 
         # Compute advantages and returns
         all_advantages, all_returns = compute_gae_and_returns(
-            all_values, all_last_values, scaled_rewards, all_dones, gamma, lam,
-            num_collection_steps=num_collection_steps, num_envs=num_envs,
+            all_values,
+            all_last_values,
+            scaled_rewards,
+            all_dones,
+            gamma,
+            lam,
+            num_collection_steps=num_collection_steps,
+            num_envs=num_envs,
         )
 
         raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
@@ -848,7 +863,9 @@ def main(args):
         else:
             avg_probs = tf.reduce_mean(tf.exp(tf.reduce_sum(all_log_probs, axis=-1)))
 
-        c_scores = tf.reshape(tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1))
+        c_scores = tf.reshape(
+            tf.reduce_mean(scores, axis=[0, 2, 3])[0, :60], (12, 5, 1)
+        )
         norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
             tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
         )
@@ -869,50 +886,55 @@ def main(args):
             wr_ema = (1 - wr_ema_alpha) * wr_ema + wr_ema_alpha * float(decisive_wr)
         if gen % pool_save_interval == 0 and total_decisive >= 50 and wr_ema >= 0.58:
             save_pool_checkpoint(p_model, gen)
-            print(f"Saved to opponent pool at gen {gen} (wr_ema: {wr_ema:.3f}, decisive_wr: {float(decisive_wr):.3f})", flush=True)
+            print(
+                f"Saved to opponent pool at gen {gen} (wr_ema: {wr_ema:.3f}, decisive_wr: {float(decisive_wr):.3f})",
+                flush=True,
+            )
             if not load_pool_opponent(opp_model):
                 opp_model.set_weights(p_model.get_weights())
 
-        log_step(OneVsOnePPOLog(
-            ppo_loss=ppo_loss,
-            entropy=entropy,
-            approx_kl=approx_kl,
-            clipped_frac=clipped_frac,
-            value_loss=value_loss,
-            explained_var=explained_var,
-            return_var=return_var,
-            avg_probs=avg_probs,
-            # Reward channels
-            avg_total_reward=avg_total_reward,
-            avg_attack_reward=avg_attack_reward,
-            avg_attacks=avg_attacks,
-            avg_net_attacks=avg_net_attacks,
-            avg_clears=avg_clears,
-            avg_garbage_pushed=avg_garbage_pushed,
-            # Derived gameplay
-            APP_reward=APP_reward,
-            APP_gross=APP_gross,
-            APP_net=APP_net,
-            reward_per_clear=reward_per_clear,
-            att_per_clear=att_per_clear,
-            cancel_rate=cancel_rate,
-            avg_b2b=avg_b2b,
-            max_b2b=max_b2b,
-            avg_combo=avg_combo,
-            surge_rate=surge_rate,
-            # Episode structure
-            avg_episodes=avg_episodes,
-            avg_pieces=avg_pieces,
-            # Outcome counts
-            total_wins=total_wins,
-            total_losses=total_losses,
-            total_nondec=total_nondec,
-            win_rate=win_rate,
-            decisive_wr=decisive_wr,
-            wr_ema=wr_ema,
-            board=board[..., 0],
-            scores=norm_c_scores,
-        ))
+        log_step(
+            OneVsOnePPOLog(
+                ppo_loss=ppo_loss,
+                entropy=entropy,
+                approx_kl=approx_kl,
+                clipped_frac=clipped_frac,
+                value_loss=value_loss,
+                explained_var=explained_var,
+                return_var=return_var,
+                avg_probs=avg_probs,
+                # Reward channels
+                avg_total_reward=avg_total_reward,
+                avg_attack_reward=avg_attack_reward,
+                avg_attacks=avg_attacks,
+                avg_net_attacks=avg_net_attacks,
+                avg_clears=avg_clears,
+                avg_garbage_pushed=avg_garbage_pushed,
+                # Derived gameplay
+                APP_reward=APP_reward,
+                APP_gross=APP_gross,
+                APP_net=APP_net,
+                reward_per_clear=reward_per_clear,
+                att_per_clear=att_per_clear,
+                cancel_rate=cancel_rate,
+                avg_b2b=avg_b2b,
+                max_b2b=max_b2b,
+                avg_combo=avg_combo,
+                surge_rate=surge_rate,
+                # Episode structure
+                avg_episodes=avg_episodes,
+                avg_pieces=avg_pieces,
+                # Outcome counts
+                total_wins=total_wins,
+                total_losses=total_losses,
+                total_nondec=total_nondec,
+                win_rate=win_rate,
+                decisive_wr=decisive_wr,
+                wr_ema=wr_ema,
+                board=board[..., 0],
+                scores=norm_c_scores,
+            )
+        )
 
         print(
             f"{time.time() - last_time:2.2f} | Gen: {gen} | Reward: {avg_reward} | "

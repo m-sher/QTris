@@ -1,4 +1,5 @@
 """Shared utility functions for Tetris demos."""
+
 import numpy as np
 import tensorflow as tf
 
@@ -9,9 +10,14 @@ def load_checkpoint(model, checkpoint_path, max_to_keep=3):
     Returns True if a checkpoint was found and restored, False otherwise.
     """
     ckpt = tf.train.Checkpoint(model=model)
-    mgr = tf.train.CheckpointManager(ckpt, str(checkpoint_path), max_to_keep=max_to_keep)
+    mgr = tf.train.CheckpointManager(
+        ckpt, str(checkpoint_path), max_to_keep=max_to_keep
+    )
     if mgr.latest_checkpoint is None:
-        print(f"No checkpoint found in {checkpoint_path}, using random weights", flush=True)
+        print(
+            f"No checkpoint found in {checkpoint_path}, using random weights",
+            flush=True,
+        )
         return False
     ckpt.restore(mgr.latest_checkpoint).expect_partial()
     print(f"Loaded checkpoint from {checkpoint_path}", flush=True)
@@ -23,7 +29,9 @@ def load_piece_display(path="PieceDisplay.npy"):
     return np.load(path)
 
 
-def save_frames_as_video(frames, output_path="Demo.mp4", fps=30, playback_fps=5, prompt=True):
+def save_frames_as_video(
+    frames, output_path="Demo.mp4", fps=30, playback_fps=5, prompt=True
+):
     """Write recorded frames to an mp4 video via imageio.
 
     If prompt=True, asks the user before saving. Each frame is repeated
@@ -33,6 +41,7 @@ def save_frames_as_video(frames, output_path="Demo.mp4", fps=30, playback_fps=5,
         if input("Save? ").lower() != "y":
             return False
     import imageio
+
     writer = imageio.get_writer(output_path, fps=fps)
     repeats = max(1, fps // playback_fps)
     for frame in frames:

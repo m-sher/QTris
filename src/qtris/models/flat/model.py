@@ -65,8 +65,12 @@ class FlatPolicyModel(QtrisModelBase):
         ]
 
         self._bcg_proj_b2b = layers.Dense(depth, activation=None, name="bcg_proj_b2b")
-        self._bcg_proj_combo = layers.Dense(depth, activation=None, name="bcg_proj_combo")
-        self._bcg_proj_garbage = layers.Dense(depth, activation=None, name="bcg_proj_garbage")
+        self._bcg_proj_combo = layers.Dense(
+            depth, activation=None, name="bcg_proj_combo"
+        )
+        self._bcg_proj_garbage = layers.Dense(
+            depth, activation=None, name="bcg_proj_garbage"
+        )
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
         self.trunk = keras.Sequential(

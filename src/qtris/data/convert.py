@@ -179,10 +179,7 @@ def main():
 
     print(f"Loading dataset from {in_path}...", flush=True)
     dataset = tf.data.Dataset.load(in_path)
-    data = {
-        k: v.numpy()
-        for k, v in next(iter(dataset.batch(10_000_000))).items()
-    }
+    data = {k: v.numpy() for k, v in next(iter(dataset.batch(10_000_000))).items()}
     sample_key_in = "action_indices" if args.direction == "flat_to_ar" else "actions"
     if sample_key_in not in data:
         raise ValueError(

@@ -65,9 +65,7 @@ class FlatRunner:
         )
         self.env = TFPyEnvironment(ppy_env)
 
-    def collect_trajectory(
-        self, render: bool = False
-    ) -> Tuple[tf.Tensor, ...]:
+    def collect_trajectory(self, render: bool = False) -> Tuple[tf.Tensor, ...]:
         all_boards = tf.TensorArray(
             dtype=tf.float32,
             size=self._num_steps,

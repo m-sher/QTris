@@ -71,14 +71,24 @@ def collect(
             returns_arr[t] = last
 
         if is_death:
-            kept_count = len(buf) - death_trim_count if len(buf) > death_trim_count else 0
+            kept_count = (
+                len(buf) - death_trim_count if len(buf) > death_trim_count else 0
+            )
         else:
             kept_count = len(buf)
 
         for t in range(kept_count):
             board, pieces, bcg, action_idx, valid_mask, sample_weight, _r, _d = buf[t]
             transitions.append(
-                (board, pieces, bcg, action_idx, valid_mask, sample_weight, returns_arr[t])
+                (
+                    board,
+                    pieces,
+                    bcg,
+                    action_idx,
+                    valid_mask,
+                    sample_weight,
+                    returns_arr[t],
+                )
             )
 
     for step in range(num_steps):
@@ -92,9 +102,7 @@ def collect(
             board=env._board,
             active_piece=env._active_piece.piece_type.value,
             hold_piece=env._hold_piece.value,
-            queue=np.array(
-                [p.value for p in env._queue], dtype=np.int32
-            ),
+            queue=np.array([p.value for p in env._queue], dtype=np.int32),
             b2b=int(env._scorer._b2b),
             combo=int(env._scorer._combo),
             total_garbage=int(env._get_total_garbage()),
@@ -164,7 +172,9 @@ def collect(
 
 
 def main(args):
-    dataset_path = str(args.output) if args.output else "datasets/tetris_expert_dataset_flat"
+    dataset_path = (
+        str(args.output) if args.output else "datasets/tetris_expert_dataset_flat"
+    )
     num_steps = args.steps
     seed = getattr(args, "seed", 0)
 
@@ -281,5 +291,3 @@ def main(args):
     )
     dataset.save(dataset_path)
     print(f"Saved {len(action_indices)} transitions to {dataset_path}", flush=True)
-
-
