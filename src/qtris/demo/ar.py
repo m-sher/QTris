@@ -15,7 +15,7 @@ from qtris.demo.rendering import (
     draw_garbage_bar,
     colorize_piece_sidebar,
 )
-from qtris.demo.utils import load_piece_display, save_frames_as_video
+from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 import time
 
 pathfinding = True
@@ -49,11 +49,7 @@ def main(args):
         output_dim=key_dim,
     )
 
-    p_checkpoint = tf.train.Checkpoint(model=p_model)
-    p_checkpoint_manager = tf.train.CheckpointManager(
-        p_checkpoint, str(args.checkpoint), max_to_keep=3
-    )
-    p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
+    load_checkpoint(p_model, args.checkpoint)
 
     p_model(
         (

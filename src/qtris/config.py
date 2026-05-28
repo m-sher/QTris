@@ -3,8 +3,6 @@
 Each model carries defaults matching the AR trainer (the "primary" variant).
 Flat / 1v1 overrides via construction:
     PPOConfig(num_collection_steps=256, target_kl=0.02, expert_coef=0.1)
-
-Pydantic v1 (pinned by tf-agents; see notes.md "Dependency modernization").
 """
 
 from dataclasses import dataclass

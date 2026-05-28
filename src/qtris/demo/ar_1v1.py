@@ -11,7 +11,7 @@ import time
 
 from qtris.demo.constants import BCG_LABELS, PIECE_COLORS
 from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar
-from qtris.demo.utils import save_frames_as_video
+from qtris.demo.utils import load_checkpoint, save_frames_as_video
 
 # Model params
 piece_dim = 8
@@ -46,15 +46,7 @@ def load_policy(checkpoint_dir):
             tf.keras.Input(shape=(max_len,), dtype=tf.int64),
         )
     )
-    checkpoint = tf.train.Checkpoint(model=model)
-    manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=1)
-    if manager.latest_checkpoint:
-        checkpoint.restore(manager.latest_checkpoint).expect_partial()
-        print(f"Loaded checkpoint from {checkpoint_dir}", flush=True)
-    else:
-        print(
-            f"No checkpoint found in {checkpoint_dir}, using random weights", flush=True
-        )
+    load_checkpoint(model, checkpoint_dir, max_to_keep=1)
     return model
 
 
@@ -128,7 +120,7 @@ def run_eval(p1_model, p2_model, args):
         elif win_reward > 0:
             p1_wins += 1
         elif t + 1 >= num_steps:
-            # Hit max steps per game — timeout draw
+            # Hit max steps per game - timeout draw
             draws += 1
         else:
             # Episode ended by death and P1 didn't win

@@ -1,10 +1,7 @@
 """Value head model. Shared between AR and Flat training.
 
 Lives at `qtris.models.value` (not under `ar/`) so that `flat/model.py`
-doesn't need to cross-import from `ar/model.py`. The previous home was
-`qtris.models.ar.model.ValueModel` — that path is preserved via re-export
-in `qtris/models/ar/model.py` so existing trainer/pretrainer imports
-keep working.
+doesn't need to cross-import from `ar/model.py`.
 """
 
 import tensorflow as tf

@@ -12,9 +12,6 @@ Hierarchy:
     PPOLogBase              - 20 shared per-step metrics (incl. board/scores images)
       SingleAgentPPOLog       - adds single-agent reward channels + expert co-train metrics
       OneVsOnePPOLog          - adds win/loss outcomes + derived APP metrics
-
-Pydantic version: v1 (pinned because tf-agents 0.19.0 requires typing-extensions==4.5.0,
-which is incompatible with pydantic v2). Translate to v2 syntax if tf-agents is bumped.
 """
 
 from __future__ import annotations
@@ -107,7 +104,7 @@ class PPOLogBase(BaseModel):
         """Dict shaped for `wandb.log()`, with image fields wrapped."""
         import wandb
 
-        payload = self.dict()  # pydantic v1 API; v2 would be self.model_dump()
+        payload = self.dict()
         for key in self._image_fields:
             arr = payload.get(key)
             if arr is not None:

@@ -1,121 +1,16 @@
 from TetrisEnv.Moves import Keys
 from qtris.models.ar.model import PolicyModel
 from qtris.models.value import ValueModel
-from qtris.pretraining.base import (
-    RETURN_CLIP_HIGH,
-    RETURN_CLIP_LOW,
-    correct_and_clip,
-    surge_correction,
-)
-import os
+from qtris.pretraining.base import PretrainerBase, correct_and_clip
 import tensorflow as tf
 from tensorflow import keras
 
 
-class Pretrainer:
+class Pretrainer(PretrainerBase):
     def __init__(
         self, dataset_path="datasets/tetris_expert_dataset_b2b", policy_only=False
     ):
-        self._dataset_path = dataset_path
-        self._policy_only = policy_only
-        self._scc = keras.losses.SparseCategoricalCrossentropy(
-            from_logits=True, reduction="none"
-        )
-        self._return_scale = tf.Variable(
-            1.0, trainable=False, dtype=tf.float32, name="return_scale"
-        )
-
-    def _load_dataset(self, batch_size):
-        if not os.path.exists(self._dataset_path):
-            raise FileNotFoundError(
-                f"No dataset at {self._dataset_path}. Run DataGen.py to collect one."
-            )
-
-        dataset = tf.data.Dataset.load(self._dataset_path)
-        spec = dataset.element_spec
-        if "returns" not in spec:
-            raise ValueError(
-                f"Dataset at {self._dataset_path} lacks `returns` field. "
-                "Regenerate with the current DataGen.py (value pretraining requires returns)."
-            )
-        if "sample_weights" not in spec:
-            raise ValueError(
-                f"Dataset at {self._dataset_path} lacks `sample_weights` field. "
-                "Regenerate with the current DataGen.py."
-            )
-
-        if not self._policy_only:
-            all_returns = tf.concat(
-                [batch["returns"] for batch in dataset.batch(100_000)],
-                axis=0,
-            )
-            all_b2b = tf.concat(
-                [
-                    batch["b2b_combo_garbage"][..., 0]
-                    for batch in dataset.batch(100_000)
-                ],
-                axis=0,
-            )
-            corrected = all_returns + surge_correction(all_b2b)
-            clipped = tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
-
-            n_total = tf.cast(tf.size(all_returns), tf.float32)
-            n_clipped_low = tf.reduce_sum(
-                tf.cast(corrected < RETURN_CLIP_LOW, tf.float32)
-            )
-            n_clipped_high = tf.reduce_sum(
-                tf.cast(corrected > RETURN_CLIP_HIGH, tf.float32)
-            )
-            frac_clipped = (n_clipped_low + n_clipped_high) / n_total
-            max_b2b = tf.reduce_max(all_b2b)
-
-            clip_mean = tf.reduce_mean(clipped)
-            clip_std = tf.math.reduce_std(clipped)
-            scale = tf.maximum(clip_std, 1.0)
-            self._return_scale.assign(scale)
-            print(
-                f"Returns | n={int(n_total)} | max_b2b in dataset={float(max_b2b):.0f} "
-                f"| clipped to [{RETURN_CLIP_LOW:.0f}, {RETURN_CLIP_HIGH:.0f}]: "
-                f"{float(n_clipped_low):.0f} low + {float(n_clipped_high):.0f} high "
-                f"({100.0 * float(frac_clipped):.2f}%) "
-                f"| post: mean={float(clip_mean):.3f} std={float(clip_std):.3f} "
-                f"| value-head scale={float(scale):.3f}",
-                flush=True,
-            )
-
-        cached = dataset.cache()
-        for _ in cached:
-            pass
-
-        return (
-            cached.shuffle(buffer_size=500_000)
-            .batch(
-                batch_size,
-                drop_remainder=True,
-                num_parallel_calls=tf.data.AUTOTUNE,
-                deterministic=False,
-            )
-            .prefetch(tf.data.AUTOTUNE)
-        )
-
-    @staticmethod
-    def load_expert_dataset(path, batch_size):
-        dataset = tf.data.Dataset.load(path)
-        if "sample_weights" not in dataset.element_spec:
-
-            def _add_default_weight(x):
-                return {**x, "sample_weights": tf.constant(1.0, dtype=tf.float32)}
-
-            dataset = dataset.map(_add_default_weight)
-        cached = dataset.cache()
-        for _ in cached:
-            pass
-        return (
-            cached.repeat()
-            .shuffle(buffer_size=100_000)
-            .batch(batch_size, drop_remainder=True)
-            .prefetch(tf.data.AUTOTUNE)
-        )
+        super().__init__(dataset_path, policy_only)
 
     @tf.function
     def _train_step(self, p_model, v_model, batch):
@@ -158,7 +53,7 @@ class Pretrainer:
         # Top-3 on decision tokens. Tracks how well the right answer is
         # ranked, not just whether it's #1. Useful diagnostic for whether
         # the model "knows about" the correct token even when not
-        # selecting it greedily — especially helpful early in training
+        # selecting it greedily - especially helpful early in training
         # when Acc is low but the right token is consistently in the top
         # few logits.
         last_dim = tf.shape(masked_logits)[-1]

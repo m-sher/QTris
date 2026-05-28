@@ -205,7 +205,7 @@ def main(args):
             existing_count = len(existing["action_indices"])
             if "returns" not in existing:
                 print(
-                    "Existing dataset has no `returns` field — starting fresh "
+                    "Existing dataset has no `returns` field - starting fresh "
                     "(value pretraining requires returns).",
                     flush=True,
                 )

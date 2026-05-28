@@ -1,21 +1,21 @@
 """DAgger-style data collection for the Tetris policy.
 
-Supports both ``ar`` (autoregressive) and ``flat`` policy variants via
-``--mode``. In either case the loop is:
+Supports both ``ar`` (autoregressive) and ``flat`` policy variants. In either
+case the loop is:
 
   * Roll the trained policy forward in env.
   * At each visited state, query beam search for the expert label.
-  * Step the env with the POLICY's choice (the DAgger invariant — this
+  * Step the env with the POLICY's choice (the DAgger invariant - this
     is what shifts the visited-state distribution toward what the policy
     actually sees in deployment).
   * Record (state, beam_label) in the dataset.
 
-Output schema mirrors DataGen / DataGenFlat exactly so transitions
-accumulate seamlessly across BC + DAgger rounds in a single dataset.
+Output schema mirrors gen_ar / gen_flat exactly so transitions accumulate
+seamlessly across BC + DAgger rounds in a single dataset.
 
-Distinction from DataGen / DataGenFlat:
-- DataGen* has BEAM play; (state, beam_action) are co-trajectory.
-- DAggerGen has POLICY play; we ASK beam what it would do at each
+Distinction from gen_ar / gen_flat:
+- gen_ar/gen_flat have BEAM play; (state, beam_action) are co-trajectory.
+- This module has POLICY play; we ASK beam what it would do at each
   visited state but step the env with the policy's choice. This shifts
   the state distribution toward what the policy actually visits in
   deployment, which is the canonical fix for compounding-error in BC
@@ -41,7 +41,7 @@ HARD_DROP_ID = Keys.HARD_DROP
 
 
 def _make_flat_mask(valid_sequences):
-    """1D placement-validity mask (matches DataGenFlat.py)."""
+    """1D placement-validity mask (matches gen_flat)."""
     return np.any(valid_sequences == HARD_DROP_ID, axis=-1)
 
 
@@ -119,7 +119,7 @@ def collect_dagger(
         # death_kind is one of:
         #   "beam_fail"    – beam returned action_idx < 0 from a buffered
         #                    state; the tail is genuinely unrecoverable, so
-        #                    trim like DataGen.
+        #                    trim like gen_ar.
         #   "policy_fail"  – env signalled terminal while every recorded
         #                    state had a beam-valid label; those tail
         #                    transitions are exactly the high-signal
@@ -156,7 +156,7 @@ def collect_dagger(
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
         valid_sequences = obs["sequences"].astype(np.int64)
 
-        # Policy's greedy choice in this state — under valid-sequence
+        # Policy's greedy choice in this state - under valid-sequence
         # masking the model never emits a sequence the env can't replay.
         # PolicyModel and FlatPolicyModel share the same predict()
         # signature: both return (selected_sequence, ...) as the first
@@ -173,7 +173,7 @@ def collect_dagger(
         )
         policy_seq = policy_seq.numpy()[0].astype(np.int64)
 
-        # Beam's expert choice for this state — the supervised label.
+        # Beam's expert choice for this state - the supervised label.
         action_idx, beam_seq = searcher.search(
             board=env._board,
             active_piece=env._active_piece.piece_type.value,
@@ -205,9 +205,9 @@ def collect_dagger(
         # plus the per-position next-token mask; for flat we collapse
         # to the scalar placement index plus the 1D HARD_DROP-presence
         # mask. If beam's sequence isn't present in valid_sequences
-        # (rare; same case as DataGen's `unmatched`), we can't build a
+        # (rare; same case as gen_ar's `unmatched`), we can't build a
         # clean label, so skip recording. Still step the env with the
-        # policy's choice — that's the DAgger invariant.
+        # policy's choice - that's the DAgger invariant.
         if mode == "ar":
             beam_in_valid = np.any(
                 np.all(valid_sequences == beam_seq[None, :], axis=-1)
@@ -408,7 +408,7 @@ def main(cli_args):
             existing_count = len(existing[label_key])
             if "returns" not in existing:
                 print(
-                    "Existing dataset has no `returns` field — starting "
+                    "Existing dataset has no `returns` field - starting "
                     "fresh (value pretraining requires returns).",
                     flush=True,
                 )

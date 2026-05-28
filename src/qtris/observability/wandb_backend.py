@@ -2,8 +2,7 @@
 
 `init_run` converts a TrainConfig pydantic model to wandb.config; `log_step`
 serializes a PPOLog model (incl. wrapping numpy image fields as wandb.Image)
-and emits a single `wandb.log` call. Callers no longer construct dicts or
-import wandb directly for normal training metrics.
+and emits a single `wandb.log` call. Callers pass typed models, not dicts.
 """
 
 from __future__ import annotations
