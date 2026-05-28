@@ -28,7 +28,7 @@ HARD_DROP_ID = Keys.HARD_DROP
 
 
 def _build_ar_mask(sequence, valid_sequences, max_len, key_dim):
-    """Per-position valid-next-token masks (mirrors DataGen.py)."""
+    """Per-position valid-next-token masks (mirrors gen_ar)."""
     masks = np.zeros((max_len, key_dim), dtype=bool)
     for pos in range(1, max_len):
         prefix = sequence[:pos]
@@ -44,7 +44,7 @@ def _reconstruct_valid_sequences(env, board, pieces, queue_size):
     """Reset env to (board, pieces) and return obs['sequences'].
 
     Only the fields that affect sequence enumeration (board, active piece,
-    hold piece, queue) are restored — b2b/combo/garbage do not feed into the
+    hold piece, queue) are restored - b2b/combo/garbage do not feed into the
     pathfinder.
     """
     env._board = board.copy()

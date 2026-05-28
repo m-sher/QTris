@@ -12,7 +12,7 @@ import time
 
 from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
-from qtris.demo.utils import load_piece_display, save_frames_as_video
+from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 
 # Model params
 num_envs = 1
@@ -48,13 +48,7 @@ def main(args):
         output_dim=key_dim,
     )
 
-    p_checkpoint_left = tf.train.Checkpoint(model=p_model_left)
-    p_checkpoint_manager_left = tf.train.CheckpointManager(
-        p_checkpoint_left, f"checkpoints/{left_path}", max_to_keep=3
-    )
-    p_checkpoint_left.restore(
-        p_checkpoint_manager_left.latest_checkpoint
-    ).expect_partial()
+    load_checkpoint(p_model_left, f"checkpoints/{left_path}")
 
     p_model_left.build(
         input_shape=[
@@ -94,13 +88,7 @@ def main(args):
         output_dim=key_dim,
     )
 
-    p_checkpoint_right = tf.train.Checkpoint(model=p_model_right)
-    p_checkpoint_manager_right = tf.train.CheckpointManager(
-        p_checkpoint_right, f"checkpoints/{right_path}", max_to_keep=3
-    )
-    p_checkpoint_right.restore(
-        p_checkpoint_manager_right.latest_checkpoint
-    ).expect_partial()
+    load_checkpoint(p_model_right, f"checkpoints/{right_path}")
 
     p_model_right.build(
         input_shape=[

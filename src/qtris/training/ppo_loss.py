@@ -1,7 +1,7 @@
 """Shared clipped-PPO math: surrogate loss term + clipped value loss.
 
 Used by all 3 trainers (`training/{ar,flat,_1v1}.py`). The functions are
-element-wise / reduced-scalar primitives — callers handle masking and
+element-wise / reduced-scalar primitives - callers handle masking and
 sequence-vs-scalar reduction themselves (the `_1v1.train_step_ar` variant
 applies a per-token decision_mask before reducing).
 """

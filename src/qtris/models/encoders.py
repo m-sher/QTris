@@ -1,9 +1,9 @@
 """Tetris-specific shared encoders: board CNN + BCG tokenizer.
 
-These were duplicated 4x across PolicyModel / ValueModel / AsymmetricValueModel
-/ FlatPolicyModel before Phase 2. They are NOT generic NN code (they know the
-board is 24x10x1 and the BCG state is a 3-tuple of scalars), so they live under
-`qtris.models.` rather than `qtris.nn.`.
+Shared by PolicyModel / ValueModel / AsymmetricValueModel / FlatPolicyModel.
+They are NOT generic NN code (they know the board is 24x10x1 and the BCG state
+is a 3-tuple of scalars), so they live under `qtris.models.` rather than
+`qtris.nn.`.
 """
 
 import tensorflow as tf
@@ -14,10 +14,10 @@ from keras import layers
 def make_patches(depth: int) -> keras.Sequential:
     """Board (24,10,1) -> sequence of `depth`-dim patches.
 
-    Identical across all AR + Flat models. The Sequential's inner layers
-    use auto-generated names; their variable scopes match the pre-Phase-2
-    inline definitions as long as the global Keras name counter is in the
-    same state when this is called from `__init__`.
+    Identical across all AR + Flat models. The Sequential's inner layers use
+    auto-generated names; the global Keras name counter must be in the same
+    state when this is called from each model's `__init__` so the variable
+    scopes (and thus checkpoint keys) stay consistent.
     """
     return keras.Sequential(
         [

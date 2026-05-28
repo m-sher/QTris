@@ -840,7 +840,7 @@ def main(args):
             num_collection_steps / (tf.reduce_sum(all_dones, axis=0) + 1)
         )
 
-        # APP (attacks per piece) — headline objective. Every env step is a
+        # APP (attacks per piece) - headline objective. Every env step is a
         # piece placement, so num_collection_steps is the piece count per env.
         APP_reward = avg_attack_reward / tf.cast(num_collection_steps, tf.float32)
         APP_gross = avg_attacks / tf.cast(num_collection_steps, tf.float32)
@@ -877,7 +877,7 @@ def main(args):
         total_decisive = total_wins + total_losses
         # Legacy definition (ties/timeouts count as not-wins)
         win_rate = tf.math.divide_no_nan(total_wins, total_episodes)
-        # Decisive win rate (excludes ties and timeouts) — used for pool gate
+        # Decisive win rate (excludes ties and timeouts) - used for pool gate
         decisive_wr = tf.math.divide_no_nan(total_wins, total_decisive)
 
         # Update EMA decisive win rate and save to pool when threshold met
