@@ -6,4 +6,5 @@ datasets/
 **/**checkpoint**
 build/
 *.egg-info/
+*.so
 tetrio/
