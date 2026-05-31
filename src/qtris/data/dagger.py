@@ -14,9 +14,10 @@ stores):
     (Ross & Bagnell, 2010).
   * Record (state, dense search target).
 
-The output schema mirrors gen_ar exactly, so DAgger transitions accumulate into
-the same dataset across BC + DAgger rounds. ``family`` selects which policy
-checkpoint drives the rollout; the stored target is identical for both.
+``family`` selects which policy checkpoint drives the rollout and which target
+schema is stored: ar/flat use gen_ar's dense 320-action schema; placement uses
+gen_placement's 128-slot placement schema. Within a family the DAgger output
+matches the pretrain dataset, so transitions accumulate across BC + DAgger rounds.
 """
 
 import os
@@ -31,7 +32,14 @@ from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.models.ar.model import PolicyModel
 from qtris.models.flat.model import FlatPolicyModel
+from qtris.models.placement.model import PlacementPolicyModel
 from qtris.data.gen_ar import NUM_ACTIONS, dense_target
+from qtris.data.placement_features import (
+    CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+    build_placement_inference,
+    build_placement_target,
+)
 
 
 def collect_dagger(
@@ -163,6 +171,149 @@ def collect_dagger(
     return transitions, beam_dead, deaths, max_b2b, policy_disagrees
 
 
+def collect_dagger_placement(
+    p_model,
+    seed,
+    num_steps,
+    search_depth,
+    beam_width,
+    queue_size,
+    max_len,
+    max_height,
+    max_holes,
+    max_steps_env,
+    garbage_chance,
+    garbage_min,
+    garbage_max,
+    garbage_push_delay,
+    num_row_tiers,
+    headless=False,
+    log_every=1000,
+):
+    """Roll the placement policy forward; label each visited state with the search
+    placement target.
+
+    The search is run once per state and serves both roles: its candidates feed the
+    policy's ranking (which drives the env - the DAgger invariant) and its scores
+    form the label (gen_placement's 128-slot target)."""
+    env = PyTetrisEnv(
+        queue_size=queue_size,
+        max_holes=max_holes,
+        max_height=max_height,
+        max_steps=max_steps_env,
+        max_len=max_len,
+        pathfinding=True,
+        seed=seed,
+        idx=0,
+        garbage_chance=garbage_chance,
+        garbage_min=garbage_min,
+        garbage_max=garbage_max,
+        garbage_push_delay=garbage_push_delay,
+        auto_push_garbage=True,
+        auto_fill_queue=True,
+        num_row_tiers=num_row_tiers,
+    )
+
+    time_step = env.reset()
+    searcher = CB2BSearch()
+
+    transitions = []
+    beam_dead = 0
+    deaths = 0
+    max_b2b = 0
+    policy_disagrees = 0
+
+    pbar = tqdm(
+        range(num_steps), disable=headless, desc="dagger placement", unit="step"
+    )
+    for step in pbar:
+        obs = time_step.observation
+        board = obs["board"].astype(np.float32)
+        pieces = obs["pieces"].astype(np.int64)
+        bcg = obs["b2b_combo_garbage"].astype(np.float32)
+
+        active = env._active_piece.piece_type.value
+        hold = env._hold_piece.value
+        queue = np.array([p.value for p in env._queue], dtype=np.int32)
+        best_action, best_seq, cand_actions, cand_scores, cand_seqs, cand_rows = (
+            searcher.search_with_scores(
+                board=env._board,
+                active_piece=active,
+                hold_piece=hold,
+                queue=queue,
+                b2b=int(env._scorer._b2b),
+                combo=int(env._scorer._combo),
+                total_garbage=int(env._get_total_garbage()),
+                garbage_push_delay=env._garbage_push_delay,
+                search_depth=search_depth,
+                beam_width=beam_width,
+                max_len=max_len,
+            )
+        )
+
+        if best_action < 0 or len(cand_scores) == 0:
+            beam_dead += 1
+            deaths += 1
+            time_step = env.reset()
+            continue
+
+        row_norm = env._board.shape[0] - 1
+        # Label: the search's placement target for this state.
+        placements_t, scores_t = build_placement_target(
+            cand_actions, cand_scores, cand_rows, active, hold, int(queue[0]), row_norm
+        )
+        transitions.append((board, pieces, bcg, placements_t, scores_t))
+
+        # Policy ranks the same candidates; its choice drives the env.
+        infer_pl, infer_mask, infer_seqs = build_placement_inference(
+            cand_actions,
+            cand_scores,
+            cand_rows,
+            cand_seqs,
+            active,
+            hold,
+            int(queue[0]),
+            row_norm,
+            max_len,
+        )
+        policy_seq, _, _, _ = p_model.predict(
+            (
+                tf.constant(board[None], dtype=tf.float32),
+                tf.constant(pieces[None], dtype=tf.int64),
+                tf.constant(bcg[None], dtype=tf.float32),
+                tf.constant(infer_pl[None], dtype=tf.float32),
+                tf.constant(infer_mask[None], dtype=tf.bool),
+            ),
+            greedy=True,
+            cand_sequences=tf.constant(infer_seqs[None], dtype=tf.int64),
+            temperature=1.0,
+        )
+        policy_seq = policy_seq.numpy()[0].astype(np.int64)
+
+        time_step = env._step(policy_seq)
+        if not np.array_equal(policy_seq, best_seq):
+            policy_disagrees += 1
+        max_b2b = max(max_b2b, int(env._scorer._b2b))
+
+        if time_step.is_last():
+            deaths += 1
+            time_step = env.reset()
+
+        if (step + 1) % log_every == 0:
+            disagree_rate = 100.0 * policy_disagrees / (step + 1)
+            stats = (
+                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"deaths={deaths} max_b2b={max_b2b} "
+                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
+            )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
+
+    return transitions, beam_dead, deaths, max_b2b, policy_disagrees
+
+
 def _build_ar_model(args):
     p_model = PolicyModel(
         batch_size=1,
@@ -202,6 +353,27 @@ def _build_flat_model(args):
             keras.Input(shape=(24, 10, 1), dtype=tf.float32),
             keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
             keras.Input(shape=(3,), dtype=tf.float32),
+        )
+    )
+    return p_model
+
+
+def _build_placement_model(args):
+    p_model = PlacementPolicyModel(
+        batch_size=1,
+        piece_dim=args.piece_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout_rate=args.dropout_rate,
+    )
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(None, PLACEMENT_FEATURE_DIM), dtype=tf.float32),
+            keras.Input(shape=(None,), dtype=tf.bool),
         )
     )
     return p_model
@@ -252,8 +424,14 @@ def main(cli_args):
             "dataset_path": "datasets/tetris_expert_dataset_flat",
             "build_model": _build_flat_model,
         },
+        "placement": {
+            "policy_checkpoint": "checkpoints/placement_pretrained_policy",
+            "dataset_path": "datasets/tetris_expert_dataset_placement",
+            "build_model": _build_placement_model,
+        },
     }
     cfg = family_defaults[args.family]
+    is_placement = args.family == "placement"
     policy_checkpoint = str(args.policy_checkpoint or cfg["policy_checkpoint"])
     dataset_path = str(args.dataset_path) if args.dataset_path else cfg["dataset_path"]
 
@@ -284,13 +462,21 @@ def main(cli_args):
                 for k, v in next(iter(existing_ds.batch(10_000_000))).items()
             }
             existing_count = len(existing.get("cand_scores", []))
-            if (
-                "cand_scores" not in existing
-                or existing["cand_scores"].shape[1] != NUM_ACTIONS
-            ):
+            if is_placement:
+                cp = existing.get("cand_placements")
+                schema_ok = cp is not None and cp.shape[1:] == (
+                    CANDIDATE_CAPACITY,
+                    PLACEMENT_FEATURE_DIM,
+                )
+            else:
+                schema_ok = (
+                    "cand_scores" in existing
+                    and existing["cand_scores"].shape[1] == NUM_ACTIONS
+                )
+            if not schema_ok:
                 print(
-                    "Existing dataset is an older schema (not dense 320-action "
-                    "`cand_scores`) - starting fresh for search-aligned targets.",
+                    "Existing dataset is an older/incompatible schema for this "
+                    "family - starting fresh.",
                     flush=True,
                 )
                 existing = None
@@ -309,7 +495,8 @@ def main(cli_args):
         flush=True,
     )
 
-    new_transitions, beam_dead, deaths, max_b2b, policy_disagrees = collect_dagger(
+    collect_fn = collect_dagger_placement if is_placement else collect_dagger
+    new_transitions, beam_dead, deaths, max_b2b, policy_disagrees = collect_fn(
         p_model=p_model,
         seed=args.seed + existing_count,
         num_steps=args.num_steps,
@@ -343,14 +530,19 @@ def main(cli_args):
     boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    cand_sequences = np.stack([t[3] for t in new_transitions]).astype(np.int8)
     cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
+    if is_placement:
+        label_key = "cand_placements"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.float32)
+    else:
+        label_key = "cand_sequences"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.int8)
 
     if existing is not None:
         boards = np.concatenate([existing["boards"], boards])
         pieces = np.concatenate([existing["pieces"], pieces])
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        cand_sequences = np.concatenate([existing["cand_sequences"], cand_sequences])
+        label = np.concatenate([existing[label_key], label])
         cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} "
@@ -366,7 +558,7 @@ def main(cli_args):
             "boards": boards,
             "pieces": pieces,
             "b2b_combo_garbage": bcg,
-            "cand_sequences": cand_sequences,
+            label_key: label,
             "cand_scores": cand_scores,
         }
     )
