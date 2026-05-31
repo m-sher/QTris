@@ -16,13 +16,30 @@ def main() -> None:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=512,
-        help="Per-step batch size. Default 512 for ar; pass 256 for flat to match prior runs.",
+        default=128,
+        help="Per-step batch size. ar scores batch x --cand-topk sequences through "
+        "the key decoder, so keep it modest (128 ~ 5.8GB at depth 64, K 32); flat "
+        "has no such multiplier and can go higher (pass 256-512).",
     )
     parser.add_argument(
         "--policy-only",
         action="store_true",
         help="Train only the policy head; skip the value head.",
+    )
+    parser.add_argument(
+        "--cand-topk",
+        type=int,
+        default=32,
+        help="ar: number of top-scored candidate moves distilled per position "
+        "(memory/compute lever).",
+    )
+    parser.add_argument(
+        "--policy-temp",
+        type=float,
+        default=10.0,
+        help="ar: temperature applied to candidate scores when forming the policy "
+        "target weights. Scores span O(tens-thousands) (b2b-dependent); ~10 keeps "
+        "the best move ~56%% of the target mass, higher flattens it.",
     )
     args = parser.parse_args()
 

@@ -5,6 +5,7 @@ import os
 import shutil
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -26,6 +27,7 @@ def collect(
     num_row_tiers,
     death_trim_count,
     gamma,
+    headless=False,
     log_every=1000,
 ):
     """Single-env sequential collection. Runs num_steps total transitions,
@@ -91,7 +93,8 @@ def collect(
                 )
             )
 
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), disable=headless, desc="datagen flat", unit="step")
+    for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
@@ -160,12 +163,14 @@ def collect(
             time_step = env.reset()
 
         if (step + 1) % log_every == 0:
-            print(
-                f"Step {step + 1}/{num_steps} | "
+            stats = (
                 f"transitions={len(transitions)} unmatched={unmatched} "
-                f"deaths={deaths} max_b2b={max_b2b}",
-                flush=True,
+                f"deaths={deaths} max_b2b={max_b2b}"
             )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
 
     flush(episode_buf, is_death=False)
     return transitions, unmatched, deaths, max_b2b
@@ -241,6 +246,7 @@ def main(args):
         num_row_tiers=num_row_tiers,
         death_trim_count=death_trim_count,
         gamma=gamma,
+        headless=getattr(args, "headless", False),
     )
 
     print(

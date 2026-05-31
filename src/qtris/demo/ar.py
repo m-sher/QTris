@@ -1,7 +1,7 @@
 import tensorflow as tf
 from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Convert
+from TetrisEnv.Moves import Convert, Keys
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -108,6 +108,9 @@ def main(args):
     current_b2b = []
     current_combo = []
     current_garbage = []
+    valid_seq_counts = []
+    max_valid_seq_counts = []
+    max_valid_seqs = 0
 
     death = 0
     running_attacks = 0
@@ -144,6 +147,14 @@ def main(args):
 
         if not pathfinding:
             valid_sequences = Convert.tf_to_sequence[None, ...]
+
+        # A reachable placement is any sequence row that is not all-PAD.
+        num_valid_seqs = int(
+            tf.reduce_sum(
+                tf.cast(tf.reduce_any(valid_sequences != Keys.PAD, axis=-1), tf.int32)
+            )
+        )
+        max_valid_seqs = max(max_valid_seqs, num_valid_seqs)
 
         key_sequence, log_prob, action_index, scores = p_model.predict(
             (board, pieces, b2b_combo_garbage),
@@ -286,6 +297,8 @@ def main(args):
         current_b2b.append(current_b2b_val)
         current_combo.append(current_combo_val)
         current_garbage.append(current_garbage_val)
+        valid_seq_counts.append(num_valid_seqs)
+        max_valid_seq_counts.append(max_valid_seqs)
 
         time_step = env.step(key_sequence)
 
@@ -311,11 +324,19 @@ def main(args):
         garbage_push_text = font.render(
             f"Garbage Pushed: {int(garbage_pushed)}", True, (255, 255, 255)
         )
+        valid_seq_text = font.render(
+            f"Valid Seqs: {num_valid_seqs}", True, (255, 255, 255)
+        )
+        max_valid_seq_text = font.render(
+            f"Max Valid Seqs: {max_valid_seqs}", True, (255, 255, 255)
+        )
 
         # Position reward texts in left half (single column)
         screen.blit(attack_rew_text, (10, base_y))
         screen.blit(total_rew_text, (10, base_y + 20))
         screen.blit(garbage_push_text, (10, base_y + 40))
+        screen.blit(valid_seq_text, (10, base_y + 60))
+        screen.blit(max_valid_seq_text, (10, base_y + 80))
 
         # RIGHT HALF: Current State Information (single column)
         attack_text = font.render(f"Attack: {int(attacks[-1])}", True, (255, 255, 255))
@@ -436,11 +457,19 @@ def main(args):
         garbage_push_text = font.render(
             f"Garbage Pushed: {int(garbage_pusheds[ind])}", True, (255, 255, 255)
         )
+        valid_seq_text = font.render(
+            f"Valid Seqs: {valid_seq_counts[ind]}", True, (255, 255, 255)
+        )
+        max_valid_seq_text = font.render(
+            f"Max Valid Seqs: {max_valid_seq_counts[ind]}", True, (255, 255, 255)
+        )
 
         # Position reward texts in left half (single column)
         screen.blit(attack_rew_text, (10, base_y))
         screen.blit(total_rew_text, (10, base_y + 20))
         screen.blit(garbage_push_text, (10, base_y + 40))
+        screen.blit(valid_seq_text, (10, base_y + 60))
+        screen.blit(max_valid_seq_text, (10, base_y + 80))
 
         # RIGHT HALF: Current State Information (single column)
         attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))

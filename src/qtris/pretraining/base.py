@@ -58,6 +58,9 @@ class PretrainerBase:
         self._return_scale = tf.Variable(
             1.0, trainable=False, dtype=tf.float32, name="return_scale"
         )
+        self._value_scale = tf.Variable(
+            1.0, trainable=False, dtype=tf.float32, name="value_scale"
+        )
 
     def _load_dataset(self, batch_size):
         if not os.path.exists(self._dataset_path):
@@ -114,6 +117,65 @@ class PretrainerBase:
                 f"({100.0 * float(frac_clipped):.2f}%) "
                 f"| post: mean={float(clip_mean):.3f} std={float(clip_std):.3f} "
                 f"| value-head scale={float(scale):.3f}",
+                flush=True,
+            )
+
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+
+        return (
+            cached.shuffle(buffer_size=500_000)
+            .batch(
+                batch_size,
+                drop_remainder=True,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+            )
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    def _load_dataset_dense(self, batch_size):
+        """Load the dense 320-action dataset (cand_sequences + cand_scores).
+
+        Computes the value-head scale from each position's max legal score so the
+        value target is standardized; the policy target is built per batch in the
+        train step from cand_scores."""
+        if not os.path.exists(self._dataset_path):
+            raise FileNotFoundError(
+                f"No dataset at {self._dataset_path}. Run `uv run datagen` to collect one."
+            )
+
+        dataset = tf.data.Dataset.load(self._dataset_path)
+        spec = dataset.element_spec
+        if "cand_scores" not in spec or "cand_sequences" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} is not the dense schema (needs "
+                "`cand_scores` + `cand_sequences`). Regenerate with `uv run datagen ar`."
+            )
+
+        if not self._policy_only:
+            vmax = tf.concat(
+                [
+                    tf.reduce_max(
+                        tf.where(
+                            batch["cand_scores"] > -1e29,
+                            batch["cand_scores"],
+                            tf.constant(-1e30, dtype=tf.float32),
+                        ),
+                        axis=-1,
+                    )
+                    for batch in dataset.batch(100_000)
+                ],
+                axis=0,
+            )
+            v_mean = tf.reduce_mean(vmax)
+            v_std = tf.math.reduce_std(vmax)
+            scale = tf.maximum(v_std, 1.0)
+            self._value_scale.assign(scale)
+            print(
+                f"Value target | n={int(tf.size(vmax))} | mean={float(v_mean):.3f} "
+                f"std={float(v_std):.3f} | value-head scale={float(scale):.3f}",
                 flush=True,
             )
 

@@ -32,6 +32,11 @@ def main() -> None:
         default=None,
         help="Seed offset. Default: 0 for non-dagger; 10_000_000 for --dagger.",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable the progress bar; emit periodic log lines instead.",
+    )
     args = parser.parse_args()
 
     if args.dagger:
