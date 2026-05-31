@@ -31,7 +31,7 @@ build-backend = "hatchling.build"
 packages = ["src/qtris"]
 
 [tool.uv.sources]
-tetrisenv = { path = "tetrisenv" }
+tetrisenv = { path = "tetrisenv", editable = true }
 
 [tool.ruff]
 extend-exclude = ["tetrisenv"]
