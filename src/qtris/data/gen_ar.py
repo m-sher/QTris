@@ -13,6 +13,21 @@ PAD = 11  # key-sequence padding token
 SENTINEL = np.float32(-1e30)  # score for illegal/unreached actions
 
 
+def dense_target(cand_actions, cand_scores, cand_seqs, max_len):
+    """Scatter per-root candidates into a dense action-indexed target: one score
+    + key-sequence per action index, sentinel for illegal/unreached. Colliding
+    placements keep the best score. Returns (sequences[NUM_ACTIONS, max_len] int8,
+    scores[NUM_ACTIONS] float32)."""
+    seqs = np.full((NUM_ACTIONS, max_len), PAD, dtype=np.int8)
+    scores = np.full(NUM_ACTIONS, SENTINEL, dtype=np.float32)
+    for a, sc, seq in zip(cand_actions, cand_scores, cand_seqs):
+        a = int(a)
+        if 0 <= a < NUM_ACTIONS and sc > scores[a]:
+            scores[a] = sc
+            seqs[a] = seq
+    return seqs, scores
+
+
 def collect(
     seed,
     num_steps,
@@ -89,16 +104,7 @@ def collect(
             time_step = env.reset()
             continue
 
-        # Dense action-indexed target: one score + key-sequence per action index,
-        # sentinel for illegal/unreached. Colliding placements keep the best score.
-        seqs = np.full((NUM_ACTIONS, max_len), PAD, dtype=np.int8)
-        scores = np.full(NUM_ACTIONS, SENTINEL, dtype=np.float32)
-        for a, sc, seq in zip(cand_actions, cand_scores, cand_seqs):
-            a = int(a)
-            if 0 <= a < NUM_ACTIONS and sc > scores[a]:
-                scores[a] = sc
-                seqs[a] = seq
-
+        seqs, scores = dense_target(cand_actions, cand_scores, cand_seqs, max_len)
         transitions.append((board, pieces, bcg, seqs, scores))
 
         time_step = env._step(best_seq.astype(np.int64))
