@@ -25,6 +25,7 @@ import shutil
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from tqdm import tqdm
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
@@ -49,6 +50,7 @@ def collect_dagger(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    headless=False,
     log_every=1000,
 ):
     """Roll the policy forward; label each visited state with the search target.
@@ -86,7 +88,8 @@ def collect_dagger(
     max_b2b = 0
     policy_disagrees = 0
 
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), disable=headless, desc="dagger", unit="step")
+    for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
@@ -147,12 +150,15 @@ def collect_dagger(
 
         if (step + 1) % log_every == 0:
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
-            print(
-                f"Step {step + 1}/{num_steps} | transitions={len(transitions)} "
-                f"beam_dead={beam_dead} deaths={deaths} max_b2b={max_b2b} "
-                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)",
-                flush=True,
+            stats = (
+                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"deaths={deaths} max_b2b={max_b2b} "
+                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
 
     return transitions, beam_dead, deaths, max_b2b, policy_disagrees
 
@@ -231,6 +237,7 @@ def main(cli_args):
         garbage_max=e.garbage_max,
         garbage_push_delay=e.garbage_push_delay,
         num_row_tiers=m.num_row_tiers,
+        headless=getattr(cli_args, "headless", False),
         log_every=1000,
     )
 
@@ -318,6 +325,7 @@ def main(cli_args):
         garbage_max=args.garbage_max,
         garbage_push_delay=args.garbage_push_delay,
         num_row_tiers=args.num_row_tiers,
+        headless=args.headless,
         log_every=args.log_every,
     )
 

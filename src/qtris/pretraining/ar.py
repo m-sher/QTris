@@ -1,71 +1,81 @@
 from TetrisEnv.Moves import Keys
 from qtris.models.ar.model import PolicyModel
 from qtris.models.value import ValueModel
-from qtris.pretraining.base import PretrainerBase, correct_and_clip
+from qtris.pretraining.base import PretrainerBase
 import tensorflow as tf
 from tensorflow import keras
 
 
 class Pretrainer(PretrainerBase):
     def __init__(
-        self, dataset_path="datasets/tetris_expert_dataset_b2b", policy_only=False
+        self,
+        dataset_path="datasets/tetris_expert_dataset_b2b",
+        policy_only=False,
+        cand_topk=32,
+        policy_temp=10.0,
+        max_len=15,
     ):
         super().__init__(dataset_path, policy_only)
+        self._cand_topk = cand_topk
+        self._policy_temp = policy_temp
+        self._max_len = max_len
 
     @tf.function
     def _train_step(self, p_model, v_model, batch):
         board = batch["boards"]
         pieces = batch["pieces"]
         bcg = batch["b2b_combo_garbage"]
-        actions = batch["actions"]
-        masks = batch["masks"]
-        sample_weights = batch["sample_weights"]
+        cand_seqs = batch["cand_sequences"]  # (B, A, L) int8
+        cand_scores = batch["cand_scores"]  # (B, A) f32, sentinel = illegal
 
-        input_seq = actions[:, :-1]
-        target_seq = actions[:, 1:]
-        valid_mask = masks[:, 1:, :]
+        B = tf.shape(board)[0]
+        K = self._cand_topk
+        L = self._max_len
 
-        pad_mask = tf.cast(target_seq != Keys.PAD, tf.float32)
-        num_valid = tf.reduce_sum(tf.cast(valid_mask, tf.float32), axis=-1)
-        decision_mask = tf.cast(num_valid > 1, tf.float32) * pad_mask
-        weighted_mask = decision_mask * sample_weights[:, None]
+        # Top-K candidate moves by score, with the search's best at index 0. The
+        # target weight per candidate is softmax(score/temp); illegal slots get 0.
+        topk_scores, topk_idx = tf.math.top_k(cand_scores, k=K)  # (B,K) desc
+        legal = topk_scores > -1e29
+        seqs_k = tf.cast(tf.gather(cand_seqs, topk_idx, batch_dims=1), tf.int64)
+        masked_scores = tf.where(legal, topk_scores, tf.constant(-1e30, tf.float32))
+        target = tf.nn.softmax(masked_scores / self._policy_temp, axis=-1)  # (B,K)
 
         with tf.GradientTape() as p_tape:
-            logits = p_model((board, pieces, bcg, input_seq), training=True)
-            masked_logits = tf.where(
-                valid_mask, logits, tf.constant(-1e9, dtype=tf.float32)
-            )
-            per_token_loss = self._scc(target_seq, masked_logits)
-            policy_loss = tf.math.divide_no_nan(
-                tf.reduce_sum(per_token_loss * weighted_mask),
-                tf.reduce_sum(weighted_mask),
-            )
+            # Encoder runs ONCE per position; only the cheap key decoder pays the
+            # K multiplier (tile the context, score all K sequences as one batch).
+            piece_dec, _ = p_model.process_obs((board, pieces, bcg), training=True)
+            ctx = tf.repeat(piece_dec, K, axis=0)  # (B*K, C, D)
+            s = tf.reshape(seqs_k, (B * K, L))
+            logits, _ = p_model.process_keys((ctx, s[:, :-1]), training=True)
+            logp = tf.nn.log_softmax(logits, axis=-1)  # (B*K, L-1, V)
+            tok_logp = tf.gather(logp, s[:, 1:, None], batch_dims=2)[..., 0]
+            pad = tf.cast(s[:, 1:] != Keys.PAD, tf.float32)
+            seq_logp = tf.reshape(tf.reduce_sum(tok_logp * pad, axis=-1), (B, K))
+            # Joint sequence distillation: maximize the target-weighted log-
+            # likelihood of the candidate sequences (per-token weighted CE). This
+            # trains the per-token policy that greedy decoding uses - a softmax
+            # over per-sequence log-probs would only fix their relative ranking,
+            # leaving per-token probs underdetermined - and has no length bias
+            # against longer (spin) sequences.
+            policy_loss = tf.reduce_mean(-tf.reduce_sum(target * seq_logp, axis=-1))
 
         p_gradients = p_tape.gradient(policy_loss, p_model.trainable_variables)
         p_model.optimizer.apply_gradients(zip(p_gradients, p_model.trainable_variables))
 
-        pred = tf.argmax(masked_logits, axis=-1, output_type=tf.int64)
-        correct = tf.cast(pred == target_seq, tf.float32) * decision_mask
+        # Diagnostics. `Gen`: greedy per-token accuracy along the best-scored
+        # candidate - the behavior greedy generation produces. `Rank1`: whether
+        # the model assigns that candidate the highest sequence log-prob.
+        vocab = tf.shape(logits)[-1]
+        best_logits = tf.reshape(logits, (B, K, L - 1, vocab))[:, 0]  # (B, L-1, V)
+        best_tgt = seqs_k[:, 0, 1:]  # (B, L-1)
+        gen_mask = tf.cast(best_tgt != Keys.PAD, tf.float32)
+        gen_pred = tf.argmax(best_logits, axis=-1, output_type=tf.int64)
         accuracy = tf.math.divide_no_nan(
-            tf.reduce_sum(correct), tf.reduce_sum(decision_mask)
+            tf.reduce_sum(tf.cast(gen_pred == best_tgt, tf.float32) * gen_mask),
+            tf.reduce_sum(gen_mask),
         )
-
-        # Top-3 on decision tokens. Tracks how well the right answer is
-        # ranked, not just whether it's #1. Useful diagnostic for whether
-        # the model "knows about" the correct token even when not
-        # selecting it greedily - especially helpful early in training
-        # when Acc is low but the right token is consistently in the top
-        # few logits.
-        last_dim = tf.shape(masked_logits)[-1]
-        flat_logits = tf.reshape(masked_logits, [-1, last_dim])
-        flat_targets = tf.reshape(target_seq, [-1])
-        top3_flat = tf.math.in_top_k(flat_targets, flat_logits, k=3)
-        top3 = (
-            tf.cast(tf.reshape(top3_flat, tf.shape(target_seq)), tf.float32)
-            * decision_mask
-        )
-        accuracy_top3 = tf.math.divide_no_nan(
-            tf.reduce_sum(top3), tf.reduce_sum(decision_mask)
+        accuracy_top3 = tf.reduce_mean(
+            tf.cast(tf.argmax(seq_logp, axis=-1) == 0, tf.float32)
         )
 
         if self._policy_only:
@@ -76,15 +86,10 @@ class Pretrainer(PretrainerBase):
                 tf.constant(0.0, dtype=tf.float32),
             )
 
-        returns = correct_and_clip(batch["returns"], bcg[..., 0])
+        value_target = topk_scores[:, :1] / self._value_scale  # (B,1) = max score
         with tf.GradientTape() as v_tape:
             values = v_model((board, pieces, bcg), training=True)
-            targets = tf.reshape(returns / self._return_scale, (-1, 1))
-            squared_error = tf.square(values - targets)
-            value_loss = tf.math.divide_no_nan(
-                tf.reduce_sum(squared_error * sample_weights[:, None]),
-                tf.reduce_sum(sample_weights),
-            )
+            value_loss = tf.reduce_mean(tf.square(values - value_target))
 
         v_gradients = v_tape.gradient(value_loss, v_model.trainable_variables)
         v_model.optimizer.apply_gradients(zip(v_gradients, v_model.trainable_variables))
@@ -106,7 +111,7 @@ class Pretrainer(PretrainerBase):
                 "with policy_only=True."
             )
 
-        dataset = self._load_dataset(batch_size=batch_size)
+        dataset = self._load_dataset_dense(batch_size=batch_size)
 
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
@@ -118,15 +123,15 @@ class Pretrainer(PretrainerBase):
                     if self._policy_only:
                         print(
                             f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
-                            f"Acc: {float(accuracy):1.3f} | "
-                            f"Acc@3: {float(accuracy_top3):1.3f}",
+                            f"Gen: {float(accuracy):1.3f} | "
+                            f"Rank1: {float(accuracy_top3):1.3f}",
                             flush=True,
                         )
                     else:
                         print(
                             f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
-                            f"Acc: {float(accuracy):1.3f} | "
-                            f"Acc@3: {float(accuracy_top3):1.3f} | "
+                            f"Gen: {float(accuracy):1.3f} | "
+                            f"Rank1: {float(accuracy_top3):1.3f} | "
                             f"Value: {float(value_loss):2.3f}",
                             flush=True,
                         )
@@ -204,7 +209,12 @@ def main(args):
         p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
         print("Restored pretrained policy checkpoint.", flush=True)
 
-    pretrainer_kwargs = {"policy_only": args.policy_only}
+    pretrainer_kwargs = {
+        "policy_only": args.policy_only,
+        "cand_topk": args.cand_topk,
+        "policy_temp": args.policy_temp,
+        "max_len": max_len,
+    }
     if args.dataset is not None:
         pretrainer_kwargs["dataset_path"] = str(args.dataset)
     pretrainer = Pretrainer(**pretrainer_kwargs)
@@ -214,7 +224,7 @@ def main(args):
         v_checkpoint = tf.train.Checkpoint(
             model=v_model,
             optimizer=v_optimizer,
-            return_scale=pretrainer._return_scale,
+            value_scale=pretrainer._value_scale,
         )
         v_checkpoint_manager = tf.train.CheckpointManager(
             v_checkpoint, "checkpoints/ar_pretrained_value", max_to_keep=3
@@ -225,7 +235,7 @@ def main(args):
             ).expect_partial()
             print(
                 f"Restored pretrained value checkpoint "
-                f"(return_scale={float(pretrainer._return_scale):.3f}).",
+                f"(value_scale={float(pretrainer._value_scale):.3f}).",
                 flush=True,
             )
 

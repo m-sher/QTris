@@ -4,6 +4,7 @@ import os
 import shutil
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 # Action space: is_hold(2) * rot(4) * col(10) * spin(4). The policy target is a
 # dense score per action index (sentinel for illegal/unreached moves), so every
@@ -43,6 +44,7 @@ def collect(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    headless=False,
     log_every=1000,
 ):
     """Single-env sequential collection of search-aligned policy/value targets.
@@ -77,7 +79,8 @@ def collect(
     deaths = 0
     max_b2b = 0
 
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), disable=headless, desc="datagen ar", unit="step")
+    for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
@@ -115,11 +118,11 @@ def collect(
             time_step = env.reset()
 
         if (step + 1) % log_every == 0:
-            print(
-                f"Step {step + 1}/{num_steps} | transitions={len(transitions)} "
-                f"deaths={deaths} max_b2b={max_b2b}",
-                flush=True,
-            )
+            stats = f"transitions={len(transitions)} deaths={deaths} max_b2b={max_b2b}"
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
 
     return transitions, deaths, max_b2b
 
@@ -193,6 +196,7 @@ def main(args):
         garbage_max=garbage_max,
         garbage_push_delay=garbage_push_delay,
         num_row_tiers=num_row_tiers,
+        headless=getattr(args, "headless", False),
     )
 
     print(
