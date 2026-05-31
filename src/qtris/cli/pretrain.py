@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pretrain")
-    parser.add_argument("family", choices=["ar", "flat"])
+    parser.add_argument("family", choices=["ar", "flat", "placement"])
     parser.add_argument(
         "--dataset",
         type=Path,
@@ -45,6 +45,8 @@ def main() -> None:
 
     if args.family == "ar":
         from qtris.pretraining.ar import main as run
+    elif args.family == "placement":
+        from qtris.pretraining.placement import main as run
     else:
         from qtris.pretraining.flat import main as run
     run(args)
