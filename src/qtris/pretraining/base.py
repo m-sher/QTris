@@ -155,29 +155,7 @@ class PretrainerBase:
             )
 
         if not self._policy_only:
-            vmax = tf.concat(
-                [
-                    tf.reduce_max(
-                        tf.where(
-                            batch["cand_scores"] > -1e29,
-                            batch["cand_scores"],
-                            tf.constant(-1e30, dtype=tf.float32),
-                        ),
-                        axis=-1,
-                    )
-                    for batch in dataset.batch(100_000)
-                ],
-                axis=0,
-            )
-            v_mean = tf.reduce_mean(vmax)
-            v_std = tf.math.reduce_std(vmax)
-            scale = tf.maximum(v_std, 1.0)
-            self._value_scale.assign(scale)
-            print(
-                f"Value target | n={int(tf.size(vmax))} | mean={float(v_mean):.3f} "
-                f"std={float(v_std):.3f} | value-head scale={float(scale):.3f}",
-                flush=True,
-            )
+            self._assign_value_scale(dataset)
 
         cached = dataset.cache()
         for _ in cached:
@@ -192,6 +170,68 @@ class PretrainerBase:
                 deterministic=False,
             )
             .prefetch(tf.data.AUTOTUNE)
+        )
+
+    def _load_dataset_placement(self, batch_size):
+        """Load the 128-slot placement dataset (cand_placements + cand_scores).
+
+        Same value-head standardization as the dense loader; the policy target is
+        built per batch in the train step from cand_scores."""
+        if not os.path.exists(self._dataset_path):
+            raise FileNotFoundError(
+                f"No dataset at {self._dataset_path}. Run `uv run datagen` to collect one."
+            )
+
+        dataset = tf.data.Dataset.load(self._dataset_path)
+        spec = dataset.element_spec
+        if "cand_placements" not in spec or "cand_scores" not in spec:
+            raise ValueError(
+                f"Dataset at {self._dataset_path} is not the placement schema (needs "
+                "`cand_placements` + `cand_scores`). Regenerate with `uv run datagen placement`."
+            )
+
+        if not self._policy_only:
+            self._assign_value_scale(dataset)
+
+        cached = dataset.cache()
+        for _ in cached:
+            pass
+
+        return (
+            cached.shuffle(buffer_size=500_000)
+            .batch(
+                batch_size,
+                drop_remainder=True,
+                num_parallel_calls=tf.data.AUTOTUNE,
+                deterministic=False,
+            )
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    def _assign_value_scale(self, dataset):
+        """Standardize the value head from each position's max legal candidate score."""
+        vmax = tf.concat(
+            [
+                tf.reduce_max(
+                    tf.where(
+                        batch["cand_scores"] > -1e29,
+                        batch["cand_scores"],
+                        tf.constant(-1e30, dtype=tf.float32),
+                    ),
+                    axis=-1,
+                )
+                for batch in dataset.batch(100_000)
+            ],
+            axis=0,
+        )
+        v_mean = tf.reduce_mean(vmax)
+        v_std = tf.math.reduce_std(vmax)
+        scale = tf.maximum(v_std, 1.0)
+        self._value_scale.assign(scale)
+        print(
+            f"Value target | n={int(tf.size(vmax))} | mean={float(v_mean):.3f} "
+            f"std={float(v_std):.3f} | value-head scale={float(scale):.3f}",
+            flush=True,
         )
 
     @staticmethod

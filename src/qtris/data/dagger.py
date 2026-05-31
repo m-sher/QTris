@@ -112,7 +112,7 @@ def collect_dagger(
         policy_seq = policy_seq.numpy()[0].astype(np.int64)
 
         # Beam's dense action-indexed target for this state (the label).
-        best_action, best_seq, cand_actions, cand_scores, cand_seqs = (
+        best_action, best_seq, cand_actions, cand_scores, cand_seqs, _cand_rows = (
             searcher.search_with_scores(
                 board=env._board,
                 active_piece=env._active_piece.piece_type.value,
