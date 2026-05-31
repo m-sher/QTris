@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="demo")
-    parser.add_argument("family", choices=["ar", "flat", "vs"])
+    parser.add_argument("family", choices=["ar", "flat", "vs", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--checkpoint",
@@ -42,9 +42,9 @@ def main() -> None:
             parser.error(
                 "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
             )
-        if args.family == "flat":
+        if args.family in ("flat", "placement"):
             parser.error(
-                "flat 1v1 demo not yet implemented; only `demo ar --mode 1v1` is supported."
+                f"{args.family} 1v1 demo not yet implemented; only `demo ar --mode 1v1` is supported."
             )
         from qtris.demo.ar_1v1 import main as run
     else:
@@ -52,6 +52,8 @@ def main() -> None:
             parser.error(f"`demo {args.family}` requires --checkpoint.")
         if args.family == "ar":
             from qtris.demo.ar import main as run
+        elif args.family == "placement":
+            from qtris.demo.placement import main as run
         else:
             from qtris.demo.flat import main as run
     run(args)
