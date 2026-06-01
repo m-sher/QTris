@@ -52,7 +52,21 @@ class CKeySequenceFinder(KeySequenceFinder):
                 np.ctypeslib.ndpointer(dtype=np.int64, ndim=1, flags='C_CONTIGUOUS')
             ]
             self._lib.find_sequences_c.restype = None
-        
+
+            self._lib.find_placement_candidates_c.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.uint16, ndim=1, flags='C_CONTIGUOUS'),
+                ctypes.c_int,  # board_height
+                ctypes.c_int,  # piece_type
+                ctypes.c_int,  # start_row
+                ctypes.c_int,  # start_col
+                ctypes.c_int,  # start_rot
+                ctypes.c_int,  # max_len
+                ctypes.c_int,  # is_hold
+                np.ctypeslib.ndpointer(dtype=np.int64, ndim=1, flags='C_CONTIGUOUS'),
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS'),
+            ]
+            self._lib.find_placement_candidates_c.restype = None
+
         self._col_bits = (
             np.uint16(1) << np.arange(10, dtype=np.uint16)
         ).astype(np.uint16)
@@ -100,5 +114,37 @@ class CKeySequenceFinder(KeySequenceFinder):
         if return_timing:
              duration = time.perf_counter() - t_start
              return sequences_array, {"placements": 0.0, "paths": duration, "total": duration}
-             
+
         return sequences_array
+
+    def find_placement_candidates(
+        self, board: np.ndarray, piece: Piece, max_len: int, is_hold: bool
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Dense per-branch placement candidates: every reachable resting placement keyed by
+        rot*40 + norm_col*4 + spin_type. Returns (sequences[160, max_len] PAD-filled,
+        landing_rows[160], -1 = empty slot). No death-pruning, so any spawnable board yields >=1."""
+        if not self._lib:
+            raise RuntimeError("C Library not loaded")
+
+        occupied = (board != 0).astype(np.uint16)
+        mask_rows = (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
+        if not mask_rows.flags["C_CONTIGUOUS"]:
+            mask_rows = np.ascontiguousarray(mask_rows)
+        board_height = board.shape[0]
+
+        sequences = np.full(160 * max_len, Keys.PAD, dtype=np.int64)
+        landing_rows = np.full(160, -1, dtype=np.int32)
+
+        self._lib.find_placement_candidates_c(
+            mask_rows,
+            board_height,
+            piece.piece_type.value,
+            int(piece.loc[0]),
+            int(piece.loc[1]),
+            int(piece.r),
+            max_len,
+            int(is_hold),
+            sequences,
+            landing_rows,
+        )
+        return sequences.reshape((160, max_len)), landing_rows

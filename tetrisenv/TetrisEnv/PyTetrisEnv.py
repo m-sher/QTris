@@ -8,15 +8,14 @@ from .Moves import Moves, Keys
 from .TetrioRandom import TetrioRNG
 from .CKeySequences import CKeySequenceFinder
 from .CHoleFinder import CHoleFinder
-from .CB2BSearch import CB2BSearch
 from .helpers import overlaps
-
-# Dense placement action space: is_hold(2) * rot(4) * col(10) * spin(4).
-NUM_PLACEMENT_ACTIONS = 320
 import numpy as np
 import random
 import copy
 from typing import List, Dict, Tuple, Optional
+
+# Dense placement action space: is_hold(2) * rot(4) * col(10) * spin(4).
+NUM_PLACEMENT_ACTIONS = 320
 
 
 class PyTetrisEnv(py_environment.PyEnvironment):
@@ -104,9 +103,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._episode_ended = False
 
         # Placement-model RL rollout: expose per-step candidate placements (dense
-        # by action index) so the candidate-ranking net can be driven in the loop.
+        # by action index, from pathfinding) so the candidate-ranking net can be driven.
         self._placement_candidates = placement_candidates
-        self._placement_searcher = CB2BSearch() if placement_candidates else None
 
         self._observation_spec = {
             "board": array_spec.BoundedArraySpec(
@@ -459,32 +457,28 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         return observation
 
     def _enumerate_placement_candidates(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Dense-320 placement candidates (score / landing row / key sequence per
-        action index, sentinel for unreached) for the candidate-ranking net. Shallow
-        beam (the net ranks; scores only break packing ties). Runs inside the env so
-        it parallelizes across rollout subprocesses."""
+        """Dense-320 placement candidates from pathfinding (the full legal set, no death-pruning
+        — death is this env's termination, not a filter, so a spawnable board never yields an
+        empty set). cand_scores is a validity sentinel (0.0 valid / -1e30 empty); the net ranks
+        and RL gets its value target from returns. Runs in-subprocess so it parallelizes."""
         scores = np.full(NUM_PLACEMENT_ACTIONS, -1e30, dtype=np.float32)
         rows = np.zeros(NUM_PLACEMENT_ACTIONS, dtype=np.int32)
         seqs = np.full((NUM_PLACEMENT_ACTIONS, self._max_len), Keys.PAD, dtype=np.int64)
-        _, _, ca, cs, cseq, cr = self._placement_searcher.search_with_scores(
-            board=self._board,
-            active_piece=self._active_piece.piece_type.value,
-            hold_piece=self._hold_piece.value,
-            queue=np.array([p.value for p in self._queue], dtype=np.int32),
-            b2b=int(self._scorer._b2b),
-            combo=int(self._scorer._combo),
-            total_garbage=int(self._get_total_garbage()),
-            garbage_push_delay=self._garbage_push_delay,
-            search_depth=2,
-            beam_width=512,
-            max_len=self._max_len,
+
+        hold_piece = (
+            self._spawn_piece(self._hold_piece)
+            if self._hold_piece != PieceType.N
+            else self._spawn_piece(self._queue[0])
         )
-        for a, sc, seq, row in zip(ca, cs, cseq, cr):
-            a = int(a)
-            if 0 <= a < NUM_PLACEMENT_ACTIONS and sc > scores[a]:
-                scores[a] = sc
-                rows[a] = row
-                seqs[a] = seq
+        for offset, is_hold, piece in ((0, False, self._active_piece), (160, True, hold_piece)):
+            sq, lr = self._key_sequence_finder.find_placement_candidates(
+                board=self._board, piece=piece, max_len=self._max_len, is_hold=is_hold
+            )
+            idx = offset + np.flatnonzero(lr >= 0)
+            valid = lr >= 0
+            scores[idx] = 0.0
+            rows[idx] = lr[valid]
+            seqs[idx] = sq[valid]
         return scores, rows, seqs
 
     def _convert_to_keys(self, action: Dict[str, int]) -> List[int]:
