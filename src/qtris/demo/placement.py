@@ -3,6 +3,7 @@ from qtris.models.placement.model import PlacementPolicyModel
 from qtris.data.placement_features import build_placement_inference
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
+from TetrisEnv.Moves import Keys
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -180,6 +181,16 @@ def main(args):
             cand_sequences=tf.constant(cand_sequences[None], dtype=tf.int64),
             temperature=1.0,
         )
+
+        # The model can only "pick" an all-PAD slot when the search returned zero
+        # candidates - a near-death state where the stack hit max_height and no
+        # placement survives. The env locks + scores only on a HARD_DROP (else its
+        # `is_spin` is left unbound), so commit a hard drop to top out + auto-reset,
+        # the same death path the flat/ar demos take.
+        if not np.any(key_sequence.numpy()[0] == Keys.HARD_DROP):
+            forced = np.full(max_len, Keys.PAD, dtype=np.int64)
+            forced[0], forced[1] = Keys.START, Keys.HARD_DROP
+            key_sequence = tf.constant(forced[None], dtype=tf.int64)
 
         pieces_array = pieces.numpy()
         if pieces_array.ndim > 1:

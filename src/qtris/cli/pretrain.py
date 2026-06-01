@@ -10,7 +10,8 @@ def main() -> None:
         type=Path,
         default=None,
         help="Path to expert dataset (defaults: datasets/tetris_expert_dataset_b2b for ar; "
-        "datasets/tetris_expert_dataset_flat for flat).",
+        "datasets/tetris_expert_dataset_flat for flat; "
+        "datasets/tetris_expert_dataset_placement for placement).",
     )
     parser.add_argument("--num-epochs", type=int, default=10)
     parser.add_argument(
@@ -18,8 +19,9 @@ def main() -> None:
         type=int,
         default=128,
         help="Per-step batch size. ar scores batch x --cand-topk sequences through "
-        "the key decoder, so keep it modest (128 ~ 5.8GB at depth 64, K 32); flat "
-        "has no such multiplier and can go higher (pass 256-512).",
+        "the key decoder, so keep it modest (128 ~ 5.8GB at depth 64, K 32); flat and "
+        "placement score the candidate set in one cheap pass (encoder stays O(batch)) "
+        "and can go higher (pass 256-512).",
     )
     parser.add_argument(
         "--policy-only",
@@ -30,16 +32,17 @@ def main() -> None:
         "--cand-topk",
         type=int,
         default=32,
-        help="ar: number of top-scored candidate moves distilled per position "
-        "(memory/compute lever).",
+        help="ar only (flat/placement score every candidate, so it does not apply): "
+        "number of top-scored candidate moves distilled per position (memory/compute lever).",
     )
     parser.add_argument(
         "--policy-temp",
         type=float,
         default=10.0,
-        help="ar: temperature applied to candidate scores when forming the policy "
-        "target weights. Scores span O(tens-thousands) (b2b-dependent); ~10 keeps "
-        "the best move ~56%% of the target mass, higher flattens it.",
+        help="ar/placement: temperature applied to candidate scores when forming the "
+        "policy target weights. Scores span O(tens-thousands) (b2b-dependent); lower "
+        "sharpens the target onto the search's best move, higher flattens it toward the "
+        "full distribution.",
     )
     args = parser.parse_args()
 
