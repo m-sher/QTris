@@ -32,7 +32,7 @@ from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.models.ar.model import PolicyModel
 from qtris.models.flat.model import FlatPolicyModel
-from qtris.models.placement.model import PlacementPolicyModel
+from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.gen_ar import NUM_ACTIONS, dense_target
 from qtris.data.placement_features import (
     CANDIDATE_CAPACITY,
@@ -359,7 +359,7 @@ def _build_flat_model(args):
 
 
 def _build_placement_model(args):
-    p_model = PlacementPolicyModel(
+    p_model = PlacementPolicyValueNet(
         batch_size=1,
         piece_dim=args.piece_dim,
         depth=args.depth,

@@ -26,7 +26,8 @@ def main() -> None:
     parser.add_argument(
         "--policy-only",
         action="store_true",
-        help="Train only the policy head; skip the value head.",
+        help="ar/flat: train only the policy head, skip the separate value model "
+        "(no effect for placement, which trains its shared policy+value net jointly).",
     )
     parser.add_argument(
         "--cand-topk",
