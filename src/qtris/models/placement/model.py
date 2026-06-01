@@ -11,10 +11,13 @@ from TetrisEnv.Moves import Keys
 HARD_DROP_ID = Keys.HARD_DROP
 
 
-class PlacementPolicyModel(QtrisModelBase):
-    """Candidate-ranking policy: scores up to 128 placement vectors, each
-    conditioned on the shared board latent via cross-attention. Candidates are
-    independent (no self-attention across the set)."""
+class PlacementPolicyValueNet(QtrisModelBase):
+    """Shared-encoder policy+value net (fusion-style). One `process_obs` pass yields
+    both a candidate-ranking policy (over up to 128 placements, conditioned on the
+    board via cross-attention) and a state-only value. The encoder + policy-head
+    submodule names are identical to the old policy-only model, so a policy-only
+    checkpoint warm-starts the shared trunk + policy head; the value head is new and
+    simply restores partial."""
 
     def __init__(
         self,
@@ -67,7 +70,7 @@ class PlacementPolicyModel(QtrisModelBase):
         )
         self._bcg_ln = layers.LayerNormalization(name="bcg_ln")
 
-        # Candidate head: embed each placement vector, cross-attend to the board.
+        # Policy head: embed each placement vector, cross-attend to the board.
         self.move_encoder = keras.Sequential(
             [
                 layers.Dense(depth, activation="relu"),
@@ -93,6 +96,19 @@ class PlacementPolicyModel(QtrisModelBase):
         )
         self.score_top = layers.Dense(1, name="cand_logit")
 
+        # Value head: state-only scalar from the shared board latent. New submodule
+        # (not present in policy-only checkpoints), so warm-start leaves it fresh.
+        self.value_trunk = keras.Sequential(
+            [
+                layers.Flatten(),
+                layers.Dropout(dropout_rate),
+                layers.Dense(depth, activation="relu"),
+                layers.Dense(depth // 2, activation="relu"),
+            ],
+            name="value_trunk",
+        )
+        self.value_top = layers.Dense(1, name="value")
+
     @tf.function(jit_compile=True)
     def score_candidates(self, piece_dec, cand_placements, cand_mask, training=False):
         move_emb = self.move_encoder(cand_placements, training=training)  # (B,C,depth)
@@ -108,6 +124,12 @@ class PlacementPolicyModel(QtrisModelBase):
         return tf.where(cand_mask, logits, tf.constant(-1e9, dtype=tf.float32))
 
     @tf.function(jit_compile=True)
+    def score_value(self, piece_dec, training=False):
+        return self.value_top(
+            self.value_trunk(piece_dec, training=training), training=training
+        )  # (B, 1)
+
+    @tf.function(jit_compile=True)
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
 
@@ -117,10 +139,11 @@ class PlacementPolicyModel(QtrisModelBase):
         logits = self.score_candidates(
             piece_dec, cand_placements, cand_mask, training=training
         )
+        value = self.score_value(piece_dec, training=training)
 
         if return_scores:
-            return logits, piece_scores
-        return logits
+            return logits, value, piece_scores
+        return logits, value
 
     @tf.function(
         jit_compile=True,
