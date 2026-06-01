@@ -135,7 +135,7 @@ def main(args):
     max_height = 18
     max_holes = 50
     max_steps_env = 9999999
-    garbage_chance = 0.0 # I just changed this - don't assume this was a problem that we're currently diagnosing
+    garbage_chance = 0.15
     garbage_min = 1
     garbage_max = 4
     garbage_push_delay = 1
