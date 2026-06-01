@@ -31,6 +31,24 @@ def main() -> None:
         default=None,
         help="Required for `demo vs`. Right player's checkpoint directory.",
     )
+    parser.add_argument(
+        "--search",
+        action="store_true",
+        help="placement only: pick moves with the neural-guided beam search "
+        "(policy prior + value leaf) instead of greedy top-1.",
+    )
+    parser.add_argument(
+        "--depth", type=int, default=1, help="placement --search: lookahead plies."
+    )
+    parser.add_argument(
+        "--beam", type=int, default=8, help="placement --search: beam width."
+    )
+    parser.add_argument(
+        "--gate",
+        type=int,
+        default=8,
+        help="placement --search: top-K candidates expanded per node.",
+    )
     args = parser.parse_args()
 
     if args.family == "vs":
