@@ -1,10 +1,10 @@
 """Rollout runner for placement-model RL (single-player).
 
-Mirrors `FlatRunner`, but the action is a candidate placement slot and the value
-comes from the same merged `PlacementPolicyValueNet`. The per-step candidate set
-(dense by action index) is produced inside each env (`placement_candidates=True`),
-so the C search parallelizes across the rollout subprocesses; the cheap 18-dim
-encoding is done here via `build_placement_inference`.
+The action is a candidate placement slot and the value comes from the merged
+`PlacementPolicyValueNet`. The per-step candidate set (dense by action index) is
+produced inside each env (`placement_candidates=True`), so the C search parallelizes
+across the rollout subprocesses; the cheap 18-dim encoding is done here via
+`build_placement_inference`.
 """
 
 from typing import Any, Optional
@@ -109,7 +109,11 @@ class PlacementRunner:
                 "action_index",
                 "log_prob",
                 "values",
+                "attacks",
+                "clears",
+                "attack_reward",
                 "total_reward",
+                "garbage_pushed",
                 "dones",
             )
         }
@@ -144,6 +148,7 @@ class PlacementRunner:
             sel = cand_seqs128[np.arange(self._num_envs), action_index.numpy()]
 
             time_step = self.env.step(tf.constant(sel, tf.int64))
+            reward = time_step.reward
 
             b["boards"].append(board)
             b["pieces"].append(pieces)
@@ -153,7 +158,11 @@ class PlacementRunner:
             b["action_index"].append(action_index)
             b["log_prob"].append(log_prob)
             b["values"].append(values)
-            b["total_reward"].append(time_step.reward["total_reward"])
+            b["attacks"].append(reward["attack"])
+            b["clears"].append(reward["clear"])
+            b["attack_reward"].append(reward["attack_reward"])
+            b["total_reward"].append(reward["total_reward"])
+            b["garbage_pushed"].append(reward["garbage_pushed"][..., None])
             b["dones"].append(tf.cast(time_step.is_last(), tf.float32)[..., None])
 
         # bootstrap last value (state-only; no candidates needed)

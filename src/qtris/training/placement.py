@@ -1,8 +1,10 @@
-"""Single-player PPO for the placement model (mirrors training/flat.py).
+"""Single-player PPO for the placement model.
 
-The action is a candidate placement slot; the value comes from the same merged
-`PlacementPolicyValueNet`. Warm-starts from the BC checkpoint and fine-tunes on the
-model's own rollouts to close the open-loop distribution-shift gap (see notes.md).
+The action is a candidate placement slot; the value comes from the merged
+`PlacementPolicyValueNet` (one net, optimizer, and tape). Warm-starts from the BC
+checkpoint and fine-tunes on the model's own rollouts to close the open-loop
+distribution-shift gap (see notes.md). wandb observability via `qtris.observability`
+(SingleAgentTrainConfig + SingleAgentPPOLog).
 """
 
 import os
@@ -13,6 +15,8 @@ from tensorflow_probability import distributions
 
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
+from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
+from qtris.observability.wandb_backend import finish, init_run, log_step
 from qtris.runners.placement import PlacementRunner
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
@@ -26,10 +30,9 @@ VALUE_COEF = 0.5
 TARGET_KL = 0.02
 TEMPERATURE = 1.0
 
-# Expert BC anchor (soft-CE to the oracle's cand_scores softmax; policy head only),
-# mirroring the AR trainer's anchor and the placement BC pretraining objective.
-EXPERT_COEF = 0.1
-EXPERT_TEMP = 10.0  # matches placement pretraining policy_temp
+# Expert BC anchor: soft-CE to the oracle's cand_scores softmax, policy head only.
+EXPERT_COEF = 1.0
+EXPERT_TEMP = 1.0  # softmax temperature for the expert anchor target
 EXPERT_DATASET_PATH = "datasets/tetris_oracle_placement"
 
 
@@ -66,7 +69,7 @@ def _load_expert_iter(path, batch_size):
 def train_step(net, batch, use_expert, expert_batch=None):
     cand_mask = batch["cand_mask"]
     with tf.GradientTape() as tape:
-        logits, values = net(
+        logits, values, piece_scores = net(
             (
                 batch["boards"],
                 batch["pieces"],
@@ -75,6 +78,7 @@ def train_step(net, batch, use_expert, expert_batch=None):
                 cand_mask,
             ),
             training=True,
+            return_scores=True,
         )
         masked = tf.where(
             cand_mask, logits / TEMPERATURE, tf.constant(-1e9, tf.float32)
@@ -82,15 +86,17 @@ def train_step(net, batch, use_expert, expert_batch=None):
         dist = distributions.Categorical(logits=masked, dtype=tf.int64)
         new_log_prob = dist.log_prob(batch["action_index"])
         ratio = tf.exp(new_log_prob - batch["old_log_prob"])
-        surrogate, _ = clipped_surrogate(ratio, batch["advantages"], PPO_CLIP)
+        surrogate, clipped_ratio = clipped_surrogate(
+            ratio, batch["advantages"], PPO_CLIP
+        )
         ppo_loss = -tf.reduce_mean(surrogate)
         entropy = tf.reduce_mean(dist.entropy())
         value_loss = clipped_value_loss(
             values[:, 0], batch["old_values"], batch["returns"], VALUE_CLIP
         )
 
-        # Expert BC anchor: soft-CE to the oracle's cand_scores softmax (the placement
-        # pretraining target), policy head only. Keeps PPO from drifting off the manifold.
+        # Expert BC anchor: soft-CE to the oracle's cand_scores softmax, policy head
+        # only. Keeps PPO from drifting off the manifold.
         if use_expert:
             e_mask = expert_batch["cand_scores"] > -1e29
             e_masked = tf.where(
@@ -109,8 +115,14 @@ def train_step(net, batch, use_expert, expert_batch=None):
             )
             e_logp = tf.nn.log_softmax(e_logits, axis=-1)
             expert_loss = tf.reduce_mean(-tf.reduce_sum(e_target * e_logp, axis=-1))
+            expert_pred = tf.argmax(e_logits, axis=-1, output_type=tf.int64)
+            expert_label = tf.argmax(e_masked, axis=-1, output_type=tf.int64)
+            expert_accuracy = tf.reduce_mean(
+                tf.cast(expert_pred == expert_label, tf.float32)
+            )
         else:
             expert_loss = tf.constant(0.0, tf.float32)
+            expert_accuracy = tf.constant(0.0, tf.float32)
 
         loss = (
             ppo_loss
@@ -121,8 +133,25 @@ def train_step(net, batch, use_expert, expert_batch=None):
 
     grads = tape.gradient(loss, net.trainable_variables)
     net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
+
     approx_kl = tf.reduce_mean(batch["old_log_prob"] - new_log_prob)
-    return ppo_loss, value_loss, entropy, approx_kl, expert_loss
+    clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
+    ret_var = tf.math.reduce_variance(batch["returns"])
+    res_var = tf.math.reduce_variance(batch["returns"] - values[:, 0])
+    explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
+
+    return {
+        "ppo_loss": ppo_loss,
+        "entropy": entropy,
+        "approx_kl": approx_kl,
+        "clipped_frac": clipped_frac,
+        "value_loss": value_loss,
+        "explained_var": explained_var,
+        "board": batch["boards"][0],
+        "scores": piece_scores,
+        "expert_loss": expert_loss,
+        "expert_accuracy": expert_accuracy,
+    }
 
 
 def main(args):
@@ -130,6 +159,20 @@ def main(args):
     queue_size, max_len = 5, 15
     num_envs, num_steps, mini_batch_size, num_epochs = 64, 64, 256, 4
     num_generations = getattr(args, "num_generations", 1_000_000)
+
+    config = SingleAgentTrainConfig(
+        num_envs=num_envs,
+        num_collection_steps=num_steps,
+        mini_batch_size=mini_batch_size,
+        num_updates=num_epochs * num_envs * num_steps // mini_batch_size,
+        gamma=GAMMA,
+        lam=LAM,
+        ppo_clip=PPO_CLIP,
+        value_clip=VALUE_CLIP,
+        entropy_coef=ENTROPY_COEF,
+        target_kl=TARGET_KL,
+        expert_coef=EXPERT_COEF,
+    )
 
     net = PlacementPolicyValueNet(
         batch_size=num_envs,
@@ -194,6 +237,8 @@ def main(args):
     expert_iter = _load_expert_iter(expert_path, mini_batch_size)
     use_expert = expert_iter is not None
 
+    wandb_run = init_run(project="Tetris", config=config)
+
     return_var = float(return_scale) ** 2
     B = num_steps * num_envs
     for gen in range(num_generations):
@@ -237,14 +282,15 @@ def main(args):
             .prefetch(tf.data.AUTOTUNE)
         )
 
-        last = (0.0, 0.0, 0.0, 0.0, 0.0)
+        updates = 0
+        step_out = None
         stop = False
         for _ in range(num_epochs):
             for batch in ds:
                 expert_batch = next(expert_iter) if use_expert else None
-                pl, vl, ent, kl, el = train_step(net, batch, use_expert, expert_batch)
-                last = (float(pl), float(vl), float(ent), float(kl), float(el))
-                if last[3] >= 1.5 * TARGET_KL:
+                step_out = train_step(net, batch, use_expert, expert_batch)
+                updates += 1
+                if float(step_out["approx_kl"]) >= 1.5 * TARGET_KL:
                     stop = True
                     break
             if stop:
@@ -258,15 +304,77 @@ def main(args):
         )
         return_scale.assign(tf.sqrt(return_var))
 
+        # Aggregate gameplay/reward metrics from the trajectory buffer.
+        avg_reward = tf.reduce_mean(tf.reduce_sum(rewards, axis=0))
+        avg_attacks = tf.reduce_mean(tf.reduce_sum(buf["attacks"], axis=0))
+        avg_clears = tf.reduce_mean(tf.reduce_sum(buf["clears"], axis=0))
+        avg_attack_reward = tf.reduce_mean(tf.reduce_sum(buf["attack_reward"], axis=0))
+        avg_total_reward = tf.reduce_mean(tf.reduce_sum(buf["total_reward"], axis=0))
+        avg_garbage_pushed = tf.reduce_mean(
+            tf.reduce_sum(buf["garbage_pushed"], axis=0)
+        )
+        avg_deaths = tf.reduce_mean(tf.reduce_sum(buf["dones"], axis=0))
+        avg_pieces = tf.reduce_mean(
+            num_steps / (tf.reduce_sum(buf["dones"], axis=0) + 1)
+        )
+        avg_probs = tf.reduce_mean(tf.exp(buf["log_prob"]))
+
+        b2b_series = buf["bcg"][..., 0]
+        combo_series = buf["bcg"][..., 1]
+        avg_b2b = tf.reduce_mean(b2b_series)
+        max_b2b = tf.reduce_max(b2b_series)
+        avg_combo = tf.reduce_mean(combo_series)
+        surge_rate = tf.reduce_mean(tf.cast(b2b_series >= 4, tf.float32))
+
+        c_scores = tf.reshape(
+            tf.reduce_mean(step_out["scores"], axis=[0, 2, 3])[0, :60], (12, 5, 1)
+        )
+        norm_c_scores = (c_scores - tf.reduce_min(c_scores)) / (
+            tf.reduce_max(c_scores) - tf.reduce_min(c_scores)
+        )
+
         if gen % 4 == 0:
-            ep_reward = float(
-                tf.reduce_sum(rewards) / (tf.reduce_sum(buf["dones"]) + 1.0)
+            log_step(
+                SingleAgentPPOLog(
+                    ppo_loss=step_out["ppo_loss"],
+                    entropy=step_out["entropy"],
+                    approx_kl=step_out["approx_kl"],
+                    clipped_frac=step_out["clipped_frac"],
+                    value_loss=step_out["value_loss"],
+                    explained_var=step_out["explained_var"],
+                    return_var=return_var,
+                    avg_probs=avg_probs,
+                    avg_reward=avg_reward,
+                    avg_attacks=avg_attacks,
+                    avg_clears=avg_clears,
+                    avg_attack_reward=avg_attack_reward,
+                    avg_total_reward=avg_total_reward,
+                    avg_garbage_pushed=avg_garbage_pushed,
+                    avg_deaths=avg_deaths,
+                    avg_pieces=avg_pieces,
+                    avg_b2b=avg_b2b,
+                    max_b2b=max_b2b,
+                    avg_combo=avg_combo,
+                    surge_rate=surge_rate,
+                    expert_loss=step_out["expert_loss"],
+                    expert_accuracy=step_out["expert_accuracy"],
+                    expert_coef=EXPERT_COEF,
+                    updates=updates,
+                    board=step_out["board"][..., 0].numpy(),
+                    scores=norm_c_scores.numpy(),
+                )
             )
             print(
-                f"Gen {gen} | Policy: {last[0]:2.3f} | Value: {last[1]:2.3f} | "
-                f"Ent: {last[2]:1.3f} | KL: {last[3]:1.4f} | Expert: {last[4]:2.3f} | "
-                f"ret/death: {ep_reward:3.1f}",
+                f"Gen {gen} | Policy: {float(step_out['ppo_loss']):2.3f} | "
+                f"Value: {float(step_out['value_loss']):2.3f} | "
+                f"Ent: {float(step_out['entropy']):1.3f} | "
+                f"KL: {float(step_out['approx_kl']):1.4f} | "
+                f"Expert: {float(step_out['expert_loss']):2.3f} | "
+                f"Reward: {float(avg_reward):3.1f} | Updates: {updates}",
                 flush=True,
             )
         if gen % 5 == 0:
             manager.save()
+
+    runner.env.close()
+    finish(wandb_run)
