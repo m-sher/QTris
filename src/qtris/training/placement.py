@@ -23,7 +23,7 @@ PPO_CLIP = 0.2
 VALUE_CLIP = 0.5
 ENTROPY_COEF = 0.01
 VALUE_COEF = 0.5
-TARGET_KL = 0.03
+TARGET_KL = 0.02
 TEMPERATURE = 1.0
 
 # Expert BC anchor (soft-CE to the oracle's cand_scores softmax; policy head only),
@@ -139,7 +139,7 @@ def main(args):
         num_layers=num_layers,
         dropout_rate=0.0,
     )
-    optimizer = keras.optimizers.Adam(3e-4)
+    optimizer = keras.optimizers.Adam(3e-5, clipnorm=0.5)
     net.compile(optimizer=optimizer, jit_compile=True)
     net(
         (
