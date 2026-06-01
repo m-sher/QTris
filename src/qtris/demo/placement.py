@@ -1,6 +1,7 @@
 import tensorflow as tf
-from qtris.models.placement.model import PlacementPolicyModel
+from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.placement_features import build_placement_inference
+from qtris.search.placement_search import SearchConfig, search_best_move
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
@@ -41,7 +42,7 @@ max_height = 18
 
 
 def main(args):
-    p_model = PlacementPolicyModel(
+    p_model = PlacementPolicyValueNet(
         batch_size=num_envs,
         piece_dim=piece_dim,
         depth=depth,
@@ -80,6 +81,11 @@ def main(args):
     )
     env = TFPyEnvironment(py_env)
     searcher = CB2BSearch()
+    search_cfg = (
+        SearchConfig(depth=args.depth, beam_width=args.beam, gate_k=args.gate)
+        if getattr(args, "search", False)
+        else None
+    )
 
     screen_w = 870
     screen_h = 800
@@ -182,12 +188,17 @@ def main(args):
             temperature=1.0,
         )
 
-        # The model can only "pick" an all-PAD slot when the search returned zero
-        # candidates - a near-death state where the stack hit max_height and no
-        # placement survives. The env locks + scores only on a HARD_DROP (else its
-        # `is_spin` is left unbound), so commit a hard drop to top out + auto-reset,
-        # the same death path the flat/ar demos take.
-        if not np.any(key_sequence.numpy()[0] == Keys.HARD_DROP):
+        if search_cfg is not None:
+            # Neural-guided search picks the move (the predict above is only for the
+            # attention panel + piece_scores). The search handles dead states itself.
+            key_sequence = tf.constant(
+                search_best_move(py_env, p_model, searcher, search_cfg)[None],
+                dtype=tf.int64,
+            )
+        elif not np.any(key_sequence.numpy()[0] == Keys.HARD_DROP):
+            # No surviving placement (near-death): the env locks + scores only on a
+            # HARD_DROP (else its `is_spin` is unbound), so commit a hard drop to top
+            # out + auto-reset, the same death path the flat/ar demos take.
             forced = np.full(max_len, Keys.PAD, dtype=np.int64)
             forced[0], forced[1] = Keys.START, Keys.HARD_DROP
             key_sequence = tf.constant(forced[None], dtype=tf.int64)
