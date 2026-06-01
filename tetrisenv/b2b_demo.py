@@ -73,6 +73,40 @@ LABEL_DIM = (140, 140, 160)
 BORDER_COLOR = (60, 60, 75)
 
 
+# ── Action distribution (softmax over candidate scores, for visualization) ──
+def softmax_dist(cand_actions, cand_scores, top_n=6, temp=1.0):
+    """Temperature softmax over all legal candidate moves (deduped by action
+    index, keeping the best score per move). Returns the top_n moves as
+    (action_idx, prob, raw_score); probs are over the full set, so the shown bars
+    need not sum to 1. Higher temp = flatter."""
+    if cand_scores is None or len(cand_scores) == 0:
+        return []
+    best = {}
+    for a, sc in zip(cand_actions, cand_scores):
+        a = int(a)
+        if a not in best or sc > best[a]:
+            best[a] = float(sc)
+    acts = np.fromiter(best.keys(), dtype=np.int64, count=len(best))
+    s = np.fromiter(best.values(), dtype=np.float64, count=len(best))
+    z = (s - s.max()) / max(temp, 1e-6)
+    p = np.exp(z)
+    p /= p.sum()
+    order = np.argsort(-p)[:top_n]
+    return [(int(acts[k]), float(p[k]), float(s[k])) for k in order]
+
+
+def decode_action(idx):
+    """Decode action index -> (is_hold, rot, col, spin) per the C encoding
+    is_hold*160 + rot*40 + norm_col*4 + spin_type."""
+    is_hold = idx // 160
+    rem = idx % 160
+    rot = rem // 40
+    rem2 = rem % 40
+    col = rem2 // 4
+    spin = rem2 % 4
+    return is_hold, rot, col, spin
+
+
 # ── Snapshot helpers ─────────────────────────────────────────
 def capture_snapshot(env):
     return {
@@ -319,23 +353,35 @@ def run_headless(args):
 
         total_garb = env._get_total_garbage()
 
-        action_idx, sequence = searcher.search(
-            board=board,
-            active_piece=active,
-            hold_piece=hold,
-            queue=queue_types,
-            b2b=b2b,
-            combo=combo,
-            total_garbage=total_garb,
-            garbage_push_delay=env._garbage_push_delay,
-            search_depth=args.search_depth,
-            beam_width=args.beam_width,
-            max_len=15,
+        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows = (
+            searcher.search_with_scores(
+                board=board,
+                active_piece=active,
+                hold_piece=hold,
+                queue=queue_types,
+                b2b=b2b,
+                combo=combo,
+                total_garbage=total_garb,
+                garbage_push_delay=env._garbage_push_delay,
+                search_depth=args.search_depth,
+                beam_width=args.beam_width,
+                max_len=15,
+            )
         )
 
         if action_idx < 0:
             print(f"\n** No valid move found at turn {step} — game over **")
             break
+
+        # Action distribution: raw search score (softmax %) per candidate
+        dist = softmax_dist(cand_actions, cand_scores, top_n=5, temp=args.dist_temp)
+        dist_str = "  ".join(
+            f"[H{h}R{r}C{c}S{sp}] {sc:7.1f} ({p * 100:4.1f}%)"
+            for (a, p, sc) in dist
+            for (h, r, c, sp) in [decode_action(a)]
+        )
+        n_legal = len(np.unique(cand_actions)) if len(cand_actions) else 0
+        print(f"  move dist (top5 of {n_legal} legal): {dist_str}")
 
         ts = env._step(sequence)
 
@@ -407,6 +453,9 @@ def main():
     ap.add_argument('--garbage-max', type=int, default=4)
     ap.add_argument('--garbage-delay', type=int, default=1)
     ap.add_argument('--seed', type=int, default=42)
+    ap.add_argument('--dist-temp', type=float, default=30.0,
+                    help='Softmax temperature for the move distribution display '
+                         '(scores are O(tens); ~30 spreads, 1 = raw/near-argmax)')
     args = ap.parse_args()
 
     if args.headless:
@@ -447,6 +496,8 @@ def main():
                                   1, 0, 5, 1, font, small_font),
         "seed": Spinner(sp_x, sp_start_y + sp_gap * 8, "Seed",
                         42, 0, 9999, 1, font, small_font),
+        "dist_temp": Spinner(sp_x, sp_start_y + sp_gap * 9, "Dist Temp",
+                             30, 1, 300, 5, font, small_font),
     }
 
     # ── Buttons ──────────────────────────────────────────────
@@ -500,10 +551,12 @@ def main():
     step_timer = 0.0
     game_over = False
     step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
+    last_dist = []  # top candidate (action_idx, prob) from the last search
 
     def do_step_forward():
         nonlocal history, history_idx, last_action_idx, last_sequence
         nonlocal last_attack, last_clears, total_attack, total_clears, game_over
+        nonlocal last_dist
 
         if game_over:
             return
@@ -525,22 +578,27 @@ def main():
         sd = spinners["search_depth"].value
         bw = spinners["beam_width"].value
 
-        action_idx, sequence = searcher.search(
-            board=board,
-            active_piece=active,
-            hold_piece=hold,
-            queue=queue_types,
-            b2b=b2b,
-            combo=combo,
-            total_garbage=total_garb,
-            garbage_push_delay=env._garbage_push_delay,
-            search_depth=sd,
-            beam_width=bw,
-            max_len=15,
+        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows = (
+            searcher.search_with_scores(
+                board=board,
+                active_piece=active,
+                hold_piece=hold,
+                queue=queue_types,
+                b2b=b2b,
+                combo=combo,
+                total_garbage=total_garb,
+                garbage_push_delay=env._garbage_push_delay,
+                search_depth=sd,
+                beam_width=bw,
+                max_len=15,
+            )
         )
 
         last_action_idx = action_idx
         last_sequence = sequence
+        last_dist = softmax_dist(
+            cand_actions, cand_scores, top_n=6, temp=spinners["dist_temp"].value
+        )
 
         # Execute action
         ts = env._step(sequence)
@@ -757,15 +815,30 @@ def main():
         ry += 20
 
         if last_action_idx >= 0:
-            is_hold = last_action_idx // 80
-            rem = last_action_idx % 80
-            rot = rem // 20
-            rem2 = rem % 20
-            nc = rem2 // 2
-            is_spin = rem2 % 2
-            act_str = f"H={is_hold} R={rot} C={nc} Sp={is_spin}"
+            h, r, c, sp = decode_action(last_action_idx)
+            act_str = f"H={h} R={r} C={c} Sp={sp}"
             act_detail = stat_font.render(act_str, True, LABEL_DIM)
             screen.blit(act_detail, (rx, ry))
+            ry += 20
+
+        # Action distribution: raw search score + softmax % per candidate
+        if last_dist:
+            ry += 6
+            dist_lbl = stat_font.render("MOVE DIST (score / %):", True, ACCENT)
+            screen.blit(dist_lbl, (rx, ry))
+            ry += 20
+            bar_w = RIGHT_PANEL_W - 40
+            top_p = last_dist[0][1] if last_dist else 1.0
+            for a, p, sc in last_dist:
+                h, r, c, sp = decode_action(a)
+                # probability bar (relative to the top candidate)
+                w = int(bar_w * (p / top_p)) if top_p > 0 else 0
+                pygame.draw.rect(screen, (50, 90, 140), (rx, ry, w, 14), border_radius=3)
+                txt = stat_font.render(
+                    f"H{h}R{r}C{c}S{sp} {sc:6.0f} {p * 100:3.0f}%", True, TEXT_COLOR
+                )
+                screen.blit(txt, (rx, ry - 1))
+                ry += 18
 
         # Game over overlay
         if game_over:

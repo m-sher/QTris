@@ -24,6 +24,8 @@ class GameResult(ctypes.Structure):
         ('end_height', ctypes.c_int),
         ('avg_height', ctypes.c_float),
         ('max_height', ctypes.c_int),
+        ('max_combo', ctypes.c_int),
+        ('avg_combo', ctypes.c_float),
     ]
 
 
@@ -66,6 +68,12 @@ class CB2BSearch:
                 ctypes.c_int,  # max_len
                 ctypes.POINTER(ctypes.c_int),  # out_action_index
                 np.ctypeslib.ndpointer(dtype=np.int64, ndim=1, flags="C_CONTIGUOUS"),
+                ctypes.c_int,  # max_roots
+                ctypes.POINTER(ctypes.c_int),    # out_num_roots
+                ctypes.POINTER(ctypes.c_int),    # out_root_action_indices
+                ctypes.POINTER(ctypes.c_float),  # out_root_scores
+                ctypes.POINTER(ctypes.c_int64),  # out_root_sequences
+                ctypes.POINTER(ctypes.c_int),    # out_root_landing_rows
             ]
             self._lib.b2b_search_c.restype = None
 
@@ -184,9 +192,91 @@ class CB2BSearch:
             max_len,
             ctypes.byref(out_action),
             out_sequence,
+            0, None, None, None, None, None,  # no per-root output
         )
 
         return out_action.value, out_sequence
+
+    def search_with_scores(
+        self,
+        board: np.ndarray,
+        active_piece: int,
+        hold_piece: int,
+        queue: np.ndarray,
+        b2b: int,
+        combo: int,
+        total_garbage: int,
+        garbage_push_delay: int = 1,
+        bag_seen: int = 0,
+        search_depth: int = 7,
+        beam_width: int = 128,
+        max_len: int = 15,
+        max_roots: int = 512,
+    ) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Run the search and also return per-root candidates.
+
+        Returns (best_action_idx, best_sequence, cand_action_indices,
+        cand_scores, cand_sequences, cand_landing_rows) where the candidate arrays
+        cover every root placement that survived to the final beam. `cand_scores`
+        are RAW search scores (no softmax). The value target is `cand_scores.max()`.
+        `cand_landing_rows` is each placement's BFS lock row (0..board_height-1).
+        `best_sequence` is the chosen move's key sequence (PAD-filled to max_len).
+        """
+        if not self._lib:
+            raise RuntimeError("b2b_search C library not loaded")
+
+        occupied = (board != 0).astype(np.uint16)
+        mask_rows = (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
+        if not mask_rows.flags["C_CONTIGUOUS"]:
+            mask_rows = np.ascontiguousarray(mask_rows)
+        board_height = board.shape[0]
+        queue_arr = np.asarray(queue, dtype=np.int32)
+        if not queue_arr.flags["C_CONTIGUOUS"]:
+            queue_arr = np.ascontiguousarray(queue_arr)
+
+        out_action = ctypes.c_int(-1)
+        out_sequence = np.full(max_len, 11, dtype=np.int64)
+
+        num_roots = ctypes.c_int(0)
+        root_actions = np.zeros(max_roots, dtype=np.int32)
+        root_scores = np.zeros(max_roots, dtype=np.float32)
+        root_sequences = np.full(max_roots * max_len, 11, dtype=np.int64)
+        root_landing_rows = np.zeros(max_roots, dtype=np.int32)
+
+        self._lib.b2b_search_c(
+            mask_rows,
+            board_height,
+            active_piece,
+            hold_piece,
+            queue_arr,
+            len(queue_arr),
+            b2b,
+            combo,
+            total_garbage,
+            garbage_push_delay,
+            bag_seen,
+            search_depth,
+            beam_width,
+            max_len,
+            ctypes.byref(out_action),
+            out_sequence,
+            max_roots,
+            ctypes.byref(num_roots),
+            root_actions.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            root_scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            root_sequences.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
+            root_landing_rows.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+        )
+
+        n = num_roots.value
+        return (
+            out_action.value,
+            out_sequence,
+            root_actions[:n],
+            root_scores[:n],
+            root_sequences[: n * max_len].reshape(n, max_len),
+            root_landing_rows[:n],
+        )
 
     def decompose(
         self,
