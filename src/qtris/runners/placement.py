@@ -166,14 +166,14 @@ class PlacementRunner:
             b["dones"].append(tf.cast(time_step.is_last(), tf.float32)[..., None])
 
         # bootstrap last value (state-only; no candidates needed)
-        piece_dec, _ = self.net.process_obs(
+        piece_dec = self.net.process_obs(
             (
                 time_step.observation["board"],
                 time_step.observation["pieces"],
                 time_step.observation["b2b_combo_garbage"],
             ),
             training=False,
-        )
+        )[0]
         last_values = self.net.score_value(piece_dec, training=False)
 
         out = {k: tf.stack(v) for k, v in b.items()}  # (T, N, ...)

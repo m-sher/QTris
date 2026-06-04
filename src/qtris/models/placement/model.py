@@ -109,12 +109,56 @@ class PlacementPolicyValueNet(QtrisModelBase):
         )
         self.value_top = layers.Dense(1, name="value")
 
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+            ),
+            tf.TensorSpec(shape=(), dtype=tf.bool),
+        ],
+    )
+    def process_obs(self, inputs, training=False):
+        """Encoder pass returning the piece latent AND the board patch latent.
+
+        Overrides the base (which returns only `piece_dec`) so the candidate scorer
+        can cross-attend to the board patches, not just the piece/bcg summary.
+        """
+        board, piece, b2b_combo_garbage = inputs
+
+        piece_scores = []
+        patches = self.make_patches(board, training=training)
+        board_dec = self.patch_pos_encoding(patches)
+
+        piece_embedding = self.piece_embedding(piece, training=training)
+        piece_dec = self.piece_pos_encoding(piece_embedding)
+
+        bcg_tokens = self._tokenize_bcg(b2b_combo_garbage, training=training)
+        piece_dec = tf.concat([piece_dec, bcg_tokens], axis=1)
+        board_dec = tf.concat([board_dec, bcg_tokens], axis=1)
+
+        for board_dec_layer, piece_dec_layer in zip(
+            self.board_decoder_layers, self.piece_decoder_layers
+        ):
+            board_dec, last_board_attn = board_dec_layer(
+                [piece_dec, board_dec], training=training
+            )
+            piece_dec, last_piece_attn = piece_dec_layer(
+                [board_dec, piece_dec], training=training
+            )
+            piece_scores.append(last_piece_attn)
+
+        return piece_dec, board_dec, piece_scores
+
     @tf.function(jit_compile=True)
-    def score_candidates(self, piece_dec, cand_placements, cand_mask, training=False):
+    def score_candidates(self, context, cand_placements, cand_mask, training=False):
+        # context = board patches + pieces + bcg tokens (the full encoded state).
         move_emb = self.move_encoder(cand_placements, training=training)  # (B,C,depth)
         cand_dec = move_emb
         for layer in self.cand_decoder_layers:
-            cand_dec, _ = layer([piece_dec, cand_dec], training=training)
+            cand_dec, _ = layer([context, cand_dec], training=training)
         logits = tf.squeeze(
             self.score_top(
                 self.score_trunk(cand_dec, training=training), training=training
@@ -133,11 +177,12 @@ class PlacementPolicyValueNet(QtrisModelBase):
     def call(self, inputs, training=False, return_scores=False):
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
 
-        piece_dec, piece_scores = self.process_obs(
+        piece_dec, board_dec, piece_scores = self.process_obs(
             (board, piece, b2b_combo_garbage), training=training
         )
+        context = tf.concat([board_dec, piece_dec], axis=1)  # board + pieces + bcg
         logits = self.score_candidates(
-            piece_dec, cand_placements, cand_mask, training=training
+            context, cand_placements, cand_mask, training=training
         )
         value = self.score_value(piece_dec, training=training)
 
@@ -165,11 +210,12 @@ class PlacementPolicyValueNet(QtrisModelBase):
     def predict(self, inputs, greedy=False, cand_sequences=None, temperature=1.0):
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
 
-        piece_dec, piece_scores = self.process_obs(
+        piece_dec, board_dec, piece_scores = self.process_obs(
             (board, piece, b2b_combo_garbage), training=False
         )
+        context = tf.concat([board_dec, piece_dec], axis=1)  # board + pieces + bcg
         logits = self.score_candidates(
-            piece_dec, cand_placements, cand_mask, training=False
+            context, cand_placements, cand_mask, training=False
         )
 
         masked_logits = tf.where(
