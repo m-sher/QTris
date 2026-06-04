@@ -18,12 +18,18 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
-from qtris.data.placement_features import CANDIDATE_CAPACITY, build_placement_inference
+from qtris.data.placement_features import (
+    CANDIDATE_CAPACITY,
+    build_placement_descriptors,
+    build_placement_inference,
+)
 from qtris.search.placement_search import (
     _policy_value_batch,
     clone_sim_env,
     net_input_from_env,
+    placement_step,
 )
 
 HARD_DROP = Keys.HARD_DROP
@@ -43,14 +49,14 @@ class MCTSConfig:
 
 def _enumerate(env):
     """Full legal placement set via the env's pathfinder (no death-pruning; MCTS
-    discovers death itself). Returns (placements[128,18], mask[128], seqs[128,max_len])
-    or None if the state has no legal placement (dead)."""
+    discovers death itself). Returns (placements[128,18], mask[128], seqs[128,max_len],
+    desc[128,5]) or None if the state has no legal placement (dead)."""
     scores, rows, seqs = env._enumerate_placement_candidates()
     valid = np.flatnonzero(scores > -1e29)
     if valid.size == 0:
         return None
     queue = env._queue
-    return build_placement_inference(
+    placements, mask, seqs = build_placement_inference(
         valid,
         scores[valid],
         rows[valid],
@@ -61,6 +67,8 @@ def _enumerate(env):
         row_norm=ROW_NORM,
         max_len=env._max_len,
     )
+    desc = build_placement_descriptors(valid, scores[valid], rows[valid])
+    return placements, mask, seqs, desc
 
 
 class _MinMaxStats:
@@ -86,6 +94,7 @@ class _Node:
         "terminal",
         "value",
         "seqs",
+        "desc",
         "legal",
         "prior",
         "N",
@@ -102,6 +111,7 @@ class _Node:
         self.stats = stats
         self.value = 0.0
         self.seqs = None
+        self.desc = None
         self.legal = np.empty(0, dtype=np.int64)
         self.children = {}
         self.prior = np.zeros(CANDIDATE_CAPACITY, dtype=np.float32)
@@ -127,13 +137,14 @@ class PlacementMCTS:
     def __init__(self, net, cfg: MCTSConfig):
         self.net = net
         self.cfg = cfg
+        self.searcher = CB2BSearch()
 
     def _scale_reward(self, reward, return_scale):
         return float(np.clip(reward / (return_scale + 1e-8), -REWARD_CLIP, REWARD_CLIP))
 
     def _set_node(self, node, value, logits, enum):
         """Populate a freshly enumerated, non-terminal node with value + priors."""
-        placements, mask, seqs = enum
+        placements, mask, seqs, desc = enum
         legal = _legal_slots(mask, seqs)
         if legal.size == 0:
             node.terminal = True
@@ -141,6 +152,7 @@ class PlacementMCTS:
             return False
         node.value = float(value)
         node.seqs = seqs
+        node.desc = desc
         node.legal = legal
         node.prior[legal] = _softmax(logits[legal])
         return True
@@ -192,8 +204,8 @@ class PlacementMCTS:
         stepped = []
         for path, parent, slot in requests:
             child_env = clone_sim_env(parent.env)
-            ts = child_env._step(np.asarray(parent.seqs[slot], dtype=np.int64))
-            r = self._scale_reward(float(ts.reward["total_reward"]), return_scale)
+            reward, died = placement_step(child_env, self.searcher, parent.desc[slot])
+            r = self._scale_reward(reward, return_scale)
             stepped.append(
                 {
                     "path": path,
@@ -201,7 +213,7 @@ class PlacementMCTS:
                     "slot": slot,
                     "env": child_env,
                     "reward": r,
-                    "terminal": bool(ts.is_last()),
+                    "terminal": died,
                     "enum": None,
                 }
             )
@@ -294,7 +306,7 @@ class PlacementMCTS:
                 legal
             ] + self.cfg.dirichlet_eps * noise
             roots[i] = node
-            placements, mask, _ = enums[i]
+            placements, mask, _, _ = enums[i]
             b, p, g = net_input_from_env(clones[i])
             obs[i] = {
                 "board": b[0],
