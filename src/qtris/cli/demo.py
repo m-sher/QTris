@@ -49,7 +49,24 @@ def main() -> None:
         default=8,
         help="placement --search: top-K candidates expanded per node.",
     )
+    parser.add_argument(
+        "--mcts-sims",
+        type=int,
+        default=0,
+        help="placement only: play with PUCT MCTS (net policy priors + value leaves) "
+        "at this simulation budget, greedy by visit count - the AlphaZero way to play "
+        "an `--algo az` checkpoint. 0 = off (use greedy top-1 or --search).",
+    )
+    parser.add_argument(
+        "--mcts-cpuct",
+        type=float,
+        default=1.5,
+        help="placement --mcts-sims: PUCT exploration constant.",
+    )
     args = parser.parse_args()
+
+    if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:
+        parser.error("use either --search or --mcts-sims, not both.")
 
     if args.family == "vs":
         if args.left is None or args.right is None:
