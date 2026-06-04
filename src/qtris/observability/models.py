@@ -53,15 +53,34 @@ class OneVsOneTrainConfig(PPOConfigBase):
     max_pool_size: int
 
 
-class PPOLogBase(BaseModel):
+class WandbPayloadModel(BaseModel):
+    """Base for any wandb.log payload model: serializes to a dict and wraps the
+    fields named in `_image_fields` as `wandb.Image` at the boundary, so callers
+    never import wandb directly."""
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    _image_fields: tuple[str, ...] = ()
+
+    def to_wandb_payload(self) -> dict[str, Any]:
+        """Dict shaped for `wandb.log()`, with image fields wrapped."""
+        import wandb
+
+        payload = self.dict()
+        for key in self._image_fields:
+            arr = payload.get(key)
+            if arr is not None:
+                payload[key] = wandb.Image(arr)
+        return payload
+
+
+class PPOLogBase(WandbPayloadModel):
     """Metrics logged every generation; shared across all PPO trainers.
 
     `board` and `scores` are numpy arrays; the wandb_backend wraps them in
     `wandb.Image` at log time so callers don't need to import wandb directly.
     """
-
-    class Config:
-        arbitrary_types_allowed = True
 
     # PPO optimization
     ppo_loss: float
@@ -100,17 +119,6 @@ class PPOLogBase(BaseModel):
     # Override in subclasses if they add more image fields.
     _image_fields: tuple[str, ...] = ("board", "scores")
 
-    def to_wandb_payload(self) -> dict[str, Any]:
-        """Dict shaped for `wandb.log()`, with image fields wrapped."""
-        import wandb
-
-        payload = self.dict()
-        for key in self._image_fields:
-            arr = payload.get(key)
-            if arr is not None:
-                payload[key] = wandb.Image(arr)
-        return payload
-
 
 class SingleAgentPPOLog(PPOLogBase):
     """ar/flat per-step metrics."""
@@ -144,3 +152,55 @@ class OneVsOnePPOLog(PPOLogBase):
     win_rate: float
     decisive_wr: float
     wr_ema: float
+
+
+class AlphaZeroTrainConfig(BaseModel):
+    """Single-player AlphaZero (MCTS self-play) trainer hyperparams."""
+
+    num_games: int
+    horizon: int
+    num_simulations: int
+    c_puct: float
+    gamma: float
+    dirichlet_alpha: float
+    dirichlet_eps: float
+    temp_moves: int
+    mini_batch_size: int
+    num_epochs: int
+    value_coef: float
+    learning_rate: float
+
+
+class SingleAgentAZLog(WandbPayloadModel):
+    """Single-player AlphaZero per-generation metrics."""
+
+    # Optimization
+    policy_loss: float
+    value_loss: float
+    entropy: float
+    explained_var: float
+    value_mean: float
+    return_var: float
+
+    # Reward / gameplay channels
+    avg_total_reward: float
+    avg_attacks: float
+    avg_clears: float
+    avg_deaths: float
+    avg_pieces: float
+    avg_b2b: float
+    max_b2b: float
+    avg_combo: float
+    surge_rate: float
+
+    # Search
+    avg_visits: float
+    dead_rate: float
+
+    # Training progress
+    updates: int
+
+    # Visualization (wrapped at log time)
+    board: np.ndarray
+
+    _image_fields: tuple[str, ...] = ("board",)
