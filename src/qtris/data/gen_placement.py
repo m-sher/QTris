@@ -123,7 +123,7 @@ def collect(
 
 def main(args):
     dataset_path = (
-        str(args.output) if args.output else "datasets/tetris_expert_dataset_placement"
+        str(args.output) if args.output else "datasets/tetris_oracle_placement"
     )
     num_steps = args.steps
     seed = getattr(args, "seed", 0)

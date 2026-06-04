@@ -426,7 +426,7 @@ def main(cli_args):
         },
         "placement": {
             "policy_checkpoint": "checkpoints/placement_pretrained_policy",
-            "dataset_path": "datasets/tetris_expert_dataset_placement",
+            "dataset_path": "datasets/tetris_oracle_placement",
             "build_model": _build_placement_model,
         },
     }
