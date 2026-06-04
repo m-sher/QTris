@@ -13,12 +13,41 @@ import pygame
 import numpy as np
 import copy
 import sys
+import os
+import json
 import argparse
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Pieces import PieceType
 from TetrisEnv.RotationSystem import RotationSystem
+
+
+def weights_to_file(searcher, path):
+    data = {name: searcher.get_weight(name) for name in searcher.weight_names()}
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
+def weights_from_file(searcher, path):
+    """Apply weights from the JSON file; returns how many names were applied."""
+    if not os.path.exists(path):
+        return 0
+    with open(path) as f:
+        data = json.load(f)
+    return sum(1 for name, val in data.items() if searcher.set_weight(name, float(val)))
+
+
+def sync_weights_file(searcher, path):
+    """Load the file if it exists (so edits persist + apply), else seed it with the
+    current weights so there is always a file to edit. Returns a short status string
+    (basename only; the caller prints the full path)."""
+    name = os.path.basename(path)
+    if os.path.exists(path):
+        return f"loaded {weights_from_file(searcher, path)} weights from {name}"
+    weights_to_file(searcher, path)
+    return f"seeded {name} with current weights"
+
 
 # ── Tetris piece colors (guideline) ─────────────────────────
 PIECE_COLORS = {
@@ -33,7 +62,7 @@ PIECE_COLORS = {
     8: (100, 100, 100),    # G  - garbage gray
 }
 
-# Piece cell definitions (rot 0) for mini previews — from RotationSystem
+# Piece cell definitions (rot 0) for mini previews - from RotationSystem
 PIECE_PREVIEW_CELLS = {
     PieceType.I: [(1, 0), (1, 1), (1, 2), (1, 3)],
     PieceType.J: [(0, 0), (1, 0), (1, 1), (1, 2)],
@@ -57,7 +86,9 @@ BOARD_W = BOARD_COLS * CELL
 BOARD_H = BOARD_ROWS * CELL
 RIGHT_PANEL_W = 200
 WIN_W = LEFT_PANEL_W + BOARD_W + RIGHT_PANEL_W
-WIN_H = BOARD_H + 40  # small bottom margin
+BREAKDOWN_TOP = BOARD_H + 12          # full-width score-breakdown strip below the board
+BREAKDOWN_H = 210
+WIN_H = BREAKDOWN_TOP + BREAKDOWN_H
 
 # Colors
 BG = (18, 18, 24)
@@ -326,6 +357,8 @@ def run_headless(args):
     )
     env.reset()
     searcher = CB2BSearch()
+    _wf = os.path.abspath("b2b_weights.json")
+    print(f"weights config: {_wf}\n  {sync_weights_file(searcher, _wf)}")
 
     total_attack = 0.0
     max_b2b = 0
@@ -370,7 +403,7 @@ def run_headless(args):
         )
 
         if action_idx < 0:
-            print(f"\n** No valid move found at turn {step} — game over **")
+            print(f"\n** No valid move found at turn {step} - game over **")
             break
 
         # Action distribution: raw search score (softmax %) per candidate
@@ -474,7 +507,7 @@ def main():
 
     # ── Config spinners ──────────────────────────────────────
     sp_x = 18
-    sp_start_y = 130
+    sp_start_y = 178  # leaves room for the 3 button rows above
     sp_gap = 50
 
     spinners = {
@@ -511,11 +544,16 @@ def main():
     btn_reset = Button((sp_x, btn_y + btn_h + btn_gap, 100, btn_h), "Reset", font)
     btn_restart = Button((sp_x + 106, btn_y + btn_h + btn_gap, 140, btn_h),
                          "New Game", font)
+    btn_reload = Button((sp_x, btn_y + 2 * (btn_h + btn_gap), 160, btn_h),
+                        "Reload Wts", font)
 
-    buttons = [btn_play, btn_step_fwd, btn_step_back, btn_reset, btn_restart]
+    buttons = [btn_play, btn_step_fwd, btn_step_back, btn_reset, btn_restart, btn_reload]
 
     # ── State ────────────────────────────────────────────────
     searcher = CB2BSearch()
+    weights_file = os.path.abspath("b2b_weights.json")  # abs so the path is unambiguous
+    weights_msg = sync_weights_file(searcher, weights_file)
+    print(f"weights config: {weights_file}\n  {weights_msg}")
 
     def create_env():
         qs = spinners["queue_size"].value
@@ -551,22 +589,20 @@ def main():
     step_timer = 0.0
     game_over = False
     step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
-    last_dist = []  # top candidate (action_idx, prob) from the last search
+    # Last search candidates + their depth-0 component breakdown (for the bottom strip)
+    last_cand_actions = None
+    last_cand_scores = None
+    last_components = None  # (n, NUM_DECOMPOSE) aligned to candidates, or None
 
-    def do_step_forward():
-        nonlocal history, history_idx, last_action_idx, last_sequence
-        nonlocal last_attack, last_clears, total_attack, total_clears, game_over
-        nonlocal last_dist
-
+    def refresh_search():
+        """Search + decompose the CURRENT position and update the move/strip state,
+        WITHOUT advancing the game. Used by step-forward and after a weight reload so
+        the breakdown reflects the new weights immediately (no need to step)."""
+        nonlocal last_action_idx, last_sequence
+        nonlocal last_cand_actions, last_cand_scores, last_components
         if game_over:
             return
 
-        # If we stepped back, truncate future history
-        if history_idx < len(history) - 1:
-            history = history[:history_idx + 1]
-            step_info_history_truncate = len(history)
-
-        # Run b2b search
         board = env._board
         active = env._active_piece.piece_type.value
         hold = env._hold_piece.value
@@ -596,12 +632,44 @@ def main():
 
         last_action_idx = action_idx
         last_sequence = sequence
-        last_dist = softmax_dist(
-            cand_actions, cand_scores, top_n=6, temp=spinners["dist_temp"].value
-        )
+        last_cand_actions = cand_actions
+        last_cand_scores = cand_scores
+
+        # Depth-0 component breakdown for the strip. Rows align with the candidates
+        # by enumeration index (both enumerate active-then-hold via find_placements);
+        # guard on equal length so a mismatch falls back to totals-only.
+        comps = None
+        if hasattr(searcher, "decompose"):
+            try:
+                comps = searcher.decompose(
+                    board=board, active_piece=active, hold_piece=hold,
+                    queue=queue_types, b2b=b2b, combo=combo, total_garbage=total_garb,
+                    garbage_push_delay=env._garbage_push_delay,
+                )
+            except Exception:
+                comps = None
+            if comps is None or len(comps) != len(cand_actions):
+                comps = None
+        last_components = comps
+
+    def do_step_forward():
+        nonlocal history, history_idx
+        nonlocal last_attack, last_clears, total_attack, total_clears, game_over
+
+        if game_over:
+            return
+
+        # If we stepped back, truncate future history
+        if history_idx < len(history) - 1:
+            history = history[:history_idx + 1]
+
+        # Search the current position (updates the strip), then play the chosen move.
+        refresh_search()
+        if last_sequence is None:
+            return
 
         # Execute action
-        ts = env._step(sequence)
+        ts = env._step(last_sequence)
 
         # Extract reward info
         atk = float(ts.reward["attack"])
@@ -611,7 +679,7 @@ def main():
         total_attack += atk
         total_clears += int(clr)
 
-        info = {"attack": atk, "clears": int(clr), "action_idx": action_idx}
+        info = {"attack": atk, "clears": int(clr), "action_idx": last_action_idx}
         step_info_history.append(info)
 
         # Check game over
@@ -651,6 +719,7 @@ def main():
         last_action_idx = -1
         last_sequence = None
         step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
+        refresh_search()
 
     def do_new_game():
         nonlocal env, history, history_idx, game_over, playing
@@ -670,6 +739,11 @@ def main():
         last_action_idx = -1
         last_sequence = None
         step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
+        refresh_search()
+
+    # Populate the breakdown strip for the initial position (so it's not empty and
+    # a weight reload shows changes even before the first step).
+    refresh_search()
 
     # ── Main loop ────────────────────────────────────────────
     running = True
@@ -709,11 +783,15 @@ def main():
                     do_reset()
                 elif btn_restart.clicked(mouse_pos):
                     do_new_game()
+                elif btn_reload.clicked(mouse_pos):
+                    n_loaded = weights_from_file(searcher, weights_file)
+                    weights_msg = f"reloaded {n_loaded} weights from {os.path.basename(weights_file)}"
+                    refresh_search()  # re-evaluate the current board so the strip updates now
                 else:
                     for sp in spinners.values():
                         sp.handle_click(mouse_pos)
 
-        # Auto-play — at most one step per frame so the screen always refreshes
+        # Auto-play - at most one step per frame so the screen always refreshes
         if playing and not game_over:
             speed = spinners["speed"].value
             step_timer += dt
@@ -821,24 +899,7 @@ def main():
             screen.blit(act_detail, (rx, ry))
             ry += 20
 
-        # Action distribution: raw search score + softmax % per candidate
-        if last_dist:
-            ry += 6
-            dist_lbl = stat_font.render("MOVE DIST (score / %):", True, ACCENT)
-            screen.blit(dist_lbl, (rx, ry))
-            ry += 20
-            bar_w = RIGHT_PANEL_W - 40
-            top_p = last_dist[0][1] if last_dist else 1.0
-            for a, p, sc in last_dist:
-                h, r, c, sp = decode_action(a)
-                # probability bar (relative to the top candidate)
-                w = int(bar_w * (p / top_p)) if top_p > 0 else 0
-                pygame.draw.rect(screen, (50, 90, 140), (rx, ry, w, 14), border_radius=3)
-                txt = stat_font.render(
-                    f"H{h}R{r}C{c}S{sp} {sc:6.0f} {p * 100:3.0f}%", True, TEXT_COLOR
-                )
-                screen.blit(txt, (rx, ry - 1))
-                ry += 18
+        # (Move distribution + component breakdown now render in the bottom strip.)
 
         # Game over overlay
         if game_over:
@@ -850,11 +911,66 @@ def main():
             gy = board_oy + BOARD_H // 2 - go_text.get_height() // 2
             screen.blit(go_text, (gx, gy))
 
-        # Bottom bar: keyboard shortcuts
-        help_text = small_font.render(
-            "Space=Play/Pause  Left/Right=Step  R=Reset  Esc=Quit", True, LABEL_DIM
+        # ── Bottom strip: per-move score breakdown ──────────────
+        strip_y = BREAKDOWN_TOP
+        pygame.draw.rect(screen, PANEL_BG, (0, strip_y, WIN_W, WIN_H - strip_y))
+        pygame.draw.line(screen, BORDER_COLOR, (0, strip_y), (WIN_W, strip_y))
+        sx = 10
+        title = stat_font.render(
+            "SCORE BREAKDOWN - top moves (beam total | depth-0 components)",
+            True, ACCENT,
         )
-        screen.blit(help_text, (LEFT_PANEL_W + 10, WIN_H - 20))
+        screen.blit(title, (sx, strip_y + 5))
+
+        comp_names = getattr(searcher, "COMPONENT_NAMES", [])
+        has_comps = last_components is not None and len(comp_names) > 0
+        move_x, beam_x, comp_x0 = sx, sx + 86, sx + 150
+        comp_w = (WIN_W - comp_x0 - 8) / len(comp_names) if comp_names else 0
+        header_y = strip_y + 28
+
+        # Column header (component legend), or a note when decompose is unavailable.
+        if has_comps:
+            screen.blit(small_font.render("move", True, LABEL_DIM), (move_x, header_y))
+            screen.blit(small_font.render("beam", True, LABEL_DIM), (beam_x, header_y))
+            for i, nm in enumerate(comp_names):
+                screen.blit(small_font.render(nm[:4], True, LABEL_DIM),
+                            (int(comp_x0 + i * comp_w), header_y))
+        else:
+            note = ("decompose: b2b engine only - showing beam totals"
+                    if last_cand_scores is not None else "step to populate")
+            screen.blit(small_font.render(note, True, LABEL_DIM), (move_x, header_y))
+
+        # Top-5 candidates by beam score; the chosen move is accented.
+        row_y = header_y + 18
+        if last_cand_scores is not None and len(last_cand_scores) > 0:
+            order = np.argsort(-last_cand_scores)[:5]
+            for idx in order:
+                a = int(last_cand_actions[idx])
+                sc = float(last_cand_scores[idx])
+                h, r, c, sp = decode_action(a)
+                col = ACCENT if a == last_action_idx else TEXT_COLOR
+                screen.blit(stat_font.render(f"H{h}R{r}C{c}S{sp}", True, col), (move_x, row_y))
+                screen.blit(stat_font.render(f"{sc:7.1f}", True, col), (beam_x, row_y))
+                if has_comps:
+                    for i, v in enumerate(last_components[idx]):
+                        v = float(v)
+                        if abs(v) < 0.5:
+                            cc = (95, 95, 110)
+                        elif v < 0:
+                            cc = (220, 120, 120)
+                        else:
+                            cc = (120, 205, 135)
+                        screen.blit(small_font.render(f"{v:.0f}", True, cc),
+                                    (int(comp_x0 + i * comp_w), row_y))
+                row_y += 20
+
+        # Status line: weight-config message (left) + keyboard help (right).
+        status_y = WIN_H - 18
+        screen.blit(small_font.render(weights_msg, True, LABEL_DIM), (sx, status_y))
+        help_text = small_font.render(
+            "Space=Play/Pause  L/R=Step  R=Reset  Esc=Quit", True, LABEL_DIM
+        )
+        screen.blit(help_text, (WIN_W - help_text.get_width() - 10, status_y))
 
         pygame.display.flip()
 
