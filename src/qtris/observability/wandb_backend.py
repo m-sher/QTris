@@ -10,16 +10,17 @@ from __future__ import annotations
 from typing import Any
 
 import wandb
+from pydantic import BaseModel
 
-from qtris.observability.models import PPOConfigBase, PPOLogBase
+from qtris.observability.models import WandbPayloadModel
 
 
-def init_run(*, project: str, config: PPOConfigBase, **kwargs: Any):
+def init_run(*, project: str, config: BaseModel, **kwargs: Any):
     """Open a wandb run. Returns the run handle so callers can `.finish()`."""
     return wandb.init(project=project, config=config.dict(), **kwargs)
 
 
-def log_step(metrics: PPOLogBase, *, step: int | None = None) -> None:
+def log_step(metrics: WandbPayloadModel, *, step: int | None = None) -> None:
     payload = metrics.to_wandb_payload()
     if step is None:
         wandb.log(payload)
