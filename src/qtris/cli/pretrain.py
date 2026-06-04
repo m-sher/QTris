@@ -11,7 +11,26 @@ def main() -> None:
         default=None,
         help="Path to expert dataset (defaults: datasets/tetris_expert_dataset_b2b for ar; "
         "datasets/tetris_expert_dataset_flat for flat; "
-        "datasets/tetris_expert_dataset_placement for placement).",
+        "datasets/tetris_oracle_placement for placement).",
+    )
+    parser.add_argument(
+        "--val-dataset",
+        type=Path,
+        default=None,
+        help="placement only: path to a SEPARATE, frozen held-out dataset for "
+        "validation top1/top3 (collect it once to its own path and NEVER merge it into "
+        "--dataset). An in-dataset split is not valid here because warm-started runs "
+        "have already trained on the whole training file. Omit to skip val reporting.",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="Checkpoint to resume/warm-start the policy from: a checkpoint directory "
+        "(its latest is used) or a specific ckpt prefix (e.g. "
+        "checkpoints/placement_pretrained_policy/ckpt-2335). Defaults to the family's "
+        "own save-dir latest. New checkpoints still save to the family's default dir; "
+        "for ar/flat this targets the policy checkpoint (value resumes from its own dir).",
     )
     parser.add_argument("--num-epochs", type=int, default=10)
     parser.add_argument(
@@ -39,11 +58,19 @@ def main() -> None:
     parser.add_argument(
         "--policy-temp",
         type=float,
-        default=10.0,
+        default=1.0,
         help="ar/placement: temperature applied to candidate scores when forming the "
-        "policy target weights. Scores span O(tens-thousands) (b2b-dependent); lower "
-        "sharpens the target onto the search's best move, higher flattens it toward the "
-        "full distribution.",
+        "policy target weights. Scores are raw search magnitude O(hundreds-thousands); "
+        "lower sharpens the target onto the search's best move, higher flattens it toward "
+        "the full distribution.",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=0.0,
+        help="placement only: AdamW decoupled weight decay (0.0 = off, ~ plain Adam). "
+        "XLA-safe regularizer for the overfitting placement net; sweep ~1e-3..1e-2 "
+        "watching the held-out val top1/top3.",
     )
     args = parser.parse_args()
 
