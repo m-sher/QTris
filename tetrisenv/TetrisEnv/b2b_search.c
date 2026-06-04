@@ -48,7 +48,7 @@
 #define SPIN_ALL_MINI 3
 
 // Garbage row marker: bit 10 set on a uint16_t row means the row is
-// simulated garbage during search — it is treated as occupied but
+// simulated garbage during search - it is treated as occupied but
 // cannot be cleared by clear_lines().
 #define GARB_ROW_MARKER (1u << 10)  // 0x0400
 
@@ -108,12 +108,6 @@ typedef struct {
     int b2b;
     int combo;
     float total_attack;
-    float max_single_attack;
-    float b2b_attack;          // Attack only from b2b-maintaining clears (spins/tetrises/PCs)
-    float max_b2b_attack;      // Largest single b2b-maintaining attack in this path
-    int b2b_combo_len;         // Current run of CONSECUTIVE b2b-maintaining clears (reset by any
-                               // non-clearing piece or b2b-breaking clear).  A b2b-building combo.
-    int max_b2b_combo;         // Longest such run achieved along this path (the EXECUTED combo).
     int total_lines_cleared;   // Total lines cleared in this search path
     int pieces_placed;         // Pieces placed along this search path (for APP denom)
     int hold_piece;
@@ -162,7 +156,7 @@ static inline bool placement_is_dead(const SearchState* s, int board_height) {
 //
 // Two beam states that share (board, b2b, combo, hold, next_queue_idx,
 // bag_seen, garbage_remaining, garbage_timer) have identical future
-// subtrees — expanding both is pure waste.  Dedupe keeps the higher-
+// subtrees - expanding both is pure waste.  Dedupe keeps the higher-
 // scored path and drops the other.
 // ============================================================
 
@@ -271,22 +265,16 @@ static inline uint64_t state_hash(const SearchState* s, int board_height) {
                            s->garbage_remaining, s->garbage_timer);
 }
 
-// Transposition-cache hash: like state_hash but also mixes in path-dependent
-// fields that feed evaluate_state (total_attack, b2b_attack, max_single,
-// pieces_placed).  Two states sharing board+b2b+combo+hold+queue_idx but
-// arriving via different clear histories would otherwise map to the same
-// TT slot and return the wrong cached score.
+// Transposition-cache hash: like state_hash but also mixes in the path-dependent
+// fields that feed evaluate_state (total_attack, garbage_prevented).  Two states
+// sharing board+b2b+combo+hold+queue_idx but arriving via different clear histories
+// would otherwise map to the same TT slot and return the wrong cached score.
 static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     uint64_t h = state_hash(s, board_height);
-    union { float f; uint32_t u; } a, b, c, gp;
+    union { float f; uint32_t u; } a, gp;
     a.f = s->total_attack;
-    b.f = s->b2b_attack;
-    c.f = s->max_single_attack;
     gp.f = s->garbage_prevented;
     h ^= (uint64_t)a.u * 0x9e3779b97f4a7c15ULL;
-    h ^= (uint64_t)b.u * 0xbf58476d1ce4e5b9ULL;
-    h ^= (uint64_t)c.u * 0x94d049bb133111ebULL;
-    h ^= (uint64_t)(uint32_t)s->pieces_placed * 0x1f2c5d1e9b7e8f3dULL;
     h ^= (uint64_t)gp.u * 0x517cc1b727220a95ULL;
     return h;
 }
@@ -328,7 +316,7 @@ static inline void tt_new_generation(void) {
 static PieceDef B2B_PIECES[8];
 static bool b2b_initialized = false;
 
-// Last search result — read by the C game loop to avoid lossy action_idx decode.
+// Last search result - read by the C game loop to avoid lossy action_idx decode.
 // b2b_search_c() writes this; b2b_run_eval_games() reads it.
 static __thread Placement b2b_last_placement;
 
@@ -336,7 +324,7 @@ static __thread Placement b2b_last_placement;
 static int8_t B2B_KICKS[4][4][5][2];
 static int8_t B2B_I_KICKS[4][4][5][2];
 
-// Heuristic weights — hand-designed, bounded, survival-first.
+// Heuristic weights - hand-designed, bounded, survival-first.
 // Rationale is documented at each use site in evaluate_state().
 //
 // Scale discipline:
@@ -351,134 +339,40 @@ static float W_NEAR_DEATH      = 5000.0f;  // per row of slack inside the zone
 static float W_HEIGHT_QUARTIC  = 80.0f;    // -W * h_ratio^4
 static float W_AVG_HEIGHT      = 40.0f;     // -W * avg_height.  Linear penalty on total stack volume
                                                    // (cells occupied per column, averaged).  Encourages
-                                                   // "board emptiness" — a clean board with b2b=N beats a
+                                                   // "board emptiness" - a clean board with b2b=N beats a
                                                    // messy board with b2b=N because future options are
                                                    // preserved.  Pairs with b2b-reward terms to reward
                                                    // b2b-per-piece efficiency: hoarding spin slots without
                                                    // cashing them in is explicitly penalized via the cells
                                                    // those slots consume.  At avg_height=10 the penalty is
-                                                   // -30 — big enough to discourage unnecessary upstacking
+                                                   // -30 - big enough to discourage unnecessary upstacking
                                                    // but well below the survival wall and raw b2b rewards.
 static float W_BUMPINESS       = 1.0f;
 
-static float W_HOLES           = 6.0f;     // * min(holes, 8) * (1 + 0.5h)
-static const int   HOLES_CAP         = 8;
-static float W_WASTED_HOLE     = 3.0f;     // * wasted_holes * (1 + 0.5h)
-static float W_HOLE_CEILING    = 1.5f;     // * hole_ceiling_weight (unused before this rework)
-static float W_HOLE_FORGIVE    = 1.5f;     // * min(setups, holes) * (1 + 0.5h)
+static float W_HOLES           = 6.0f;     // * holes (enclosed cavities) * (1 + 0.5h), uncapped
+static float W_HOLE_CEILING    = 1.5f;     // * hole_ceiling_weight (buried-hole depth)
 
-static float W_B2B_FLAT        = 5.0f;     // one-shot "b2b active" flag
-static float W_B2B_SQRT        = 8.0f;     // * sqrt(b2b) — sublinear store of potential
-static float W_B2B_LINEAR      = 20.0f;    // * b2b — linear holding reward.  Dominant eval term: at b2b=20
-                                                   // this is +400, dwarfing every tactical term, so holding b2b
-                                                   // is strictly preferred and breaks happen only when deep search
-                                                   // sees the survival cliff (-5000 near-death) / height quartic
-                                                   // forcing it.  This is intended: b2b is banked potential, cashed
-                                                   // via the surge mechanic (compute_attack sends `surge = b2b` on a
-                                                   // b2b>=4 break) plus a combo tail.  At 20 it dominates the ~2.7*b2b
-                                                   // a pure surge break would score, so the bot won't break for spike
-                                                   // value alone.  Because it is constant across all placements at a
-                                                   // given b2b, it does NOT shape WHICH placement is chosen — that is
-                                                   // left to the lookahead watching b2b/height/near_death change.
-static float W_ATTACK_TOTAL    = 1.2f;     // * total_attack in path
-static float W_MAX_SINGLE      = 0.5f;     // * max_single_attack (real spike signal).
-                                                   // Down-tuned from 1.5: max_single_attack only peaks on a surge
-                                                   // break, so this weight encodes "break for a big hit" — which
-                                                   // conflicts with hold-indefinitely.  Kept at 0.5 as a tiebreaker
-                                                   // so that IF a break happens (survival-forced in garbage), the
-                                                   // bot still prefers the path that concentrates damage.
-static float W_B2B_ATTACK      = 1.5f;     // * b2b_attack — rewards damage dealt WHILE b2b is alive.
-                                                   // Up-tuned from 0.4: this is the user's target efficiency
-                                                   // metric — attack-per-clear and b2b-per-clear efficient
-                                                   // damage comes from b2b-maintained attacks (TSD/TST, all-mini
-                                                   // doubles, etc.), NOT from surge bursts.
-static float W_B2B_COMBO       = 0.0f;     // * max_b2b_combo — longest run of CONSECUTIVE b2b-maintaining clears
-                                                   // EXECUTED along the search path.  Search-side (path-cumulative)
-                                                   // reward for actually chaining spin-clears into a b2b-building
-                                                   // combo — earned only by executing, not by holding a setup
-                                                   // (anti-hoarding).  Master switch (0=off).
-static float W_APP             = 10.0f;    // * (total_attack + max(0,b2b)) / pieces_placed.  Counts stored b2b
-                                                   // as pending surge attack, so this rewards efficient b2b-building-
-                                                   // PER-PIECE + realized attack as one quantity — driving the bot to
-                                                   // build b2b faster (-> bigger surges) and comboing b2b-building
-                                                   // clears.  Tuned (deterministic) at d8w96 g0.15: 3->10 lifts APP
-                                                   // 0.70->0.78, b2b 31->35, combo 0.45->0.53, survival 100%; >=40
-                                                   // starts costing survival.
+// B2B store (W_B2B_LINEAR is the dominant hold/hoarding driver)
+static float W_B2B_FLAT        = 5.0f;     // one-shot "b2b active" flag (b2b>=0, incl. starting b2b)
+static float W_B2B_SQRT        = 8.0f;     // * sqrt(b2b)
+static float W_B2B_LINEAR      = 20.0f;    // * b2b
 
-static float W_GARBAGE_PREVENT = 4.0f;     // * garbage_prevented — incentive to keep pending garbage off
-                                                   // the board when its push timer has expired.  Fires when the
-                                                   // front-of-queue garbage was about to push (timer <= 0) and the
-                                                   // move either cancelled it via attack or blocked the push by
-                                                   // clearing a line.  Cancellations made while garbage is still
-                                                   // far from pushing do NOT score here — only imminent-push
-                                                   // prevention does, so the bot is rewarded for refusing damage,
-                                                   // not just for trading attacks against future garbage.
-static float W_COMBO           = 2.5f;     // * min(combo, COMBO_CAP) — value of holding a live combo
-static const int   COMBO_CAP         = 12;       // raised from 6: long b2b-maintaining combos keep accruing
-static float W_COMBO_CHAIN     = 3.0f;     // * min(immobile_clearing, CHAIN_CAP) * (1 + combo) when combo alive.
-                                                   // Rewards CONTINUING a b2b-maintaining spin-clear chain (combo
-                                                   // up AND b2b up), not stockpiling idle slots — keys off the
-                                                   // b2b-maintaining immobile slots, gated on combo>=0 so it pays
-                                                   // nothing on a dead-combo board (anti-hoarding).
-static const int   COMBO_CHAIN_CAP   = 4;
-static float W_SPIN_CHANNEL    = 0.0f;     // * min(spin_combo_fuel, CAP) * (1 - h_ratio).  v2 graded covered-
-                                                   // near-full-row fuel reward (construction gradient WORKS — bot
-                                                   // builds fuel).  Default OFF: executed combos still break b2b
-                                                   // mid-chain (loose fuel geometry doesn't keep the overhang
-                                                   // reusable), so it's not yet Pareto-safe.  Master switch (0=off).
-static const int   SPIN_CHANNEL_CAP  = 6;
-static float W_COVERED_CLEAR   = 0.0f;     // * min(blocked_9_rows, DOWNSTACK_CAP) * burst_scale.  Rewards
-                                                   // covered (spin-clearable) near-full rows so the bot keeps
-                                                   // garbage gaps roofed and downstacks garbage with b2b-MAINTAINING
-                                                   // spins instead of b2b-breaking regular clears.  Master switch.
-static float W_CHANNEL_HEIGHT_RELIEF = 0.7f;  // fraction of a live spin-channel's volume discounted from
-                                                   // avg_height (NOT max_height — the survival cliff/quartic stay
-                                                   // inviolable).  The channel's near-full rows are about to clear,
-                                                   // so the linear volume penalty over-charges them; this relief
-                                                   // lets the bot AFFORD to build the combo engine.  0 = no relief.
-// Garbage urgency: smooth scale on the downstack/cascade/surge burst terms.
-// Replaces the old hard 0/1 garbage_mul gate.  burst_scale = GARBAGE_BURST_BASE
-// + W_GARBAGE_URGENCY*garbage_remaining, so those terms fire at BASE strength
-// even with no garbage (cultivating combo/burst setups for APP) and scale up
-// gradually as garbage accumulates (downstacking gets more valuable).  Garbage
-// is thus a single tunable weight, not a regime switch; accepting garbage is
-// never penalized here — only the survival height gradient prices that.
-static float GARBAGE_BURST_BASE = 0.35f;   // baseline burst strength with no garbage (cultivation)
-static float W_GARBAGE_URGENCY  = 0.18f;   // slope/line; reaches the cap by ~4 garbage lines
-static float GARBAGE_BURST_MAX  = 1.1f;    // cap ~= old hard-gate max (1.0) so garbage isn't amplified
-static float W_DOWNSTACK       = 2.0f;     // * min(accessible_9_rows, 4)
-static const int   DOWNSTACK_CAP     = 4;
-static float W_WELL_ALIGNED_9  = 1.5f;     // * min(well_aligned_9, 3)
-static const int   WELL_ALIGNED_9_CAP = 3;
-static float W_CASCADE         = 5.0f;     // * min(cascade_depth, 4) — stacked 9-rows
-static const int   CASCADE_CAP       = 4;
-static float W_SURGE_POT       = 2.0f;     // * primed_multiplier * min(b2b, 20) — latent spike value
-static float W_BREAK_READY     = 6.0f;     // one-shot: b2b>=8 AND cascade_depth>=2
+// Attack realization
+static float W_ATTACK_TOTAL    = 1.0f;     // * (total_attack + max(0, leaf_b2b))
+static float W_APP             = 100.0f;   // * (total_attack + max(0,b2b)) / pieces_placed
+static float W_GARBAGE_PREVENT = 4.0f;     // * garbage_prevented - keep imminent garbage off the board
 
+// Spin-setup structure (b2b-maintaining clear potential)
 static float W_TSLOT           = 6.0f;
 static float W_IMMOBILE_CLEAR  = 5.0f;     // * sqrt(immobile_clearing_placements)
 static float W_IMMOBILE_LINES  = 1.0f;     // * min(immobile_clearable_lines, 8)
-static float W_FUTURE_B2B      = 2.0f;     // * future_immobile_clearing (queue-capped, next 3 pieces).
-                                                   // Narrower-horizon proxy for "can b2b be sustained with the
-                                                   // pieces about to arrive".  The 7-ply search often can't ITSELF
-                                                   // find the sustaining placement, so it leaves a state that LOOKS
-                                                   // undifferentiated from a break — this term gives the hold path
-                                                   // an extra ~4 per sustainable near-term slot, pushing the eval
-                                                   // over the break threshold when sustainability exists.
-static float W_TSPIN_MULTILINE = 3.0f;     // * min(t_multiline_setups, t_queue_count).
-                                                   // Fires only when a T-slot clears >=2 lines (TSD/TST) AND a T
-                                                   // piece is available in the queue.  This is the attack-per-clear
-                                                   // efficient structure the user wants prioritized: TSD gives 4
-                                                   // damage / 1 T + 3 setup pieces ≈ APP 1.0, TST gives 6/5 ≈ 1.2
-                                                   // — both dominate Tetrises (4/5=0.8) in upstacking play.  No
-                                                   // analogous bonus for I-tetrises per user direction.
 
 // ============================================================
 // Weight Override Table (for ablation / tuning)
 //
 // Each entry maps a string name to the address of a W_* global so callers can
 // override or reset weights at runtime without recompiling.  Used by
-// b2b_set_weight / b2b_reset_weights — invoked from Python for ablation sweeps.
+// b2b_set_weight / b2b_reset_weights - invoked from Python for ablation sweeps.
 // ============================================================
 
 typedef struct {
@@ -493,36 +387,16 @@ static WeightEntry W_TABLE[] = {
     {"W_AVG_HEIGHT",       &W_AVG_HEIGHT,       40.0f},
     {"W_BUMPINESS",        &W_BUMPINESS,        1.0f},
     {"W_HOLES",            &W_HOLES,            6.0f},
-    {"W_WASTED_HOLE",      &W_WASTED_HOLE,      3.0f},
     {"W_HOLE_CEILING",     &W_HOLE_CEILING,     1.5f},
-    {"W_HOLE_FORGIVE",     &W_HOLE_FORGIVE,     1.5f},
     {"W_B2B_FLAT",         &W_B2B_FLAT,         5.0f},
     {"W_B2B_SQRT",         &W_B2B_SQRT,         8.0f},
     {"W_B2B_LINEAR",       &W_B2B_LINEAR,       20.0f},
-    {"W_ATTACK_TOTAL",     &W_ATTACK_TOTAL,     1.2f},
-    {"W_MAX_SINGLE",       &W_MAX_SINGLE,       0.5f},
-    {"W_B2B_ATTACK",       &W_B2B_ATTACK,       1.5f},
-    {"W_B2B_COMBO",        &W_B2B_COMBO,        0.0f},
-    {"W_APP",              &W_APP,              10.0f},
+    {"W_ATTACK_TOTAL",     &W_ATTACK_TOTAL,     1.0f},
+    {"W_APP",              &W_APP,              100.0f},
     {"W_GARBAGE_PREVENT",  &W_GARBAGE_PREVENT,  4.0f},
-    {"W_COMBO",            &W_COMBO,            2.5f},
-    {"W_COMBO_CHAIN",      &W_COMBO_CHAIN,      3.0f},
-    {"W_COVERED_CLEAR",    &W_COVERED_CLEAR,    0.0f},
-    {"W_SPIN_CHANNEL",     &W_SPIN_CHANNEL,     0.0f},  // v2 fuel reward; OFF default (combos break b2b mid-chain)
-    {"W_CHANNEL_HEIGHT_RELIEF", &W_CHANNEL_HEIGHT_RELIEF, 0.7f},
-    {"GARBAGE_BURST_BASE", &GARBAGE_BURST_BASE, 0.35f},
-    {"W_GARBAGE_URGENCY",  &W_GARBAGE_URGENCY,  0.18f},
-    {"GARBAGE_BURST_MAX",  &GARBAGE_BURST_MAX,  1.1f},
-    {"W_DOWNSTACK",        &W_DOWNSTACK,        2.0f},
-    {"W_WELL_ALIGNED_9",   &W_WELL_ALIGNED_9,   1.5f},
-    {"W_CASCADE",          &W_CASCADE,          5.0f},
-    {"W_SURGE_POT",        &W_SURGE_POT,        2.0f},
-    {"W_BREAK_READY",      &W_BREAK_READY,      6.0f},
     {"W_TSLOT",            &W_TSLOT,            6.0f},
     {"W_IMMOBILE_CLEAR",   &W_IMMOBILE_CLEAR,   5.0f},
     {"W_IMMOBILE_LINES",   &W_IMMOBILE_LINES,   1.0f},
-    {"W_FUTURE_B2B",       &W_FUTURE_B2B,       2.0f},
-    {"W_TSPIN_MULTILINE",  &W_TSPIN_MULTILINE,  3.0f},
 };
 static const int W_TABLE_LEN = (int)(sizeof(W_TABLE) / sizeof(W_TABLE[0]));
 
@@ -737,7 +611,7 @@ static void b2b_decode_state(int state, int* r, int* c, int* rot, int piece_type
 
 // Incrementally update `out_heights` from a known parent-state's `parent_heights`
 // by inspecting only the ≤4 columns touched by the placed piece.  Caller MUST
-// only use this when no lines cleared and no garbage was pushed on this step —
+// only use this when no lines cleared and no garbage was pushed on this step -
 // otherwise parent heights are no longer valid and a full rescan is required.
 static inline void patch_col_heights_after_place(const int8_t* parent_heights,
                                                  int piece, int rot,
@@ -914,7 +788,7 @@ static int push_simulated_garbage(uint16_t* board, int board_height, int rows) {
     return rows;
 }
 
-// Attack calculation — exact replica of Scorer.py
+// Attack calculation - exact replica of Scorer.py
 typedef struct {
     float attack;
     int new_b2b;
@@ -1013,7 +887,7 @@ static int find_placements(const uint16_t* board_rows, int board_height,
 
     if (start_state == -1 ||
         b2b_check_collision(board_rows, board_height, piece_type, start_rot, start_r, start_c)) {
-        return 0; // Can't spawn — board is topped out
+        return 0; // Can't spawn - board is topped out
     }
 
     int head = 0, tail = 0;
@@ -1038,7 +912,7 @@ static int find_placements(const uint16_t* board_rows, int board_height,
 
         // Only emit a placement when this BFS state IS the landing state
         // (the piece can no longer fall from here). Non-landing states will
-        // reach their landing via SOFT_DROP, which sets delta_r=0 — matching
+        // reach their landing via SOFT_DROP, which sets delta_r=0 - matching
         // PyTetrisEnv._move clearing piece.delta_r whenever delta_loc[0]!=0.
         // Rotation-with-kick that directly lands the piece preserves delta_r,
         // correctly identifying canonical T-spins.
@@ -1081,7 +955,7 @@ static int find_placements(const uint16_t* board_rows, int board_height,
             }
         }
 
-        // BFS depth limit — keep paths short enough for max_len=15 sequences
+        // BFS depth limit - keep paths short enough for max_len=15 sequences
         // START + (opt HOLD) + path + HARD_DROP <= 15, so path <= 12
         if (depth >= 12) continue;
 
@@ -1245,7 +1119,7 @@ static int count_hole_sections(const uint16_t* board,
     uint16_t visited[BOARD_ROWS];
     memset(visited, 0, sizeof(uint16_t) * board_height);
 
-    // Queue — worst case is every cell on the board
+    // Queue - worst case is every cell on the board
     int queue_r[BOARD_ROWS * BOARD_COLS];
     int queue_c[BOARD_ROWS * BOARD_COLS];
 
@@ -1256,7 +1130,7 @@ static int count_hole_sections(const uint16_t* board,
             // Pick lowest-set-bit column
             int c = __builtin_ctz(remaining);
 
-            // New connected component — flood fill from (r, c)
+            // New connected component - flood fill from (r, c)
             sections++;
             int front = 0, back = 0;
             queue_r[back] = r;
@@ -1298,7 +1172,7 @@ static int count_hole_sections(const uint16_t* board,
 // of filled cells above it in the same column, weighted by how high the
 // hole is in the stack (higher holes = more urgent = higher weight).
 //
-// This penalizes upstacking over enclosed holes — each filled cell placed
+// This penalizes upstacking over enclosed holes - each filled cell placed
 // above an enclosed hole makes it harder to clear, and holes near the top
 // of the stack are more dangerous.
 //
@@ -1317,7 +1191,7 @@ static float compute_hole_ceiling_weight(const uint16_t* board, int board_height
             if (board[r] & bit) {
                 filled_above++;
             } else {
-                // Empty cell — check if it's an enclosed hole
+                // Empty cell - check if it's an enclosed hole
                 bool enclosed = !(reachable[r] & bit);
                 bool is_setup = (immobile_cells[r] & bit) != 0;
                 if (enclosed && !is_setup && filled_above > 0) {
@@ -1418,7 +1292,7 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
             })
 
             // Rot 2 (T points down, most common T-spin: overhang from above)
-            // T cells: [1,0] [1,1] [1,2] [2,1] — center is [1,1]
+            // T cells: [1,0] [1,1] [1,2] [2,1] - center is [1,1]
             // Need these cells empty:
             if (cell_empty(board, board_height, r + 1, c) &&
                 cell_empty(board, board_height, r + 1, c + 1) &&
@@ -1448,8 +1322,8 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                 }
             }
 
-            // Rot 0 (T points up — less common, needs slot below)
-            // T cells: [0,1] [1,0] [1,1] [1,2] — center is [1,1]
+            // Rot 0 (T points up - less common, needs slot below)
+            // T cells: [0,1] [1,0] [1,1] [1,2] - center is [1,1]
             if (cell_empty(board, board_height, r, c + 1) &&
                 cell_empty(board, board_height, r + 1, c) &&
                 cell_empty(board, board_height, r + 1, c + 1) &&
@@ -1478,7 +1352,7 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
             }
 
             // Rot 1 (T points right)
-            // T cells: [0,1] [1,1] [1,2] [2,1] — center is [1,1]
+            // T cells: [0,1] [1,1] [1,2] [2,1] - center is [1,1]
             if (cell_empty(board, board_height, r, c + 1) &&
                 cell_empty(board, board_height, r + 1, c + 1) &&
                 cell_empty(board, board_height, r + 1, c + 2) &&
@@ -1507,7 +1381,7 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
             }
 
             // Rot 3 (T points left)
-            // T cells: [0,1] [1,0] [1,1] [2,1] — center is [1,1]
+            // T cells: [0,1] [1,0] [1,1] [2,1] - center is [1,1]
             if (cell_empty(board, board_height, r, c + 1) &&
                 cell_empty(board, board_height, r + 1, c) &&
                 cell_empty(board, board_height, r + 1, c + 1) &&
@@ -1551,7 +1425,7 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 //   1. FITS:      All piece cells are empty on the board
 //   2. REACHABLE: At least one piece cell is reachable from surface
 //   3. IMMOBILE:  Piece cannot move in any cardinal direction
-//                 (the actual ALL_MINI criterion — matches
+//                 (the actual ALL_MINI criterion - matches
 //                 b2b_check_immobility used during placement)
 //
 // O is excluded (can't spin). T is excluded (T-spins use the
@@ -1574,12 +1448,12 @@ typedef struct {
 // that can be resolved SOON rather than speculative cavities for distant pieces.
 //
 // Populates two per-row bitmasks:
-//   immobile_cells[]   — cells in ANY valid immobile placement (used for
+//   immobile_cells[]   - cells in ANY valid immobile placement (used for
 //                         wasted-hole detection: reachable holes not in here
 //                         are "wasted").
-//   clearing_cells[]   — cells in immobile placements that CLEAR at least one
+//   clearing_cells[]   - cells in immobile placements that CLEAR at least one
 //                         line (used to exempt productive spin-setup holes from
-//                         hole penalties — only clearing setups earn exemption).
+//                         hole penalties - only clearing setups earn exemption).
 //
 // upcoming_pieces: array of piece types (1-7) to check, ordered by priority
 // num_upcoming: length of upcoming_pieces
@@ -1610,7 +1484,7 @@ static ImmobilePlacementResult count_immobile_placements(
     }
     // Start a few rows above to catch pieces partially above the stack.
     // End a few rows below because an immobile placement requires adjacent
-    // stack cells — pieces sitting multiple rows below the stack top cannot
+    // stack cells - pieces sitting multiple rows below the stack top cannot
     // be immobile (no walls to trap them except in rare hole cavities, which
     // we intentionally skip as a cost/value trade-off).
     int scan_start = top_filled - 3;
@@ -1737,113 +1611,22 @@ static ImmobilePlacementResult count_immobile_placements(
     return res;
 }
 
-// Count how many holes are "deep" (have 2+ filled cells above them in the same column).
-// Holes that are part of a spin setup (immobile_cells) are excluded.
-static int count_deep_holes(const uint16_t* board, int board_height,
-                            const uint16_t* immobile_cells) {
-    int deep = 0;
-    for (int c = 0; c < BOARD_COLS; c++) {
-        uint16_t bit = (1 << c);
-        int filled_above = 0;
-        for (int r = 0; r < board_height; r++) {
-            if (board[r] & bit) {
-                filled_above++;
-            } else if (filled_above >= 2) {
-                if (!(immobile_cells[r] & bit)) {
-                    deep++;
-                }
-            }
-        }
-    }
-    return deep;
-}
 
-// Compute per-column heights and derived stats
+// Per-column heights + the board-shape stats the eval actually reads.
 typedef struct {
     int col_heights[BOARD_COLS];
     int max_height;
     float avg_height;
-    float bumpiness;
     int holes;
-    int hole_columns;       // Number of distinct columns containing holes
-    int clearable_rows;     // Rows with >= 8 filled cells
-    int almost_full_rows;   // Rows with exactly 9 filled cells
-    int well_depth;         // Depth of the deepest single well
-    int well_count;         // Number of wells (columns lower than both neighbors by 2+)
-    int accessible_9_rows;  // Almost-full rows where the hole has clear path from above
-    int blocked_9_rows;     // Almost-full rows where the hole is blocked
-    int well_col;           // Column of the deepest well (-1 if no well)
-    int well_aligned_9;     // Accessible 9-rows where the gap is in the well column
-    int non_well_9;         // Accessible 9-rows where the gap is NOT in the well column
-    int cascade_depth;      // Consecutive 9-rows from the top of the stack (after accessible top)
-    int t_spin_setups;      // Number of T-spin setups detected
-    int t_slot_quality;     // Best T-slot quality (0=none, 1=mini, 2=full)
-    int t_multiline_setups; // Number of T-spin setups that clear >=2 lines (TSD/TST)
-    int deep_holes;         // Holes buried under 2+ filled cells
-    int edge_well_depth;    // Deepest well in columns 0, 1, 8, or 9
-    float hole_ceiling_weight; // Weighted count of filled cells above enclosed holes
-    float immobile_placements;           // Queue-weighted truly-immobile spin-placement count
+    float hole_ceiling_weight;           // Weighted count of filled cells above enclosed holes
     float immobile_clearing_placements;  // Queue-weighted immobile + line-clearing placements
-    float immobile_clearable_lines;      // Queue-weighted sum of clearable lines from immobile placements
-    int wasted_holes;                    // Non-enclosed holes not part of any immobile placement
-    int t_queue_count;                   // Number of T pieces in the upcoming queue — used to cap W_TSLOT
-    float bumpiness_exempted;            // Bumpiness excluding contributions adjacent to the well column
-    float future_immobile_clearing;      // Immobile clearing placements considering ONLY the next 3 pieces.
-                                         // A near-horizon proxy for "can we continue holding b2b with the
-                                         // pieces we're actually about to receive" — the full-queue count
-                                         // already captures this but dilutes near-term pieces under the
-                                         // 1/(i+1) weighting; this narrower signal avoids that dilution.
-    int spin_channel_depth;              // Spin-combo FUEL score: count of covered near-full rows (9-fill with a
-                                         // shallow-roofed = spin-required gap) + a stacking bonus for ones
-                                         // sharing a gap column.  Each is a b2b-maintaining spin-clear the bot
-                                         // can chain into a combo.  See detect_spin_channel().
+    float immobile_clearable_lines;      // Queue-weighted clearable lines from immobile placements
+    int t_spin_setups;                   // Number of T-spin setups detected
+    int t_slot_quality;                  // Best T-slot quality (0=none, 1=mini, 2=full)
+    int t_queue_count;                   // T pieces in the upcoming queue (caps W_TSLOT)
+    float bumpiness_exempted;            // Bumpiness excluding adjacencies around the deepest well
 } BoardStats;
 
-// Detect spin-combo FUEL: covered near-full rows whose roofed gap requires a spin
-// to clear (so the clear maintains b2b).  Each such row is one potential
-// b2b-maintaining spin-clear; counting them INDIVIDUALLY (not only as stacked
-// runs) gives the construction gradient the greedy beam needs to build/cover fuel
-// instead of dropping build-up states.  Garbage supplies the near-full rows for
-// free; the bot adds the roof.  A row counts when:
-//   - it is 9-filled (one gap), and
-//   - the gap is covered by a SHALLOW overhang: 1..SPIN_ROOF_MAX filled cells
-//     directly above it, then open — a tuck-under spin gap, not a deep dead cave
-//     (open-above = a plain well that clears by straight drop, not a spin).
-// Consecutive covered rows sharing a gap column add a stacking bonus (the true
-// reusable channel).  Fills channel_cells_out with the gap cells (for hole
-// forgiveness) and returns the fuel score.  Bounded O(rows*roof) pass; no rollout.
-#define SPIN_ROOF_MAX 2
-static int detect_spin_channel(const uint16_t* board, int board_height,
-                               const uint16_t* clearing_cells,
-                               uint16_t* channel_cells_out) {
-    (void)clearing_cells;  // liveness gate dropped in v2 (it killed the build gradient)
-    memset(channel_cells_out, 0, sizeof(uint16_t) * board_height);
-    // Master switch: weight 0 skips the scan AND the hole forgiveness (empty mask).
-    if (W_SPIN_CHANNEL == 0.0f) return 0;
-    uint16_t full_mask = (1 << BOARD_COLS) - 1;
-    int fuel = 0;
-    int prev_gap_col = -1;
-
-    for (int r = 0; r < board_height; r++) {
-        uint16_t row = board[r] & full_mask;
-        if (row == 0) { prev_gap_col = -1; continue; }
-        if (__builtin_popcount(row) != 9) { prev_gap_col = -1; continue; }
-
-        int c = __builtin_ctz((~row) & full_mask);
-        uint16_t bit = (uint16_t)(1u << c);
-
-        // Shallow roof: count consecutive filled cells directly above the gap.
-        int roof = 0;
-        for (int rr = r - 1; rr >= 0 && (board[rr] & bit); rr--) roof++;
-        if (roof < 1 || roof > SPIN_ROOF_MAX) { prev_gap_col = -1; continue; }
-
-        fuel++;                                  // one covered near-full row of fuel
-        channel_cells_out[r] |= bit;
-        if (c == prev_gap_col) fuel++;           // stacking bonus (reusable channel)
-        prev_gap_col = c;
-    }
-    return fuel;
-}
 
 static BoardStats compute_board_stats(const uint16_t* board, int board_height,
                                       const int* upcoming_pieces, int num_upcoming,
@@ -1851,10 +1634,7 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     BoardStats s;
     memset(&s, 0, sizeof(s));
 
-    uint16_t full_mask = (1 << BOARD_COLS) - 1;
-
-    // Column heights — use pre-computed hint when available (cached on the
-    // SearchState and patched incrementally after each placement).
+    // Column heights - cached hint when available, else scan.
     if (height_hint) {
         for (int c = 0; c < BOARD_COLS; c++) s.col_heights[c] = height_hint[c];
     } else {
@@ -1867,7 +1647,7 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
         }
     }
 
-    // Max and average height
+    // Max + average height.
     float total_h = 0;
     for (int c = 0; c < BOARD_COLS; c++) {
         if (s.col_heights[c] > s.max_height) s.max_height = s.col_heights[c];
@@ -1875,270 +1655,63 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     }
     s.avg_height = total_h / BOARD_COLS;
 
-    // Bumpiness: sum of absolute column height differences.  We compute two
-    // variants:
-    //   - bumpiness:           the full sum, used when the penalty SHOULD
-    //                          discourage welled boards (none currently).
-    //   - bumpiness_exempted:  excludes adjacency contributions involving the
-    //                          deepest well column.  A deliberate spin/Tetris
-    //                          well is, by construction, a 2-sided height
-    //                          discontinuity that adds ~2×well_depth to raw
-    //                          bumpiness.  With W_BUMPINESS=1 this can exceed
-    //                          the positive rewards for the well (e.g. a
-    //                          depth-5 well contributes −10 vs only +4.5 from
-    //                          W_WELL_ALIGNED_9) — net-penalizing exactly the
-    //                          geometry we want the bot to build.  Exempting
-    //                          the well column from bumpiness penalty resolves
-    //                          this conflict without disabling the rest of the
-    //                          flatness pressure.
-    //
-    // well_col is computed below, so we finish it first and come back.
+    // Raw bumpiness (local; the eval reads only the well-exempted variant below).
+    float bumpiness = 0.0f;
     for (int c = 0; c < BOARD_COLS - 1; c++) {
-        s.bumpiness += fabsf((float)(s.col_heights[c] - s.col_heights[c + 1]));
+        bumpiness += fabsf((float)(s.col_heights[c] - s.col_heights[c + 1]));
     }
 
-    // Flood-fill reachability (used for holes and spin placements)
+    // Flood-fill reachability (feeds the hole + immobile scans).
     uint16_t reachable[BOARD_ROWS];
     compute_reachability(board, board_height, reachable);
 
-    // ── Immobile spin-placement counting FIRST ──────────────────
-    // Computed before hole metrics so that immobile_cells[] is available
-    // to exempt spin-setup holes from all hole penalties.  Holes that
-    // are part of a valid immobile placement are intentional cavities,
-    // not structural damage.
+    // Immobile (b2b-maintaining) spin placements + T-piece queue count.
     uint16_t immobile_cells[BOARD_ROWS];
     uint16_t clearing_cells[BOARD_ROWS];
-
-    // Count each piece type in the upcoming queue — used to cap the per-piece
-    // reward inside count_immobile_placements so that redundant slots don't
-    // get rewarded beyond the number of pieces actually coming.
     int piece_queue_count[8] = {0};
     for (int i = 0; i < num_upcoming; i++) {
         int pt = upcoming_pieces[i];
         if (pt >= 0 && pt < 8) piece_queue_count[pt]++;
     }
     s.t_queue_count = piece_queue_count[PIECE_T];
-
     ImmobilePlacementResult ipr = count_immobile_placements(board, board_height, reachable,
-                                                             immobile_cells, clearing_cells,
-                                                             upcoming_pieces, num_upcoming,
-                                                             piece_queue_count);
-    s.immobile_placements = ipr.weighted_immobile;
+                                                            immobile_cells, clearing_cells,
+                                                            upcoming_pieces, num_upcoming,
+                                                            piece_queue_count);
     s.immobile_clearing_placements = ipr.weighted_immobile_clearing;
     s.immobile_clearable_lines = ipr.weighted_immobile_lines;
 
-    // Near-horizon projection: repeat the scan with only the first 3 upcoming
-    // pieces.  This produces a signal that emphasizes whether the IMMEDIATELY
-    // next few pieces can maintain b2b on this board — which is what the
-    // 7-ply search needs to commit to a hold-indefinitely strategy.  Uses a
-    // scratch buffer for the cell masks; we don't need those outputs.
-    // Skip the near-horizon immobile scan entirely when its weight is zeroed —
-    // it is a second full count_immobile_placements pass, so gating it off is a
-    // meaningful per-leaf cost saving when the term is disabled.
-    int near_n = num_upcoming < 3 ? num_upcoming : 3;
-    if (near_n > 0 && W_FUTURE_B2B != 0.0f) {
-        int near_queue_count[8] = {0};
-        for (int i = 0; i < near_n; i++) {
-            int pt = upcoming_pieces[i];
-            if (pt >= 0 && pt < 8) near_queue_count[pt]++;
-        }
-        uint16_t scratch_immobile[BOARD_ROWS];
-        uint16_t scratch_clearing[BOARD_ROWS];
-        ImmobilePlacementResult ipr_near = count_immobile_placements(
-            board, board_height, reachable,
-            scratch_immobile, scratch_clearing,
-            upcoming_pieces, near_n, near_queue_count);
-        s.future_immobile_clearing = ipr_near.weighted_immobile_clearing;
-    }
-
-    // ── Hole metrics (setup-aware) ──────────────────────────────
-    // Hole penalties exclude cells in clearing_cells[] — those are
-    // intentional cavities for spin setups that would clear lines
-    // (b2b-maintaining downstack).  Non-clearing immobile placements
-    // are NOT exempted: holes without clearing potential are still
-    // structural damage.
-
-    // ── Spin-channel detection (before hole metrics so its cells are exempt) ──
-    // A covered, spin-clearable channel is the reusable-overhang engine for a
-    // b2b-building combo.  Its gap cells are "holes" by geometry but are the
-    // engine, not damage, so they are forgiven from the hole penalties below.
-    uint16_t channel_cells[BOARD_ROWS];
-    s.spin_channel_depth = detect_spin_channel(board, board_height, clearing_cells, channel_cells);
-
-    // Height relief: a live spin-channel's near-full rows are about to clear, so
-    // the linear volume penalty over-charges them.  Discount their volume from
-    // avg_height ONLY (max_height / survival cliff untouched), bounded by the cap,
-    // so the bot can afford to build the combo engine without weakening the wall.
-    if (s.spin_channel_depth >= 1 && W_CHANNEL_HEIGHT_RELIEF > 0.0f) {
-        int cd = s.spin_channel_depth < SPIN_CHANNEL_CAP ? s.spin_channel_depth : SPIN_CHANNEL_CAP;
-        float relief = W_CHANNEL_HEIGHT_RELIEF * (float)cd * 0.9f;  // ~9 cells/row over 10 cols
-        s.avg_height -= relief;
-        if (s.avg_height < 0.0f) s.avg_height = 0.0f;
-    }
-
-    // ── Hole metrics ──────────────────────────────────────────
-    // Holes are penalized uniformly EXCEPT the cells of a valid spin-channel
-    // (channel_cells), which are the b2b-combo engine rather than structural
-    // damage.  All other holes — including non-channel spin-setup cavities —
-    // stay penalized, so the bot only digs covered holes that form a live,
-    // chainable spin engine.
-    s.holes = count_hole_sections(board, board_height, reachable, channel_cells);
-
-    s.hole_columns = 0;
-    for (int c = 0; c < BOARD_COLS; c++) {
-        uint16_t bit = (1 << c);
-        bool found_filled = false;
-        for (int r = 0; r < board_height; r++) {
-            if (board[r] & bit) {
-                found_filled = true;
-            } else if (found_filled) {
-                s.hole_columns++;
-                break;
-            }
-        }
-    }
-
-    s.deep_holes = count_deep_holes(board, board_height, channel_cells);
-    // Skip the hole-ceiling scan when its weight is zeroed.
+    // Hole metrics.  Spin-channel hole-forgiveness was removed, so pass an empty
+    // exemption mask - identical to the prior W_SPIN_CHANNEL=0 behavior.
+    uint16_t no_channel[BOARD_ROWS];
+    memset(no_channel, 0, sizeof(uint16_t) * board_height);
+    s.holes = count_hole_sections(board, board_height, reachable, no_channel);
     if (W_HOLE_CEILING != 0.0f) {
-        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable, channel_cells);
+        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable, no_channel);
     }
 
-    // T-spin setup detection
-    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality, &s.t_multiline_setups);
+    // T-spin setups (the multiline output is discarded - its reward was removed).
+    int t_multiline_unused = 0;
+    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality, &t_multiline_unused);
 
-    // Nearly-complete rows (8+ out of 10 cells filled)
-    for (int r = 0; r < board_height; r++) {
-        uint16_t row = board[r] & full_mask;
-        int bits = 0;
-        uint16_t v = row;
-        while (v) { bits++; v &= v - 1; }
-        if (bits >= 8) s.clearable_rows++;
-        if (bits == 9) s.almost_full_rows++;
-    }
-
-    // Well detection: columns lower than both neighbors by 2+
-    s.well_depth = 0;
-    s.well_count = 0;
-    s.well_col = -1;
-    s.edge_well_depth = 0;
+    // Deepest well column - the only well stat the eval needs (bumpiness exemption).
+    int well_col = -1, well_depth = 0;
     for (int c = 0; c < BOARD_COLS; c++) {
         int left_h = (c > 0) ? s.col_heights[c - 1] : board_height;
         int right_h = (c < BOARD_COLS - 1) ? s.col_heights[c + 1] : board_height;
         int min_neighbor = (left_h < right_h) ? left_h : right_h;
         int depth = min_neighbor - s.col_heights[c];
-        if (depth >= 2) {
-            s.well_count++;
-            if (depth > s.well_depth) {
-                s.well_depth = depth;
-                s.well_col = c;
-            }
-            if (c <= 1 || c >= 8) {
-                if (depth > s.edge_well_depth) s.edge_well_depth = depth;
-            }
-        }
+        if (depth >= 2 && depth > well_depth) { well_depth = depth; well_col = c; }
     }
 
-    // Bumpiness exemption: now that well_col is known, compute the variant
-    // that skips the two adjacencies around the deepest well.
-    s.bumpiness_exempted = s.bumpiness;
-    if (s.well_col >= 0) {
-        if (s.well_col > 0) {
-            s.bumpiness_exempted -= fabsf((float)(s.col_heights[s.well_col - 1] - s.col_heights[s.well_col]));
-        }
-        if (s.well_col < BOARD_COLS - 1) {
-            s.bumpiness_exempted -= fabsf((float)(s.col_heights[s.well_col] - s.col_heights[s.well_col + 1]));
-        }
+    // Bumpiness, exempting the two adjacencies around the deepest well.
+    s.bumpiness_exempted = bumpiness;
+    if (well_col >= 0) {
+        if (well_col > 0)
+            s.bumpiness_exempted -= fabsf((float)(s.col_heights[well_col - 1] - s.col_heights[well_col]));
+        if (well_col < BOARD_COLS - 1)
+            s.bumpiness_exempted -= fabsf((float)(s.col_heights[well_col] - s.col_heights[well_col + 1]));
         if (s.bumpiness_exempted < 0.0f) s.bumpiness_exempted = 0.0f;
-    }
-
-    // Accessible vs blocked almost-full rows
-    s.accessible_9_rows = 0;
-    s.blocked_9_rows = 0;
-    s.well_aligned_9 = 0;
-    s.non_well_9 = 0;
-    for (int r = 0; r < board_height; r++) {
-        uint16_t row = board[r] & full_mask;
-        int bits = 0;
-        uint16_t v = row;
-        while (v) { bits++; v &= v - 1; }
-        if (bits != 9) continue;
-
-        uint16_t hole_mask = (~row) & full_mask;
-        int hole_col = -1;
-        for (int c = 0; c < BOARD_COLS; c++) {
-            if (hole_mask & (1 << c)) { hole_col = c; break; }
-        }
-        if (hole_col < 0) continue;
-
-        bool accessible = true;
-        uint16_t hbit = (1 << hole_col);
-        for (int rr = r - 1; rr >= 0; rr--) {
-            if (board[rr] & hbit) { accessible = false; break; }
-        }
-        if (accessible) {
-            s.accessible_9_rows++;
-            if (s.well_col >= 0 && hole_col == s.well_col) {
-                s.well_aligned_9++;
-            } else {
-                s.non_well_9++;
-            }
-        } else {
-            s.blocked_9_rows++;
-        }
-    }
-
-    // Cascade depth: count consecutive 9-rows starting from the topmost filled
-    // row, requiring that the top 9-row's gap is accessible from above.  This
-    // is the structural signal for a multi-clear downstack: once the top is
-    // popped, each subsequent 9-row becomes the new top and can be cleared.
-    s.cascade_depth = 0;
-    for (int r = 0; r < board_height; r++) {
-        uint16_t row = board[r] & full_mask;
-        if (row == 0) continue;  // skip empty rows above the stack
-
-        int bits = 0;
-        uint16_t v = row;
-        while (v) { bits++; v &= v - 1; }
-        if (bits != 9) break;    // topmost filled row is not a 9-row
-
-        uint16_t hole_mask = (~row) & full_mask;
-        int hole_col = __builtin_ctz(hole_mask);
-        bool accessible = true;
-        uint16_t hbit = (uint16_t)(1u << hole_col);
-        for (int rr = r - 1; rr >= 0; rr--) {
-            if (board[rr] & hbit) { accessible = false; break; }
-        }
-        if (!accessible) break;
-
-        for (int rr = r; rr < board_height; rr++) {
-            uint16_t row2 = board[rr] & full_mask;
-            int bits2 = 0;
-            uint16_t v2 = row2;
-            while (v2) { bits2++; v2 &= v2 - 1; }
-            if (bits2 != 9) break;
-            s.cascade_depth++;
-        }
-        break;
-    }
-
-    // Wasted holes: non-enclosed holes (reachable empty cells below a filled
-    // cell in the same column) that are NOT part of any immobile placement.
-    s.wasted_holes = 0;
-    for (int c = 0; c < BOARD_COLS; c++) {
-        uint16_t bit = (1 << c);
-        bool found_filled = false;
-        for (int r = 0; r < board_height; r++) {
-            if (board[r] & bit) {
-                found_filled = true;
-            } else if (found_filled) {
-                bool is_reachable = (reachable[r] & bit) != 0;
-                bool is_immobile = (immobile_cells[r] & bit) != 0;
-                if (is_reachable && !is_immobile) {
-                    s.wasted_holes++;
-                }
-            }
-        }
     }
 
     return s;
@@ -2146,8 +1719,8 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
 
 // ── Deterministic beam finalize ──────────────────────────────
 // The OpenMP beam expansion appends children in nondeterministic (thread-timing)
-// order.  Selection is therefore a strict TOTAL order — higher score first, ties
-// broken by the cached state hash then the depth-0 origin — so which states
+// order.  Selection is therefore a strict TOTAL order - higher score first, ties
+// broken by the cached state hash then the depth-0 origin - so which states
 // survive (and which depth-0 move is ultimately credited) is independent of how
 // the threads interleaved.  Identical states share a hash AND a score, so they
 // sort adjacent and are deduped, keeping the canonical (lowest depth-0) ancestor.
@@ -2204,254 +1777,63 @@ static float evaluate_state(const SearchState* state, int board_height,
     int max_allowed = board_height - 4; // rows 0..3 are the death zone
     int effective_h = bs.max_height + state->garbage_remaining;
 
-    // Instant death — inviolable floor.
+    // Instant death - inviolable floor.
     if (effective_h >= max_allowed) {
         return -1e6f;
     }
 
     float h_ratio = (float)effective_h / (float)max_allowed;
 
-    // ── §2.1 SURVIVAL WALL ────────────────────────────────────
-
-    // Near-death cliff: within NEAR_DEATH_ZONE rows of the death line,
-    // stack an enormous penalty that beats every positive term combined.
-    // slack=0 means the very next block kills us.
+    // ── Survival wall ─────────────────────────────────────────
+    // Near-death cliff: within NEAR_DEATH_ZONE rows of the death line, a penalty
+    // that beats every positive term combined (slack=0 => the next block kills us).
     if (effective_h >= max_allowed - NEAR_DEATH_ZONE) {
         int slack = max_allowed - 1 - effective_h;
         score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
-
-    // Smooth height — quartic.  Nearly free in the playable zone, flares
-    // hard near the top (h=0.5 → -6.25, h=0.8 → -41, h=0.9 → -65.6,
-    // h=1.0 → -100).  At h≥0.9 this alone outweighs the max b2b store.
+    // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
     score -= W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio;
-
-    // Linear volume penalty — rewards board emptiness.  While W_HEIGHT_QUARTIC
-    // barely fires until the stack is tall, this fires proportionally with
-    // every added cell from the first piece.  Prevents the bot from hoarding
-    // spin slots / deep wells that are "safe" (height ratio still low) but
-    // that are actually consuming cells without cashing them in — the
-    // mechanism that lets indefinite-b2b devolve into "stack to the moon
-    // because the quartic penalty hasn't fired yet".  Together with the
-    // b2b-reward store, this enforces b2b-PER-PIECE efficiency: the bot is
-    // rewarded only when the b2b it builds outpaces the cells it consumes.
     score -= W_AVG_HEIGHT * bs.avg_height;
-
-    // Bumpiness — linear, uncapped; a terrible surface must stay terrible.
-    // Use the well-column-exempted variant so deliberate spin/Tetris wells
-    // (which are REQUIRED for b2b-maintaining clears) are not double-penalized
-    // against the reward terms that fire for them.
+    // Bumpiness (well-column-exempted so deliberate spin/Tetris wells aren't double-penalized).
     score -= W_BUMPINESS * bs.bumpiness_exempted;
 
-    // ── §2.2 HOLE ACCOUNTING ──────────────────────────────────
-
+    // ── Hole accounting ───────────────────────────────────────
     float hole_mult = 1.0f + 0.5f * h_ratio;
-
-    // Capped hole count: many holes are bad, but caping at 8 prevents the
-    // pathological "20 holes so I should suicide to escape the penalty".
     if (bs.holes > 0) {
-        int capped = bs.holes < HOLES_CAP ? bs.holes : HOLES_CAP;
-        score -= W_HOLES * (float)capped * hole_mult;
+        score -= W_HOLES * (float)bs.holes * hole_mult;
     }
-
-    // Reachable holes not part of any immobile placement are wasted.
-    if (bs.wasted_holes > 0) {
-        score -= W_WASTED_HOLE * (float)bs.wasted_holes * hole_mult;
-    }
-
-    // Burying holes deeper is worse than leaving them near the surface.
-    // (This term was computed but unused before the rework.)
     if (bs.hole_ceiling_weight > 0.0f) {
-        score -= W_HOLE_CEILING * bs.hole_ceiling_weight;
+        score -= W_HOLE_CEILING * bs.hole_ceiling_weight;  // burying holes deeper is worse
     }
 
-    // Forgiveness for holes that are part of a CLEARING spin setup.
-    // Bounded below hole cost so the bot cannot net-reward creating holes.
-    if (bs.holes > 0) {
-        float setup_count = bs.immobile_clearing_placements + (float)bs.t_spin_setups;
-        if (setup_count > 0.0f) {
-            float forgiveness = W_HOLE_FORGIVE * fminf(setup_count, (float)bs.holes);
-            score += forgiveness * hole_mult;
-        }
-    }
-
-    // ── §2.7 WELL SHAPING ─────────────────────────────────────
-
-    if (bs.well_count == 1 && bs.well_depth >= 4 && bs.well_depth <= 8) {
-        score += 3.0f;
-    } else if (bs.well_count == 1 && bs.well_depth >= 2 && bs.well_depth <= 3) {
-        score += 1.0f;
-    }
-    if (bs.well_count > 1) {
-        score -= 1.5f * (float)(bs.well_count - 1);
-    }
-    if (bs.edge_well_depth >= 3) {
-        score -= 2.0f * (float)(bs.edge_well_depth - 2);
-    }
-
-    // ── §2.3 B2B ECONOMY ──────────────────────────────────────
-    //
-    // B2B value is SUBLINEAR (sqrt).  Rationale:
-    //   - Surge payoff is LINEAR in prev_b2b and is realized through
-    //     total_attack on break (captured in §2.4).
-    //   - Making hold value sublinear ensures that at high chains the
-    //     linear surge beats the marginal sqrt increment, so the bot
-    //     proactively breaks onto downstack setups.
-    //   - Crossover (with W_ATTACK_TOTAL=1.2, W_MAX_SINGLE=1.5):
-    //       break_gain ≈ 1.2*b2b + 1.5*b2b = 2.7*b2b  (pure surge, no tail)
-    //       hold_increment ≈ 8 * (sqrt(b2b+1) - sqrt(b2b)) ≈ 4/sqrt(b2b)
-    //     → hold wins until roughly b2b=15–20 without a combo-ready board,
-    //       break wins earlier once a downstack bank exists (§2.5).
-    //
-    // No explicit break penalty: losing W_B2B_FLAT + W_B2B_SQRT*sqrt(prev_b2b)
-    // IS the cost, natively encoded by the eval delta.
-
+    // ── B2B economy (store terms; W_B2B_LINEAR is the hoarding driver) ─────────
+    // W_B2B_FLAT fires for b2b >= 0, so it ALSO rewards starting b2b (b2b==0).
     if (state->b2b >= 0) {
         score += W_B2B_FLAT;
     }
     if (state->b2b > 0) {
         score += W_B2B_SQRT * sqrtf((float)state->b2b);
-        // Linear hold term: makes indefinite b2b growth the dominant strategy.
-        // With W_B2B_LINEAR ≈ 12 and the sum of break-rewarding weights
-        // (W_ATTACK_TOTAL + W_MAX_SINGLE + W_APP/pieces_placed) ≈ 9.3, holding
-        // one more piece of b2b always pays more than breaking for a surge of
-        // the current b2b value.  Only the near-death cliff (-5000) can make
-        // the bot voluntarily drop b2b — which is the desired behavior.
         score += W_B2B_LINEAR * (float)state->b2b;
     }
 
-    // ── §2.4 ATTACK REALIZATION ───────────────────────────────
-    //
-    // total_attack already includes surge (from breaks) and combo-multiplied
-    // clears, because compute_attack() folds both into `ar.attack`.  Crediting
-    // total_attack in the eval is what makes the bot value the spike.
-
-    if (state->total_attack > 0.0f) {
-        score += W_ATTACK_TOTAL * state->total_attack;
+    // ── Attack realization ────────────────────────────────────
+    // Realized attack along the path + banked b2b (pending surge ~= b2b on break).
+    float atk_credit = state->total_attack + (state->b2b > 0 ? (float)state->b2b : 0.0f);
+    if (atk_credit > 0.0f) {
+        score += W_ATTACK_TOTAL * atk_credit;
     }
-
-    // Peak single attack: rewards concentration (one big hit > many small).
-    // max_single_attack covers ALL clears including the surge-laden break,
-    // unlike the old max_b2b_attack which missed the break by construction.
-    if (state->max_single_attack > 0.0f) {
-        score += W_MAX_SINGLE * state->max_single_attack;
-    }
-
-    // Mild tiebreaker in favor of b2b-maintaining attack of equal magnitude.
-    if (state->b2b_attack > 0.0f) {
-        score += W_B2B_ATTACK * state->b2b_attack;
-    }
-
-    // Executed b2b-maintaining combo: reward the longest run of consecutive
-    // b2b-maintaining clears the path actually performed.  Earned only by
-    // EXECUTING the chain (a held setup has run 0), so it can't be hoarded.
-    if (state->max_b2b_combo > 1) {
-        score += W_B2B_COMBO * (float)state->max_b2b_combo;
-    }
-
-    // Direct APP (Attack Per Piece) optimization.  Counts STORED b2b as pending
-    // surge attack (surge ~= b2b on a break), so APP rewards efficient
-    // b2b-building-per-piece AND realized attack as one quantity.  Because
-    // comboing b2b-building clears raises total_attack faster per piece, this
-    // nudges toward comboing the build rather than isolated spin-singles.
+    // Direct APP (attack-per-piece), counting stored b2b as pending surge attack.
     if (state->pieces_placed > 0) {
         float b2b_val = state->b2b > 0 ? (float)state->b2b : 0.0f;
         score += W_APP * ((state->total_attack + b2b_val) / (float)state->pieces_placed);
     }
-
-    // ── §2.5 COMBO POTENTIAL ──────────────────────────────────
-
-    if (state->combo > 0) {
-        int c = state->combo < COMBO_CAP ? state->combo : COMBO_CAP;
-        score += W_COMBO * (float)c;
-    }
-
-    // Combo-continuation: reward being in a LIVE combo with a b2b-maintaining
-    // spin-clear ready for the next piece, so the bot is paid to CHAIN clears
-    // rather than stockpile idle slots.  Keys off immobile_clearing_placements
-    // (b2b-maintaining slots only) and scales with the current combo so a long
-    // chain with a ready continuation dominates.  combo<0 (dead) pays nothing.
-    if (state->combo >= 0 && bs.immobile_clearing_placements > 0.0f) {
-        float slots = bs.immobile_clearing_placements;
-        if (slots > (float)COMBO_CHAIN_CAP) slots = (float)COMBO_CHAIN_CAP;
-        score += W_COMBO_CHAIN * slots * (1.0f + (float)state->combo);
-    }
-
-    // Garbage prevention: reward for keeping imminent garbage off the board,
-    // either by cancelling it with attack or by blocking the push with a clear.
+    // Garbage prevention: keeping imminent garbage off the board (cancel or block-push).
     if (state->garbage_prevented > 0.0f) {
         score += W_GARBAGE_PREVENT * state->garbage_prevented;
     }
 
-    // Smooth garbage-urgency scale for the downstack/cascade/surge burst terms.
-    // Replaces the old hard 0/1 garbage_mul gate: burst_scale is positive even
-    // with no garbage (so combo/burst setups are cultivated for APP) and grows
-    // gradually as garbage accumulates (downstacking becomes more valuable).
-    // Accepting garbage is NOT penalized here — its risk is priced only by the
-    // survival height gradient (effective_h includes garbage_remaining).
-    float burst_scale = GARBAGE_BURST_BASE + W_GARBAGE_URGENCY * (float)state->garbage_remaining;
-    if (burst_scale > GARBAGE_BURST_MAX) burst_scale = GARBAGE_BURST_MAX;
-    if (burst_scale < 0.0f) burst_scale = 0.0f;
-
-    // Downstack bank: nearly-full rows reachable from above (gap not buried).
-    // Post-break, each piece into the gap continues the combo.  This is the
-    // structural signal that tells the bot "the board is primed to spike".
-    if (bs.accessible_9_rows > 0) {
-        int d = bs.accessible_9_rows < DOWNSTACK_CAP ? bs.accessible_9_rows : DOWNSTACK_CAP;
-        score += W_DOWNSTACK * (float)d * burst_scale;
-    }
-
-    // Covered near-full rows (gap roofed by an overhang) are SPIN-clearable, so
-    // clearing them MAINTAINS b2b — unlike accessible_9 rows (open gap), which can
-    // only be regular-cleared (breaks b2b).  Rewarding these biases the bot to keep
-    // garbage gaps COVERED and downstack garbage with b2b-maintaining spins, the
-    // primary way to combo b2b-building clears under garbage.  Garbage-scaled.
-    if (bs.blocked_9_rows > 0) {
-        int bc = bs.blocked_9_rows < DOWNSTACK_CAP ? bs.blocked_9_rows : DOWNSTACK_CAP;
-        score += W_COVERED_CLEAR * (float)bc * burst_scale;
-    }
-
-    // Extra bonus when the 9-row gap aligns with the Tetris well — an I-piece
-    // already knows where to go for the tetris/surge.
-    if (bs.well_aligned_9 > 0) {
-        int w = bs.well_aligned_9 < WELL_ALIGNED_9_CAP ? bs.well_aligned_9 : WELL_ALIGNED_9_CAP;
-        score += W_WELL_ALIGNED_9 * (float)w * burst_scale;
-    }
-
-    // Cascade depth: stacked 9-rows at the top of the pile.  Clearing one
-    // exposes the next as the new top, enabling a multi-clear combo tail
-    // after the break.  This is what turns a 13-damage surge into a 25+ spike.
-    if (bs.cascade_depth > 0) {
-        int cd = bs.cascade_depth < CASCADE_CAP ? bs.cascade_depth : CASCADE_CAP;
-        score += W_CASCADE * (float)cd * burst_scale;
-    }
-
-    // Surge potential: latent value of an untriggered spike.  Scales with
-    // both the stored b2b chain and the downstack readiness, so a b2b=15
-    // chain on a 3-layer cascade is valued ~12 even if the break is outside
-    // the visible search horizon.
-    if (state->b2b > 0) {
-        float primed = 0.0f;
-        if (bs.cascade_depth >= 1) primed = 1.0f;
-        else if (bs.accessible_9_rows > 0) primed = 0.5f;
-        if (primed > 0.0f) {
-            int b_cap = state->b2b < 20 ? state->b2b : 20;
-            score += W_SURGE_POT * primed * (float)b_cap * burst_scale;
-        }
-    }
-
-    // Break-readiness: one-shot bonus when a spike is a single placement away
-    // (high b2b, 2+ cascade layers available).  Flips tie-ordering in favor
-    // of committing to the break at exactly the right moment.
-    if (state->b2b >= 8 && bs.cascade_depth >= 2) {
-        score += W_BREAK_READY * burst_scale;
-    }
-
-    // ── §2.6 SPIN SETUP REWARDS ───────────────────────────────
-
-    // Queue-cap the T-slot reward: a T-slot that has no T in the upcoming
-    // queue can't be used in the current horizon, so it should pay nothing.
-    // With one T in queue, reward only ONE slot (not a multiplier on t_spin_setups).
+    // ── Spin-setup structure (b2b-maintaining clear potential) ─────────────────
+    // Queue-capped T-slot reward (a T-slot with no T coming in the queue pays nothing).
     if (bs.t_spin_setups > 0 && bs.t_queue_count > 0) {
         float t_reward = 0.0f;
         if (bs.t_slot_quality == 2) {
@@ -2460,53 +1842,14 @@ static float evaluate_state(const SearchState* state, int board_height,
             t_reward = W_TSLOT * 0.4f;
         }
         int usable_setups = bs.t_spin_setups < bs.t_queue_count ? bs.t_spin_setups : bs.t_queue_count;
-        t_reward *= (1.0f + 0.3f * fminf((float)(usable_setups - 1), 2.0f));
+        t_reward *= (1.0f + 0.3f * (float)(usable_setups - 1));  // uncapped (still queue-bounded)
         score += t_reward;
     }
-
-    // T-spin multi-line bonus: only for detected TSD/TST slots AND only
-    // when a T is actually coming.  This rewards the attack/clear-efficient
-    // multi-line b2b clears the user wants prioritized over I-tetrises.
-    if (bs.t_multiline_setups > 0 && bs.t_queue_count > 0) {
-        int usable_multi = bs.t_multiline_setups < bs.t_queue_count ? bs.t_multiline_setups : bs.t_queue_count;
-        score += W_TSPIN_MULTILINE * (float)usable_multi;
-    }
-
+    // b2b-maintaining (immobile/spin) clear slots ready on this board.
     if (bs.immobile_clearing_placements > 0.0f) {
         float line_reward = W_IMMOBILE_CLEAR * sqrtf(bs.immobile_clearing_placements);
-        line_reward += W_IMMOBILE_LINES * fminf(bs.immobile_clearable_lines, 8.0f);
+        line_reward += W_IMMOBILE_LINES * bs.immobile_clearable_lines;  // uncapped
         score += line_reward;
-    }
-
-    // Spin-combo fuel: reward covered near-full rows (b2b-maintaining spin-clears
-    // the bot can chain).  Graded from the first row so building/covering fuel has
-    // a gradient.  Height-faded so it never builds fuel into danger (survival first).
-    if (bs.spin_channel_depth >= 1) {
-        int cd = bs.spin_channel_depth < SPIN_CHANNEL_CAP ? bs.spin_channel_depth : SPIN_CHANNEL_CAP;
-        float low_stack_mul = 1.0f - h_ratio;
-        if (low_stack_mul < 0.0f) low_stack_mul = 0.0f;
-        score += W_SPIN_CHANNEL * (float)cd * low_stack_mul;
-    }
-
-    // Near-term b2b sustainability bonus.  Amplifies the hold strategy by
-    // making states with many sustainable near-future placements strictly
-    // better than equally-valued states without a clear continuation.
-    //
-    // Gated on TWO conditions to protect garbage survival:
-    //   1. Low pending garbage — fades smoothly as garbage accumulates (in
-    //      garbage mode the bot must prioritize downstacking; over-rewarding
-    //      future-b2b can flip the eval toward suicidal b2b-hoarding).
-    //   2. Low board height (`1 - h_ratio`) — even in no-garbage, if the
-    //      stack is climbing the bot must keep a path to survival clears
-    //      over future-b2b sustainability.
-    //
-    // Both gates close toward 0 as conditions worsen, so the term cleanly
-    // vanishes before it can tip the survival balance.
-    if (bs.future_immobile_clearing > 0.0f && state->b2b > 0) {
-        float low_garbage_mul = 1.0f / (1.0f + W_GARBAGE_URGENCY * (float)state->garbage_remaining);
-        float low_stack_mul = 1.0f - h_ratio;
-        if (low_stack_mul < 0.0f) low_stack_mul = 0.0f;
-        score += W_FUTURE_B2B * bs.future_immobile_clearing * low_garbage_mul * low_stack_mul;
     }
 
     _tt_e->hash = _tt_h;
@@ -2519,34 +1862,25 @@ static float evaluate_state(const SearchState* state, int board_height,
 // Score Decomposition (for heuristic influence analysis)
 // ============================================================
 
-#define NUM_DECOMPOSE 22
+#define NUM_DECOMPOSE 13
 
-#define D_HEIGHT         0
-#define D_NEAR_DEATH     1
-#define D_BUMPINESS      2
-#define D_HOLES          3
-#define D_WASTED_HOLES   4
-#define D_HOLE_CEILING   5
-#define D_HOLE_FORGIVE   6
-#define D_WELL           7
-#define D_B2B_FLAT       8
-#define D_B2B_SQRT       9
-#define D_COMBO          10
-#define D_DOWNSTACK      11
-#define D_TSLOT          12
-#define D_IMMOBILE_CLEAR 13
-#define D_MAX_SINGLE     14
-#define D_ATTACK         15
-#define D_CASCADE        16
-#define D_SURGE_POT      17
-#define D_APP            18
-#define D_BREAK_READY    19
-#define D_B2B_LINEAR     20
-#define D_GARBAGE_PREVENT 21
+#define D_HEIGHT          0
+#define D_NEAR_DEATH      1
+#define D_BUMPINESS       2
+#define D_HOLES           3
+#define D_HOLE_CEILING    4
+#define D_B2B_FLAT        5
+#define D_B2B_SQRT        6
+#define D_B2B_LINEAR      7
+#define D_ATTACK          8
+#define D_APP             9
+#define D_TSLOT           10
+#define D_IMMOBILE_CLEAR  11
+#define D_GARBAGE_PREVENT 12
 
 int b2b_get_num_decompose(void) { return NUM_DECOMPOSE; }
 
-// Mirrors evaluate_state() exactly, but writes each term to d[] individually.
+// Mirrors evaluate_state() term-by-term, writing each kept component into d[].
 static void evaluate_state_decompose(const SearchState* state, int board_height,
                                       const int* queue, int queue_len,
                                       float* d) {
@@ -2568,7 +1902,7 @@ static void evaluate_state_decompose(const SearchState* state, int board_height,
     float h_ratio = (float)effective_h / (float)max_allowed;
     float hole_mult = 1.0f + 0.5f * h_ratio;
 
-    // SURVIVAL
+    // Survival
     d[D_HEIGHT] = -W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio
                   - W_AVG_HEIGHT * bs.avg_height;
     if (effective_h >= max_allowed - NEAR_DEATH_ZONE) {
@@ -2577,145 +1911,46 @@ static void evaluate_state_decompose(const SearchState* state, int board_height,
     }
     d[D_BUMPINESS] = -W_BUMPINESS * bs.bumpiness_exempted;
 
-    // HOLES
-    if (bs.holes > 0) {
-        int capped = bs.holes < HOLES_CAP ? bs.holes : HOLES_CAP;
-        d[D_HOLES] = -W_HOLES * (float)capped * hole_mult;
-    }
-    if (bs.wasted_holes > 0)
-        d[D_WASTED_HOLES] = -W_WASTED_HOLE * (float)bs.wasted_holes * hole_mult;
+    // Holes
+    if (bs.holes > 0)
+        d[D_HOLES] = -W_HOLES * (float)bs.holes * hole_mult;
     if (bs.hole_ceiling_weight > 0.0f)
         d[D_HOLE_CEILING] = -W_HOLE_CEILING * bs.hole_ceiling_weight;
-    if (bs.holes > 0) {
-        float sc = bs.immobile_clearing_placements + (float)bs.t_spin_setups;
-        if (sc > 0.0f)
-            d[D_HOLE_FORGIVE] = W_HOLE_FORGIVE * fminf(sc, (float)bs.holes) * hole_mult;
-    }
 
-    // WELLS
-    float well = 0.0f;
-    if (bs.well_count == 1 && bs.well_depth >= 4 && bs.well_depth <= 8) well += 3.0f;
-    else if (bs.well_count == 1 && bs.well_depth >= 2 && bs.well_depth <= 3) well += 1.0f;
-    if (bs.well_count > 1) well -= 1.5f * (float)(bs.well_count - 1);
-    if (bs.edge_well_depth >= 3) well -= 2.0f * (float)(bs.edge_well_depth - 2);
-    d[D_WELL] = well;
-
-    // B2B
+    // B2B store
     if (state->b2b >= 0) d[D_B2B_FLAT] = W_B2B_FLAT;
-    if (state->b2b > 0) d[D_B2B_SQRT] = W_B2B_SQRT * sqrtf((float)state->b2b);
-    if (state->b2b > 0) d[D_B2B_LINEAR] = W_B2B_LINEAR * (float)state->b2b;
+    if (state->b2b > 0) {
+        d[D_B2B_SQRT] = W_B2B_SQRT * sqrtf((float)state->b2b);
+        d[D_B2B_LINEAR] = W_B2B_LINEAR * (float)state->b2b;
+    }
 
-    // COMBO + DOWNSTACK
-    float combo_dscore = 0.0f;
-    if (state->combo > 0) {
-        int c = state->combo < COMBO_CAP ? state->combo : COMBO_CAP;
-        combo_dscore = W_COMBO * (float)c;
-    }
-    // combo-continuation term (folded into D_COMBO; mirrors evaluate_state)
-    if (state->combo >= 0 && bs.immobile_clearing_placements > 0.0f) {
-        float slots = bs.immobile_clearing_placements;
-        if (slots > (float)COMBO_CHAIN_CAP) slots = (float)COMBO_CHAIN_CAP;
-        combo_dscore += W_COMBO_CHAIN * slots * (1.0f + (float)state->combo);
-    }
-    d[D_COMBO] = combo_dscore;
+    // Attack: realized attack + banked leaf-b2b credit
+    float b2b_credit = state->b2b > 0 ? (float)state->b2b : 0.0f;
+    if (state->total_attack + b2b_credit > 0.0f)
+        d[D_ATTACK] = W_ATTACK_TOTAL * (state->total_attack + b2b_credit);
 
-    float burst_scale = GARBAGE_BURST_BASE + W_GARBAGE_URGENCY * (float)state->garbage_remaining;
-    if (burst_scale > GARBAGE_BURST_MAX) burst_scale = GARBAGE_BURST_MAX;
-    if (burst_scale < 0.0f) burst_scale = 0.0f;
+    // APP (attack-per-piece; counts stored b2b as pending surge attack)
+    if (state->pieces_placed > 0)
+        d[D_APP] = W_APP * ((state->total_attack + b2b_credit) / (float)state->pieces_placed);
 
-    float ds_score = 0.0f;
-    if (bs.accessible_9_rows > 0) {
-        int ds = bs.accessible_9_rows < DOWNSTACK_CAP ? bs.accessible_9_rows : DOWNSTACK_CAP;
-        ds_score += W_DOWNSTACK * (float)ds * burst_scale;
-    }
-    if (bs.well_aligned_9 > 0) {
-        int w = bs.well_aligned_9 < WELL_ALIGNED_9_CAP ? bs.well_aligned_9 : WELL_ALIGNED_9_CAP;
-        ds_score += W_WELL_ALIGNED_9 * (float)w * burst_scale;
-    }
-    if (bs.blocked_9_rows > 0) {
-        int bc = bs.blocked_9_rows < DOWNSTACK_CAP ? bs.blocked_9_rows : DOWNSTACK_CAP;
-        ds_score += W_COVERED_CLEAR * (float)bc * burst_scale;
-    }
-    d[D_DOWNSTACK] = ds_score;
-
-    // SPIN SETUPS (queue-capped to match evaluate_state)
+    // T-slot (queue-capped)
     if (bs.t_spin_setups > 0 && bs.t_queue_count > 0) {
         float tr = 0.0f;
         if (bs.t_slot_quality == 2) tr = W_TSLOT;
         else if (bs.t_slot_quality == 1) tr = W_TSLOT * 0.4f;
         int usable_setups = bs.t_spin_setups < bs.t_queue_count ? bs.t_spin_setups : bs.t_queue_count;
-        tr *= (1.0f + 0.3f * fminf((float)(usable_setups - 1), 2.0f));
-        if (bs.t_multiline_setups > 0) {
-            int usable_multi = bs.t_multiline_setups < bs.t_queue_count ? bs.t_multiline_setups : bs.t_queue_count;
-            tr += W_TSPIN_MULTILINE * (float)usable_multi;
-        }
+        tr *= (1.0f + 0.3f * (float)(usable_setups - 1));
         d[D_TSLOT] = tr;
     }
-    {
-        float lr = 0.0f;
-        if (bs.immobile_clearing_placements > 0.0f) {
-            lr += W_IMMOBILE_CLEAR * sqrtf(bs.immobile_clearing_placements);
-            lr += W_IMMOBILE_LINES * fminf(bs.immobile_clearable_lines, 8.0f);
-        }
-        if (bs.future_immobile_clearing > 0.0f && state->b2b > 0) {
-            // Match the double-gating in evaluate_state: smooth low-garbage decay
-            // and h_ratio both modulate this term.  h_ratio is re-derived here
-            // because the decompose caller doesn't share the same local.
-            int max_h = 0;
-            for (int c = 0; c < BOARD_COLS; c++) if (state->col_heights[c] > max_h) max_h = state->col_heights[c];
-            int eff_h = max_h + state->garbage_remaining;
-            int max_allowed = BOARD_ROWS - 4;
-            float hr = (float)eff_h / (float)max_allowed;
-            float low_stack_mul = 1.0f - hr;
-            if (low_stack_mul < 0.0f) low_stack_mul = 0.0f;
-            float low_garbage_mul = 1.0f / (1.0f + W_GARBAGE_URGENCY * (float)state->garbage_remaining);
-            lr += W_FUTURE_B2B * bs.future_immobile_clearing * low_garbage_mul * low_stack_mul;
-        }
-        if (bs.spin_channel_depth >= 1) {
-            int max_h = 0;
-            for (int c = 0; c < BOARD_COLS; c++) if (state->col_heights[c] > max_h) max_h = state->col_heights[c];
-            float hr = (float)(max_h + state->garbage_remaining) / (float)(BOARD_ROWS - 4);
-            float low_stack_mul = 1.0f - hr;
-            if (low_stack_mul < 0.0f) low_stack_mul = 0.0f;
-            int cd = bs.spin_channel_depth < SPIN_CHANNEL_CAP ? bs.spin_channel_depth : SPIN_CHANNEL_CAP;
-            lr += W_SPIN_CHANNEL * (float)cd * low_stack_mul;
-        }
-        if (lr != 0.0f) d[D_IMMOBILE_CLEAR] = lr;
+
+    // b2b-maintaining (immobile/spin) clear slots
+    if (bs.immobile_clearing_placements > 0.0f) {
+        d[D_IMMOBILE_CLEAR] = W_IMMOBILE_CLEAR * sqrtf(bs.immobile_clearing_placements)
+                            + W_IMMOBILE_LINES * bs.immobile_clearable_lines;
     }
 
-    // ATTACK
-    if (state->max_single_attack > 0.0f)
-        d[D_MAX_SINGLE] = W_MAX_SINGLE * state->max_single_attack;
-    float atk = 0.0f;
-    if (state->total_attack > 0.0f) atk += W_ATTACK_TOTAL * state->total_attack;
-    if (state->b2b_attack > 0.0f)   atk += W_B2B_ATTACK * state->b2b_attack;
-    if (state->max_b2b_combo > 1)   atk += W_B2B_COMBO * (float)state->max_b2b_combo;
-    d[D_ATTACK] = atk;
-
-    // CASCADE / SURGE POTENTIAL / APP / BREAK READY (smooth garbage-scaled)
-    if (bs.cascade_depth > 0) {
-        int cd = bs.cascade_depth < CASCADE_CAP ? bs.cascade_depth : CASCADE_CAP;
-        d[D_CASCADE] = W_CASCADE * (float)cd * burst_scale;
-    }
-    if (state->b2b > 0) {
-        float primed = 0.0f;
-        if (bs.cascade_depth >= 1) primed = 1.0f;
-        else if (bs.accessible_9_rows > 0) primed = 0.5f;
-        if (primed > 0.0f) {
-            int b_cap = state->b2b < 20 ? state->b2b : 20;
-            d[D_SURGE_POT] = W_SURGE_POT * primed * (float)b_cap * burst_scale;
-        }
-    }
-    if (state->pieces_placed > 0) {
-        float b2b_val = state->b2b > 0 ? (float)state->b2b : 0.0f;
-        d[D_APP] = W_APP * ((state->total_attack + b2b_val) / (float)state->pieces_placed);
-    }
-    if (state->b2b >= 8 && bs.cascade_depth >= 2) {
-        d[D_BREAK_READY] = W_BREAK_READY * burst_scale;
-    }
-    if (state->garbage_prevented > 0.0f) {
+    if (state->garbage_prevented > 0.0f)
         d[D_GARBAGE_PREVENT] = W_GARBAGE_PREVENT * state->garbage_prevented;
-    }
 }
 
 // Exported: enumerate depth-0 placements, return decomposed scores.
@@ -2755,9 +1990,7 @@ int b2b_decompose_c(
         for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
         AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
         s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-        s.total_attack = ar.attack; s.max_single_attack = ar.attack;
-        s.b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-        s.max_b2b_attack = s.b2b_attack;
+        s.total_attack = ar.attack;
         s.total_lines_cleared = clears; s.hold_piece = hold_piece;
         s.pieces_placed = 1;
         s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
@@ -2789,9 +2022,7 @@ int b2b_decompose_c(
             for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
             AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
             s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-            s.total_attack = ar.attack; s.max_single_attack = ar.attack;
-            s.b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-            s.max_b2b_attack = s.b2b_attack;
+            s.total_attack = ar.attack;
             s.total_lines_cleared = clears; s.hold_piece = active_piece;
             s.pieces_placed = 1;
             s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
@@ -2822,9 +2053,7 @@ int b2b_decompose_c(
             for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
             AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
             s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-            s.total_attack = ar.attack; s.max_single_attack = ar.attack;
-            s.b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-            s.max_b2b_attack = s.b2b_attack;
+            s.total_attack = ar.attack;
             s.total_lines_cleared = clears; s.hold_piece = active_piece;
             s.pieces_placed = 1;
             s.next_queue_idx = 1; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
@@ -2865,7 +2094,7 @@ static void b2b_write_sequence(const BFSStateMeta* meta, int bfs_state,
     out_row[p++] = KEY_START;
     if (is_hold) out_row[p++] = KEY_HOLD;
 
-    // Reserve 1 slot for HARD_DROP — truncate path if needed
+    // Reserve 1 slot for HARD_DROP - truncate path if needed
     int max_path_keys = max_len - p - 1;
     int start = (len > max_path_keys) ? (len - max_path_keys) : 0;
     for (int i = len - 1; i >= start; i--) {
@@ -2907,17 +2136,6 @@ static inline void expand_and_insert(
     child.b2b = ar.new_b2b;
     child.combo = ar.new_combo;
     child.total_attack = parent->total_attack + ar.attack;
-    child.max_single_attack = ar.attack > parent->max_single_attack ? ar.attack : parent->max_single_attack;
-    {
-        float ba = ar.b2b_maintaining ? ar.attack : 0.0f;
-        child.b2b_attack = parent->b2b_attack + ba;
-        child.max_b2b_attack = ba > parent->max_b2b_attack ? ba : parent->max_b2b_attack;
-    }
-    // b2b-maintaining combo run: extends only on a clearing, b2b-maintaining piece;
-    // any non-clear or b2b-breaking clear resets it.  max tracks the executed combo.
-    child.b2b_combo_len = (clears > 0 && ar.b2b_maintaining) ? parent->b2b_combo_len + 1 : 0;
-    child.max_b2b_combo = child.b2b_combo_len > parent->max_b2b_combo
-                        ? child.b2b_combo_len : parent->max_b2b_combo;
     child.total_lines_cleared = parent->total_lines_cleared + clears;
     child.pieces_placed = parent->pieces_placed + 1;
     child.hold_piece = new_hold_piece;
@@ -2970,7 +2188,7 @@ static inline void expand_and_insert(
 
     if (placement_is_dead(&child, board_height)) return;
 
-    // Full eval for every surviving child (no aspiration prune — it was the main
+    // Full eval for every surviving child (no aspiration prune - it was the main
     // source of nondeterminism and its omission only makes the beam MORE thorough).
     child.score = evaluate_state(&child, board_height, queue, queue_len);
     child.sort_hash = state_hash(&child, board_height);  // cached tiebreak key for finalize_beam
@@ -3007,7 +2225,7 @@ void b2b_search_c(
     // that survives to the final beam, writes its action index, best-leaf score
     // (the value of the best continuation through that root), and reconstructed
     // key sequence.  The overall value target is max(out_root_scores).  Scores are
-    // RAW search scores (no softmax — the caller decides any normalization).
+    // RAW search scores (no softmax - the caller decides any normalization).
     int max_roots,
     int* out_num_roots,
     int* out_root_action_indices,   // [max_roots]
@@ -3055,7 +2273,7 @@ void b2b_search_c(
     int depth0_count = 0;
 
     // Per-root best descendant score, tracked across ALL depths (pre-prune) so
-    // every root placement keeps a score even after the beam prunes its subtree —
+    // every root placement keeps a score even after the beam prunes its subtree -
     // gives a full candidate distribution despite the beam converging to one root.
     // Observe-only: does not affect the beam/pruning, so move quality is unchanged.
     const bool want_roots = (out_num_roots != NULL && max_roots > 0);
@@ -3117,11 +2335,6 @@ void b2b_search_c(
         s->b2b = ar.new_b2b;
         s->combo = ar.new_combo;
         s->total_attack = ar.attack;
-        s->max_single_attack = ar.attack;
-        s->b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-        s->max_b2b_attack = s->b2b_attack;
-        s->b2b_combo_len = (clears > 0 && ar.b2b_maintaining) ? 1 : 0;
-        s->max_b2b_combo = s->b2b_combo_len;
         s->total_lines_cleared = clears;
         s->pieces_placed = 1;
         s->hold_piece = hold_piece;
@@ -3168,13 +2381,17 @@ void b2b_search_c(
             compute_col_heights_full(s->board, board_height, s->col_heights);
         }
 
-        if (placement_is_dead(s, board_height)) { continue; }
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
+                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
         depth0_placements[depth0_count] = *pl;
         depth0_is_hold[depth0_count] = 0;
         depth0_count++;
+        // Near-death roots are emitted as (very-low-scored) candidates but NOT expanded:
+        // skipping next_beam_size++ reuses this slot, keeping the search beam identical to
+        // the death-pruned version (no play regression) while widening the label set.
+        if (placement_is_dead(s, board_height)) { continue; }
         next_beam_size++;
     }
 
@@ -3207,11 +2424,6 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->max_single_attack = ar.attack;
-            s->b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-            s->max_b2b_attack = s->b2b_attack;
-            s->b2b_combo_len = (clears > 0 && ar.b2b_maintaining) ? 1 : 0;
-            s->max_b2b_combo = s->b2b_combo_len;
             s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
@@ -3258,17 +2470,19 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
-            if (placement_is_dead(s, board_height)) { continue; }
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
+                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
             depth0_placements[depth0_count] = *pl;
             depth0_is_hold[depth0_count] = 1;
             depth0_count++;
+            // Emit near-death roots as candidates but don't expand (see no-hold branch).
+            if (placement_is_dead(s, board_height)) { continue; }
             next_beam_size++;
         }
     } else if (queue_len > 0) {
-        // No hold piece yet — hold swaps active with first queue piece
+        // No hold piece yet - hold swaps active with first queue piece
         int swap_piece = queue[0];
         np = find_placements(board_rows, board_height, swap_piece, placements, MAX_PLACEMENTS,
                              depth0_meta_hold);
@@ -3296,11 +2510,6 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->max_single_attack = ar.attack;
-            s->b2b_attack = ar.b2b_maintaining ? ar.attack : 0.0f;
-            s->max_b2b_attack = s->b2b_attack;
-            s->b2b_combo_len = (clears > 0 && ar.b2b_maintaining) ? 1 : 0;
-            s->max_b2b_combo = s->b2b_combo_len;
             s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
@@ -3347,13 +2556,15 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
-            if (placement_is_dead(s, board_height)) { continue; }
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
+                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
             depth0_placements[depth0_count] = *pl;
             depth0_is_hold[depth0_count] = 1;
             depth0_count++;
+            // Emit near-death roots as candidates but don't expand (see no-hold branch).
+            if (placement_is_dead(s, board_height)) { continue; }
             next_beam_size++;
         }
     }
@@ -3369,7 +2580,7 @@ void b2b_search_c(
     }
 
     // Deterministic dedupe + top-K select.  (Dedupe at depth 0 is safe because two
-    // placements that collapse to the same post-state have identical futures —
+    // placements that collapse to the same post-state have identical futures -
     // picking either depth0 choice produces the same end state; the total-order
     // tiebreak keeps the canonical one.)
     next_beam_size = finalize_beam(next_beam, next_beam_size, beam_width);
@@ -3489,7 +2700,7 @@ void b2b_search_c(
     // ---- Extract best result ----
     if (curr_beam_size == 0) {
         if (have_fallback) {
-            // All placements were pruned as dead — use the first available
+            // All placements were pruned as dead - use the first available
             // placement as a last-resort move so the caller always gets a
             // valid action (prevents crashes from an all-PAD sequence).
             int fp = fallback_piece;
@@ -3500,7 +2711,7 @@ void b2b_search_c(
             b2b_write_sequence(fallback_meta, fallback_pl.bfs_state,
                                fallback_is_hold, max_len, out_best_sequence);
         } else {
-            // Spawn completely blocked — no placement exists at all.
+            // Spawn completely blocked - no placement exists at all.
             *out_action_index = -1;
             for (int i = 0; i < max_len; i++) out_best_sequence[i] = KEY_PAD;
         }
@@ -3541,12 +2752,12 @@ void b2b_search_c(
     BFSStateMeta* meta_src = is_hold ? depth0_meta_hold : depth0_meta_active;
     b2b_write_sequence(meta_src, best_pl->bfs_state, is_hold, max_len, out_best_sequence);
 
-    // --- Per-root candidate output: best descendant score (tracked across all
-    //     depths, pre-prune) + sequence for every root placement that was explored.
+    // --- Per-root candidate output: every legal root placement is emitted (score =
+    //     its own eval, raised to its best surviving descendant; near-death roots stay
+    //     as very-low-scored candidates rather than being dropped).
     if (want_roots) {
         int n = 0;
         for (int ri = 0; ri < depth0_count && n < max_roots; ri++) {
-            if (root_best[ri] <= -1e29f) continue;  // root didn't reach the final beam
             Placement* rpl = &depth0_placements[ri];
             int rih = depth0_is_hold[ri];
             int rpiece = !rih ? active_piece
@@ -3568,7 +2779,7 @@ void b2b_search_c(
 }
 
 // ============================================================
-// Full Game Loop in C (for optimizer — no Python overhead)
+// Full Game Loop in C (for optimizer - no Python overhead)
 // ============================================================
 
 // --- TetrioRNG: exact replica of TetrioRandom.py ---
@@ -3806,7 +3017,7 @@ void b2b_run_eval_games(
             }
             // If bag_pos >= BAG_SIZE, cur_bag_seen stays 0 (fresh bag)
 
-            // --- Beam search (reuses b2b_search_c — sequence is discarded) ---
+            // --- Beam search (reuses b2b_search_c - sequence is discarded) ---
             int action_idx;
             int64_t dummy_seq[15];
             b2b_search_c(
@@ -3822,7 +3033,7 @@ void b2b_run_eval_games(
             if (action_idx < 0) { died = true; break; }
 
             // --- Read placement directly from b2b_search_c's result ---
-            // (avoids lossy action_idx round-trip — preserves BFS landing row)
+            // (avoids lossy action_idx round-trip - preserves BFS landing row)
             int is_hold   = action_idx / 160;
             int rot       = b2b_last_placement.rot;
             int col       = b2b_last_placement.col;
@@ -3921,6 +3132,11 @@ void b2b_run_eval_games(
 
         // Check final b2b
         if (b2b > max_b2b_val) max_b2b_val = b2b;
+
+        // Credit banked surge potential: a survived game ending on a held b2b chain (>=4) has
+        // unrealized attack the fixed-length window cut off (surge releases `b2b` on break).
+        // Without this, hoarding strategies are undercounted vs continuous-cash-out ones.
+        if (!died && b2b >= 4) total_attack += (float)b2b;
 
         res->steps_completed = steps_done;
         res->survived = died ? 0 : 1;
