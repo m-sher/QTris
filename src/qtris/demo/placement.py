@@ -1,6 +1,7 @@
 import tensorflow as tf
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.placement_features import build_placement_inference
+from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import SearchConfig, search_best_move
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
@@ -84,6 +85,20 @@ def main(args):
     search_cfg = (
         SearchConfig(depth=args.depth, beam_width=args.beam, gate_k=args.gate)
         if getattr(args, "search", False)
+        else None
+    )
+    # --mcts-sims plays the AlphaZero way: PUCT MCTS over the net's policy+value picks
+    # the move (greedy by visit count). No Dirichlet noise (eval, not self-play).
+    mcts = (
+        PlacementMCTS(
+            p_model,
+            MCTSConfig(
+                num_simulations=args.mcts_sims,
+                c_puct=args.mcts_cpuct,
+                dirichlet_eps=0.0,
+            ),
+        )
+        if getattr(args, "mcts_sims", 0) > 0
         else None
     )
 
@@ -188,7 +203,17 @@ def main(args):
             temperature=1.0,
         )
 
-        if search_cfg is not None:
+        if mcts is not None:
+            # AlphaZero-style play: PUCT MCTS picks the move greedily by visit count
+            # (the predict above is only for the attention panel + piece_scores).
+            res = mcts.search([py_env], 1.0, 0.0)[0]
+            if res["dead"]:
+                forced = np.full(max_len, Keys.PAD, dtype=np.int64)
+                forced[0], forced[1] = Keys.START, Keys.HARD_DROP
+                key_sequence = tf.constant(forced[None], dtype=tf.int64)
+            else:
+                key_sequence = tf.constant(res["key_sequence"][None], dtype=tf.int64)
+        elif search_cfg is not None:
             # Neural-guided search picks the move (the predict above is only for the
             # attention panel + piece_scores). The search handles dead states itself.
             key_sequence = tf.constant(
