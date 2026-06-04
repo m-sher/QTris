@@ -3150,3 +3150,32 @@ void b2b_run_eval_games(
     }
 }
 
+// Apply one placement to a plain-occupancy bitboard and score it - the deterministic
+// core of PyTetrisEnv._lock_piece + Scorer.judge, reused by the MCTS placement step.
+// `board` is in/out (length board_height, plain occupancy, no GARB markers); it is
+// mutated to the post-lock, post-clear board. `norm_col` is the dense-action column
+// (pl->col + min_col); `landing_row` is the BFS lock row; `spin_type` is the enumerator's
+// classification. Garbage / stats / reward stay in Python.
+void b2b_lock_score_c(uint16_t* board, int board_height,
+                      int piece_type, int rot, int norm_col, int landing_row,
+                      int spin_type, int b2b, int combo,
+                      int* out_clears, float* out_attack,
+                      int* out_new_b2b, int* out_new_combo) {
+    b2b_init_pieces();
+
+    int col = norm_col - B2B_PIECES[piece_type].orientations[rot].min_col;
+    lock_piece_on_board(board, board_height, piece_type, rot, landing_row, col);
+    int clears = clear_lines(board, board_height);
+
+    bool perfect_clear = true;
+    for (int r = 0; r < board_height; r++) {
+        if (board[r] != 0) { perfect_clear = false; break; }
+    }
+
+    AttackResult ar = compute_attack(clears, spin_type, b2b, combo, perfect_clear);
+    *out_clears = clears;
+    *out_attack = ar.attack;
+    *out_new_b2b = ar.new_b2b;
+    *out_new_combo = ar.new_combo;
+}
+
