@@ -32,7 +32,7 @@ TEMPERATURE = 1.0
 
 # Expert BC anchor: soft-CE to the oracle's cand_scores softmax, policy head only.
 EXPERT_COEF = 1.0
-EXPERT_TEMP = 1.0  # softmax temperature for the expert anchor target
+EXPERT_TEMP = 1.0  # softmax temperature for the expert anchor target (matches pretraining)
 EXPERT_DATASET_PATH = "datasets/tetris_oracle_placement"
 
 

@@ -1,6 +1,6 @@
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
-from qtris.pretraining.base import PretrainerBase
+from qtris.pretraining.base import PretrainerBase, resolve_resume_checkpoint
 import tensorflow as tf
 from tensorflow import keras
 
@@ -8,8 +8,8 @@ from tensorflow import keras
 class Pretrainer(PretrainerBase):
     def __init__(
         self,
-        dataset_path="datasets/tetris_expert_dataset_placement",
-        policy_temp=10.0,
+        dataset_path="datasets/tetris_oracle_placement",
+        policy_temp=1.0,
         value_weight=1.0,
     ):
         super().__init__(dataset_path)
@@ -57,18 +57,78 @@ class Pretrainer(PretrainerBase):
         )
         return policy_loss, top1_agree, in_top3, value_loss
 
-    def train(self, model, epochs=10, batch_size=256, checkpoint_manager=None):
-        dataset = self._load_dataset_placement(batch_size=batch_size)
+    @tf.function
+    def _eval_step(self, model, batch):
+        """Held-out top1/top3 (no grad). Same target as `_train_step`, training=False.
+        Returns summed hits + count so the caller can average over the val set."""
+        cand_scores = batch["cand_scores"]
+        mask = cand_scores > -1e29
+        masked_scores = tf.where(mask, cand_scores, tf.constant(-1e30, tf.float32))
+        target = tf.nn.softmax(masked_scores / self._policy_temp, axis=-1)
+
+        logits, _ = model(
+            (
+                batch["boards"],
+                batch["pieces"],
+                batch["b2b_combo_garbage"],
+                batch["cand_placements"],
+                mask,
+            ),
+            training=False,
+        )
+        best_slot = tf.argmax(target, axis=-1, output_type=tf.int32)
+        top1 = tf.reduce_sum(
+            tf.cast(
+                tf.argmax(logits, -1, output_type=tf.int32) == best_slot, tf.float32
+            )
+        )
+        top3 = tf.math.top_k(logits, k=3).indices
+        in_top3 = tf.reduce_sum(
+            tf.cast(tf.reduce_any(top3 == best_slot[:, None], axis=-1), tf.float32)
+        )
+        n = tf.cast(tf.shape(best_slot)[0], tf.float32)
+        return top1, in_top3, n
+
+    def train(
+        self,
+        model,
+        epochs=10,
+        batch_size=256,
+        checkpoint_manager=None,
+        val_dataset_path=None,
+    ):
+        train_ds = self._load_dataset_placement(batch_size=batch_size)
+        val_ds = (
+            self._load_eval_placement(val_dataset_path, batch_size)
+            if val_dataset_path
+            else None
+        )
 
         for epoch in range(epochs):
             print(f"Epoch {epoch + 1}/{epochs}", flush=True)
-            for step, batch in enumerate(dataset):
+            for step, batch in enumerate(train_ds):
                 policy_loss, top1, top3, value_loss = self._train_step(model, batch)
                 if step % 100 == 0:
                     print(
                         f"Step {step + 1} | Policy: {float(policy_loss):2.3f} | "
                         f"Top1: {float(top1):1.3f} | Top3: {float(top3):1.3f} | "
                         f"Value: {float(value_loss):2.3f}",
+                        flush=True,
+                    )
+
+            # Held-out validation on a SEPARATE never-trained set - the only honest
+            # generalization signal (train Top1 is memorized-train accuracy).
+            if val_ds is not None:
+                v_top1 = v_top3 = v_n = 0.0
+                for vbatch in val_ds:
+                    t1, t3, n = self._eval_step(model, vbatch)
+                    v_top1 += float(t1)
+                    v_top3 += float(t3)
+                    v_n += float(n)
+                if v_n > 0:
+                    print(
+                        f"  val | Top1: {v_top1 / v_n:1.3f} | Top3: {v_top3 / v_n:1.3f} "
+                        f"(held-out n={int(v_n)})",
                         flush=True,
                     )
             if checkpoint_manager is not None:
@@ -92,7 +152,9 @@ def main(args):
         num_layers=num_layers,
         dropout_rate=dropout_rate,
     )
-    optimizer = keras.optimizers.Adam(3e-4)
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=3e-4, weight_decay=getattr(args, "weight_decay", 0.0)
+    )
     model.compile(optimizer=optimizer, jit_compile=True)
     model(
         (
@@ -121,18 +183,21 @@ def main(args):
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint, "checkpoints/placement_pretrained_policy", max_to_keep=3
     )
-    if checkpoint_manager.latest_checkpoint:
+    resume = resolve_resume_checkpoint(
+        getattr(args, "resume_from", None), checkpoint_manager
+    )
+    if resume:
         # Resumes a merged checkpoint fully, or warm-starts the shared trunk +
         # policy head from an old policy-only checkpoint (value head stays fresh).
-        checkpoint.restore(checkpoint_manager.latest_checkpoint).expect_partial()
-        print(
-            f"Restored checkpoint from {checkpoint_manager.latest_checkpoint}.",
-            flush=True,
-        )
+        checkpoint.restore(resume).expect_partial()
+        print(f"Restored checkpoint from {resume}.", flush=True)
 
     pretrainer.train(
         model,
         epochs=args.num_epochs,
         batch_size=batch_size,
         checkpoint_manager=checkpoint_manager,
+        val_dataset_path=(
+            str(args.val_dataset) if getattr(args, "val_dataset", None) else None
+        ),
     )

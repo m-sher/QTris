@@ -1,6 +1,10 @@
 from qtris.models.value import ValueModel
 from qtris.models.flat.model import FlatPolicyModel
-from qtris.pretraining.base import PretrainerBase, correct_and_clip
+from qtris.pretraining.base import (
+    PretrainerBase,
+    correct_and_clip,
+    resolve_resume_checkpoint,
+)
 import tensorflow as tf
 from tensorflow import keras
 
@@ -171,9 +175,12 @@ def main(args):
     p_checkpoint_manager = tf.train.CheckpointManager(
         p_checkpoint, "checkpoints/flat_pretrained_policy", max_to_keep=3
     )
-    if p_checkpoint_manager.latest_checkpoint:
-        p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
-        print("Restored pretrained policy checkpoint.", flush=True)
+    p_resume = resolve_resume_checkpoint(
+        getattr(args, "resume_from", None), p_checkpoint_manager
+    )
+    if p_resume:
+        p_checkpoint.restore(p_resume).expect_partial()
+        print(f"Restored pretrained policy checkpoint from {p_resume}.", flush=True)
 
     pretrainer_kwargs = {"policy_only": args.policy_only}
     if args.dataset is not None:

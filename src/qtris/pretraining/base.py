@@ -42,6 +42,19 @@ def correct_and_clip(returns, b2b):
     return tf.clip_by_value(corrected, RETURN_CLIP_LOW, RETURN_CLIP_HIGH)
 
 
+def resolve_resume_checkpoint(resume_from, manager):
+    """Pick the checkpoint to restore from.
+
+    `resume_from` (the `--resume-from` flag) may be a checkpoint directory (its
+    latest is used) or a specific ckpt prefix; falls back to the manager's own
+    latest when not given. New checkpoints always save to the manager's dir.
+    """
+    if resume_from:
+        resume_from = str(resume_from)
+        return tf.train.latest_checkpoint(resume_from) or resume_from
+    return manager.latest_checkpoint
+
+
 class PretrainerBase:
     """Shared dataset loading for AR + Flat pretrainers.
 
@@ -207,6 +220,25 @@ class PretrainerBase:
             )
             .prefetch(tf.data.AUTOTUNE)
         )
+
+    def _load_eval_placement(self, val_path, batch_size):
+        """Load a SEPARATE, frozen held-out placement set for validation top1/top3.
+
+        Must be a dataset the model NEVER trains on (collect it once to its own path,
+        never merge it into the training dataset). An in-dataset split is NOT a valid
+        generalization signal here: warm-started runs have already trained on every
+        transition in the training file, so a carved-out 'val' subset is already
+        memorized. This separate never-trained set is the only honest held-out metric."""
+        if not os.path.exists(val_path):
+            raise FileNotFoundError(f"No val dataset at {val_path}.")
+        ds = tf.data.Dataset.load(val_path)
+        spec = ds.element_spec
+        if "cand_placements" not in spec or "cand_scores" not in spec:
+            raise ValueError(
+                f"Val dataset at {val_path} is not the placement schema "
+                "(needs `cand_placements` + `cand_scores`)."
+            )
+        return ds.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
 
     def _assign_value_scale(self, dataset):
         """Standardize the value head from each position's max legal candidate score."""
