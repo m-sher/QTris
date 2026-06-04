@@ -129,15 +129,12 @@ class CB2BSearch:
             np.uint16(1) << np.arange(10, dtype=np.uint16)
         ).astype(np.uint16)
 
-        self.NUM_DECOMPOSE = 22
+        # Read the component count from the C side so it can't drift out of sync.
+        self.NUM_DECOMPOSE = self._lib.b2b_get_num_decompose() if self._lib else 13
         self.COMPONENT_NAMES = [
-            "height", "near_death", "bumpiness",
-            "holes", "wasted_holes", "hole_ceiling", "hole_forgive", "well",
-            "b2b_flat", "b2b_sqrt", "combo", "downstack",
-            "tslot", "immobile_clear",
-            "max_single", "attack",
-            "cascade", "surge_pot", "app", "break_ready", "b2b_linear",
-            "garbage_prevent",
+            "height", "near_death", "bumpiness", "holes", "hole_ceiling",
+            "b2b_flat", "b2b_sqrt", "b2b_linear", "attack", "app",
+            "tslot", "immobile_clear", "garbage_prevent",
         ]
 
     def search(
