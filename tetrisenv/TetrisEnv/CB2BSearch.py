@@ -109,6 +109,24 @@ class CB2BSearch:
             ]
             self._lib.b2b_run_eval_games.restype = None
 
+            # --- single placement lock + score (MCTS placement step) ---
+            self._lib.b2b_lock_score_c.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.uint16, ndim=1, flags="C_CONTIGUOUS"),
+                ctypes.c_int,  # board_height
+                ctypes.c_int,  # piece_type
+                ctypes.c_int,  # rot
+                ctypes.c_int,  # norm_col
+                ctypes.c_int,  # landing_row
+                ctypes.c_int,  # spin_type
+                ctypes.c_int,  # b2b
+                ctypes.c_int,  # combo
+                ctypes.POINTER(ctypes.c_int),    # out_clears
+                ctypes.POINTER(ctypes.c_float),  # out_attack
+                ctypes.POINTER(ctypes.c_int),    # out_new_b2b
+                ctypes.POINTER(ctypes.c_int),    # out_new_combo
+            ]
+            self._lib.b2b_lock_score_c.restype = None
+
             # --- weight override / introspection ---
             self._lib.b2b_set_weight.argtypes = [ctypes.c_char_p, ctypes.c_float]
             self._lib.b2b_set_weight.restype = ctypes.c_int
@@ -273,6 +291,50 @@ class CB2BSearch:
             root_scores[:n],
             root_sequences[: n * max_len].reshape(n, max_len),
             root_landing_rows[:n],
+        )
+
+    def lock_score(
+        self,
+        board: np.ndarray,
+        piece_type: int,
+        rot: int,
+        norm_col: int,
+        landing_row: int,
+        spin_type: int,
+        b2b: int,
+        combo: int,
+    ) -> Tuple[np.ndarray, int, float, int, int]:
+        """Lock one placement on `board` (24x10 occupancy, garbage as plain cells) and
+        score it - the C core of `_lock_piece` + `Scorer.judge`. Returns (new_board,
+        clears, attack, new_b2b, new_combo). Garbage / stats / reward stay in Python."""
+        if not self._lib:
+            raise RuntimeError("b2b_search C library not loaded")
+
+        occupied = (board != 0).astype(np.uint16)
+        mask_rows = np.ascontiguousarray(
+            (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
+        )
+        board_height = board.shape[0]
+
+        out_clears = ctypes.c_int(0)
+        out_attack = ctypes.c_float(0.0)
+        out_new_b2b = ctypes.c_int(0)
+        out_new_combo = ctypes.c_int(0)
+
+        self._lib.b2b_lock_score_c(
+            mask_rows, board_height, piece_type, rot, norm_col, landing_row,
+            spin_type, b2b, combo,
+            ctypes.byref(out_clears), ctypes.byref(out_attack),
+            ctypes.byref(out_new_b2b), ctypes.byref(out_new_combo),
+        )
+
+        new_board = ((mask_rows[:, None] & self._col_bits) > 0).astype(np.float32)
+        return (
+            new_board,
+            out_clears.value,
+            out_attack.value,
+            out_new_b2b.value,
+            out_new_combo.value,
         )
 
     def decompose(
