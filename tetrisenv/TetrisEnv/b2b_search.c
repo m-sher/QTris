@@ -3179,3 +3179,620 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
     *out_new_combo = ar.new_combo;
 }
 
+
+// ============================================================
+// Fully-C MCTS sim engine (OpenMP-threaded across games/trees)
+// ------------------------------------------------------------
+// The entire PUCT simulation loop runs in C on a compact bitboard+scalars node;
+// only the TF policy/value net stays in Python. The engine keeps a persistent tree
+// per game across all sims of a move and ping-pongs to Python once per round for the
+// batched net eval (collect_leaves -> net -> apply_leaves). Reward = attack + b2b only:
+// per-edge w_attack*attack (surge+combo already in compute_attack), leaf bootstrap
+// v + w_b2b*max(0,b2b). Dirichlet noise + final sampling stay in Python.
+// ============================================================
+
+// Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
+void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
+                                 int piece_type, int start_row, int start_col, int start_rot,
+                                 int max_len, int is_hold,
+                                 int64_t* out_sequences, int32_t* out_landing_rows);
+
+#define MCAP 128          // candidate capacity (slots)
+#define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
+#define MBH 24            // board height
+#define MAXVQ 16          // visible-queue storage
+#define MROWNORM 23       // landing-row normaliser (board_height - 1)
+#define MCLIP 10.0f       // reward clip
+#define MAX_PATH 1024
+#define MAX_LPR 16        // max leaves collected per tree per round (intra-tree batching)
+
+typedef struct {
+    uint16_t board[MBH];
+    int active, hold;             // piece-type enums (0=N..7)
+    int queue[MAXVQ]; int qlen;
+    TetrioRNG rng;                // queue-refill PRNG (mirrors env _tetrio_rng)
+    int pending[7]; int pending_pos, pending_len;  // _next_bag remainder
+    GarbEntry gq[MAX_GARB_ENTRIES]; int gcnt;
+    int b2b, combo;
+} MState;
+
+typedef struct {
+    int board_height, queue_size, max_height, max_holes, garbage_push_delay;
+    int auto_push_garbage, auto_fill_queue;
+    float c_puct, gamma, w_attack, w_b2b, w_death, return_scale;
+    int max_len;
+    int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
+    float vloss;                 // virtual-loss magnitude (scaled-Q units)
+} MConfig;
+
+typedef struct MNode {
+    MState st;
+    bool terminal, expanded;
+    bool awaiting_eval;          // expanded this round, priors/value not set yet (collision marker)
+    float value;
+    int legal[MCAP]; int n_legal;
+    int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
+    float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
+    struct MNode* child[MCAP];
+} MNode;
+
+typedef struct { MNode* node; int slot; } PathEntry;
+
+typedef struct {
+    MNode* root;
+    bool alive;                  // a live game with a spawnable (enumerable) root
+    bool dead;                   // root had no legal placement
+    float minq, maxq;            // per-tree min-max Q stats
+    // per-tree bump arena (sized to root + one node per simulation). Pre-allocated
+    // single-threaded so node alloc inside the OpenMP region never hits the malloc lock.
+    MNode* pool; int pool_used, pool_cap;
+    // per-round pending leaves awaiting net eval (intra-tree batching: up to L per round).
+    // path[p]/path_len[p] is the descent path of pending[p], kept so apply_leaves can revert
+    // its virtual loss and back up the real value.
+    PathEntry path[MAX_LPR][MAX_PATH]; int path_len[MAX_LPR];
+    MNode* pending[MAX_LPR]; int n_pending;
+} MTree;
+
+typedef struct {
+    int num_trees;
+    int max_nodes;
+    int n_threads;               // capped OpenMP thread count (see mcts_create)
+    int prev_omp_threads;        // process OMP default, restored on destroy
+    MConfig cfg;
+    MTree* trees;
+} MEngine;
+
+// --- node arena (bump allocator; no malloc in the parallel region) ---
+static MNode* mtree_alloc(MTree* t) {
+    if (t->pool_used >= t->pool_cap) return NULL;  // budget exhausted (sized to num_sims+1)
+    MNode* n = &t->pool[t->pool_used++];
+    memset(n, 0, sizeof(MNode));
+    return n;
+}
+
+// --- piece queue (mirror env _fill_queue: pending FIFO then fresh TetrioRNG bag) ---
+static int mstate_draw(MState* s) {
+    if (s->pending_len <= 0) {
+        rng_next_bag(&s->rng, s->pending);
+        s->pending_pos = 0; s->pending_len = 7;
+    }
+    int p = s->pending[s->pending_pos++]; s->pending_len--;
+    return p;
+}
+static int mstate_pop(MState* s) {
+    int p = s->queue[0];
+    for (int i = 0; i < s->qlen - 1; i++) s->queue[i] = s->queue[i + 1];
+    s->qlen--;
+    return p;
+}
+static void mstate_fill(MState* s, const MConfig* cfg) {
+    while (s->qlen < cfg->queue_size) s->queue[s->qlen++] = mstate_draw(s);
+}
+
+// --- enclosed-hole count (replica of hole_finder.c count_enclosed_holes; terminal check) ---
+static int mcts_count_holes(const uint16_t* board, int bh) {
+    bool visited[MBH * BOARD_COLS];
+    for (int i = 0; i < bh * BOARD_COLS; i++) visited[i] = false;
+    int q[MBH * BOARD_COLS]; int head = 0, tail = 0;
+    for (int c = 0; c < BOARD_COLS; c++) {
+        if ((board[0] & (1 << c)) == 0) { visited[c] = true; q[tail++] = c; }
+    }
+    int dr[4] = {1, 0, 0, -1}, dc[4] = {0, -1, 1, 0};
+    while (head != tail) {
+        int cur = q[head++]; int r = cur / BOARD_COLS, c = cur % BOARD_COLS;
+        for (int i = 0; i < 4; i++) {
+            int nr = r + dr[i], nc = c + dc[i];
+            if (nr < 0 || nr >= bh || nc < 0 || nc >= BOARD_COLS) continue;
+            int nidx = nr * BOARD_COLS + nc;
+            if (visited[nidx]) continue;
+            if ((board[nr] & (1 << nc)) == 0) { visited[nidx] = true; q[tail++] = nidx; }
+        }
+    }
+    int holes = 0;
+    for (int r = 0; r < bh; r++)
+        for (int c = 0; c < BOARD_COLS; c++)
+            if ((board[r] & (1 << c)) == 0 && !visited[r * BOARD_COLS + c]) holes++;
+    return holes;
+}
+
+// --- one placement step (mirror placement_step / the b2b game-loop body); returns raw attack ---
+static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal) {
+    int is_hold = d[0], rot = d[1], norm_col = d[2], landing_row = d[3], spin = d[4];
+    int played;
+    if (is_hold) {
+        played = (s->hold == PIECE_N) ? mstate_pop(s) : s->hold;
+        s->hold = s->active;
+    } else {
+        played = s->active;
+    }
+    int col = norm_col - B2B_PIECES[played].orientations[rot].min_col;
+    lock_piece_on_board(s->board, cfg->board_height, played, rot, landing_row, col);
+    int clears = clear_lines(s->board, cfg->board_height);
+    bool pc = true;
+    for (int r = 0; r < cfg->board_height; r++) if (s->board[r] != 0) { pc = false; break; }
+    AttackResult ar = compute_attack(clears, spin, s->b2b, s->combo, pc);
+    s->b2b = ar.new_b2b; s->combo = ar.new_combo;
+    float attack = ar.attack;
+    s->active = mstate_pop(s);
+
+    int top_rows = cfg->board_height - cfg->max_height;
+    bool top_out = false;
+    for (int r = 0; r < top_rows; r++) if (s->board[r] != 0) { top_out = true; break; }
+
+    if (attack > 0) garb_cancel(s->gq, &s->gcnt, (int)attack);
+    if (cfg->auto_push_garbage && clears == 0) {
+        garb_tick(s->gq, s->gcnt);
+        garb_push_one(s->board, cfg->board_height, s->gq, &s->gcnt);
+    }
+    // _add_to_garbage_queue is a no-op in sims (garbage_chance=0).
+    if (cfg->auto_push_garbage && cfg->garbage_push_delay == 0)
+        garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt);
+
+    bool garbage_top_out = false;
+    for (int r = 0; r < top_rows; r++) if (s->board[r] != 0) { garbage_top_out = true; break; }
+    bool exceeded_holes = false;
+    if (cfg->max_holes >= 0)
+        exceeded_holes = mcts_count_holes(s->board, cfg->board_height) > cfg->max_holes;
+
+    *out_terminal = top_out || exceeded_holes || garbage_top_out;
+    if (cfg->auto_fill_queue) mstate_fill(s, cfg);
+    return attack;
+}
+
+// --- enumerate candidates into node (reuse env pathfinder); false if dead (no legal) ---
+static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
+    static __thread int32_t lr_nh[160], lr_h[160];
+    static __thread int64_t seq_scratch[160 * 32];   // discarded; max_len<=32
+    const uint16_t* board = node->st.board;
+    int ml = cfg->max_len;
+    find_placement_candidates_c(board, cfg->board_height, node->st.active, 0, 3, 0,
+                                ml, 0, seq_scratch, lr_nh);
+    int holdpiece = node->st.hold != PIECE_N ? node->st.hold : node->st.queue[0];
+    find_placement_candidates_c(board, cfg->board_height, holdpiece, 0, 3, 0,
+                                ml, 1, seq_scratch, lr_h);
+    node->n_legal = 0;
+    int cnt = 0;
+    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
+        if (lr_nh[i] < 0) continue;
+        int slot = cnt++;
+        node->legal[node->n_legal++] = slot;
+        node->desc[slot][0] = 0; node->desc[slot][1] = i / 40;
+        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_nh[i];
+        node->desc[slot][4] = i % 4;
+    }
+    cnt = 0;
+    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
+        if (lr_h[i] < 0) continue;
+        int slot = MBRANCH + cnt++;
+        node->legal[node->n_legal++] = slot;
+        node->desc[slot][0] = 1; node->desc[slot][1] = i / 40;
+        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_h[i];
+        node->desc[slot][4] = i % 4;
+    }
+    return node->n_legal > 0;
+}
+
+// --- build the net-input request row for a node ---
+static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* board_out,
+                              int64_t* pieces_out, float* bcg_out, float* pls_out, uint8_t* mask_out) {
+    const MState* s = &node->st;
+    for (int r = 0; r < cfg->board_height; r++)
+        for (int c = 0; c < BOARD_COLS; c++)
+            board_out[r * BOARD_COLS + c] = (float)((s->board[r] >> c) & 1);
+    pieces_out[0] = s->active; pieces_out[1] = s->hold;
+    for (int i = 0; i < cfg->queue_size; i++) pieces_out[2 + i] = s->queue[i];
+    bcg_out[0] = (float)s->b2b; bcg_out[1] = (float)s->combo;
+    bcg_out[2] = (float)garb_total(s->gq, s->gcnt);
+    int W = 18;
+    for (int j = 0; j < MCAP * W; j++) pls_out[j] = 0.0f;
+    for (int j = 0; j < MCAP; j++) mask_out[j] = 0;
+    int queue0 = s->qlen > 0 ? s->queue[0] : 0;
+    for (int k = 0; k < node->n_legal; k++) {
+        int slot = node->legal[k];
+        const int* d = node->desc[slot];
+        int is_hold = d[0], rot = d[1], norm_col = d[2], landing = d[3], spin = d[4];
+        int piece = is_hold == 0 ? s->active : (s->hold != PIECE_N ? s->hold : queue0);
+        float* f = &pls_out[(size_t)slot * W];
+        if (piece >= 1 && piece <= 7) f[piece - 1] = 1.0f;
+        f[7 + rot] = 1.0f;
+        f[11] = norm_col / 9.0f;
+        float rn = landing / (float)MROWNORM; f[12] = rn < 1.0f ? rn : 1.0f;
+        f[13 + spin] = 1.0f;
+        f[17] = (float)is_hold;
+        mask_out[slot] = 1;
+    }
+}
+
+// --- PUCT ---
+static float mtree_normalize(const MTree* t, float v) {
+    if (t->maxq > t->minq) return (v - t->minq) / (t->maxq - t->minq);
+    return v;
+}
+static int mcts_select(const MTree* t, const MNode* node, const MConfig* cfg) {
+    float total = 0.0f;
+    for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
+    float best = -1e30f; int best_slot = node->legal[0];
+    float sq = sqrtf(total + 1e-8f);
+    for (int k = 0; k < node->n_legal; k++) {
+        int slot = node->legal[k];
+        float n = node->N[slot];
+        float q = n > 0 ? mtree_normalize(t, node->Q[slot]) : 0.0f;
+        float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
+        float score = q + u;
+        if (score > best) { best = score; best_slot = slot; }
+    }
+    return best_slot;
+}
+static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
+                         float leaf_value) {
+    float g = leaf_value;
+    for (int i = len - 1; i >= 0; i--) {
+        MNode* node = path[i].node; int slot = path[i].slot;
+        g = node->edge_reward[slot] + cfg->gamma * g;
+        node->N[slot] += 1.0f;
+        node->W[slot] += g;
+        node->Q[slot] = node->W[slot] / node->N[slot];
+        if (node->Q[slot] < t->minq) t->minq = node->Q[slot];
+        if (node->Q[slot] > t->maxq) t->maxq = node->Q[slot];
+    }
+}
+
+// Virtual loss: pessimize each traversed edge so the next descent in the same round diverges.
+// Does NOT touch minq/maxq (the inverse revert in apply_leaves restores W/N exactly).
+static void mtree_apply_vloss(const PathEntry* path, int len, float vloss) {
+    for (int i = 0; i < len; i++) {
+        MNode* node = path[i].node; int slot = path[i].slot;
+        node->N[slot] += 1.0f;
+        node->W[slot] -= vloss;
+        node->Q[slot] = node->W[slot] / node->N[slot];
+    }
+}
+static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
+    for (int i = 0; i < len; i++) {
+        MNode* node = path[i].node; int slot = path[i].slot;
+        node->N[slot] -= 1.0f;
+        node->W[slot] += vloss;
+        node->Q[slot] = node->N[slot] > 0.0f ? node->W[slot] / node->N[slot] : 0.0f;
+    }
+}
+
+static float mcts_scale_reward(const MConfig* cfg, float reward) {
+    float r = reward / (cfg->return_scale + 1e-8f);
+    if (r > MCLIP) r = MCLIP; else if (r < -MCLIP) r = -MCLIP;
+    return r;
+}
+
+// --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
+//     and their paths; terminal/dead leaves back up in-place; stops on collision or arena-full. ---
+static void mcts_collect_round(MTree* t, const MConfig* cfg) {
+    t->n_pending = 0;
+    int L = cfg->leaves_per_round;
+    for (int li = 0; li < L && t->n_pending < MAX_LPR; li++) {
+        PathEntry* path = t->path[t->n_pending];   // build into the next pending slot's buffer
+        int plen = 0;
+        MNode* node = t->root;
+        while (1) {
+            if (node->terminal || node->n_legal == 0) {  // dead end: real backup of 0 in-place
+                mtree_backup(t, cfg, path, plen, 0.0f);
+                break;
+            }
+            if (node->awaiting_eval) break;              // collision: another descent owns this leaf
+            int slot = mcts_select(t, node, cfg);
+            path[plen].node = node; path[plen].slot = slot; plen++;
+            MNode* child = node->child[slot];
+            if (child == NULL) {
+                MNode* leaf = mtree_alloc(t);
+                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); break; }  // arena full
+                leaf->st = node->st;
+                bool terminal = false;
+                float attack = mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal);
+                node->child[slot] = leaf;
+                // Death (top-out/holes, or a resulting no-legal position) is the loss signal:
+                // subtract w_death from the terminal edge reward (same raw scale as attack).
+                bool dead = terminal || !mcts_enumerate(leaf, cfg);
+                if (dead) {
+                    leaf->terminal = true;
+                    node->edge_reward[slot] =
+                        mcts_scale_reward(cfg, cfg->w_attack * attack - cfg->w_death);
+                    mtree_backup(t, cfg, path, plen, 0.0f);
+                    break;
+                }
+                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack);
+                leaf->awaiting_eval = true;
+                t->pending[t->n_pending] = leaf;
+                t->path_len[t->n_pending] = plen;
+                t->n_pending++;
+                mtree_apply_vloss(path, plen, cfg->vloss);  // steer the next descent away
+                break;
+            }
+            node = child;
+        }
+    }
+}
+
+static void msoftmax_into_prior(MNode* node, const float* logits) {
+    float mx = -1e30f;
+    for (int k = 0; k < node->n_legal; k++) { float l = logits[node->legal[k]]; if (l > mx) mx = l; }
+    float sum = 0.0f;
+    for (int k = 0; k < node->n_legal; k++) { float e = expf(logits[node->legal[k]] - mx); node->prior[node->legal[k]] = e; sum += e; }
+    for (int k = 0; k < node->n_legal; k++) node->prior[node->legal[k]] /= sum;
+}
+
+// ============================================================
+// Exported protocol
+// ============================================================
+
+void* mcts_create(int num_trees, int board_height, int queue_size, int max_height,
+                  int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
+                  float c_puct, float gamma, float w_attack, float w_b2b, float w_death,
+                  float return_scale, int max_len, int max_nodes,
+                  int leaves_per_round, float vloss) {
+    b2b_init_pieces();
+    // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
+    { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
+      find_placement_candidates_c(b, board_height, PIECE_I, 0, 3, 0, max_len, 0, sq, lr); }
+    MEngine* e = (MEngine*)calloc(1, sizeof(MEngine));
+    e->num_trees = num_trees;
+    e->max_nodes = max_nodes;
+    // Per-round C work is tiny (one small tree per game), so the net dominates and the
+    // search is net-bound. A few threads beat both serial and all-cores: using every
+    // logical core oversubscribes this small work and is slower than serial. Cap low
+    // (~quarter of logical cores), <= num_trees, and let OMP_NUM_THREADS lower it further.
+    int cap = omp_get_num_procs() / 4; if (cap < 1) cap = 1;
+    int envmax = omp_get_max_threads();
+    e->n_threads = num_trees;
+    if (e->n_threads > cap) e->n_threads = cap;
+    if (e->n_threads > envmax) e->n_threads = envmax;
+    // Size the pool itself (not just the per-region count): libgomp's default pool spans all
+    // logical cores and its idle threads busy-wait, stealing CPU from the TF net threads.
+    // Save/restore the process default (mcts_destroy) so we don't shrink other OpenMP users
+    // (e.g. the b2b beam search) if they share the process.
+    e->prev_omp_threads = omp_get_max_threads();
+    omp_set_num_threads(e->n_threads);
+    e->cfg.board_height = board_height; e->cfg.queue_size = queue_size;
+    e->cfg.max_height = max_height; e->cfg.max_holes = max_holes;
+    e->cfg.garbage_push_delay = garbage_push_delay;
+    e->cfg.auto_push_garbage = auto_push_garbage; e->cfg.auto_fill_queue = auto_fill_queue;
+    e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
+    e->cfg.w_attack = w_attack; e->cfg.w_b2b = w_b2b; e->cfg.w_death = w_death;
+    e->cfg.return_scale = return_scale;
+    e->cfg.max_len = max_len;
+    if (leaves_per_round < 1) leaves_per_round = 1;
+    if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
+    e->cfg.leaves_per_round = leaves_per_round;
+    e->cfg.vloss = vloss;
+    e->trees = (MTree*)calloc(num_trees, sizeof(MTree));
+    for (int i = 0; i < num_trees; i++) {
+        e->trees[i].pool = (MNode*)calloc((size_t)max_nodes, sizeof(MNode));
+        e->trees[i].pool_cap = max_nodes;
+    }
+    return e;
+}
+
+// Set one tree's root state from a live env snapshot.
+void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hold,
+                   const int* queue, int qlen, int b2b, int combo,
+                   int64_t rng_t, const int* pending, int pending_len,
+                   const int* garb_rows, const int* garb_col, const int* garb_timer, int gcnt) {
+    MEngine* e = (MEngine*)h;
+    MTree* t = &e->trees[tree];
+    t->root = NULL; t->alive = false; t->dead = false;
+    t->minq = 1e30f; t->maxq = -1e30f; t->pool_used = 0; t->n_pending = 0;
+    MNode* root = mtree_alloc(t);
+    MState* s = &root->st;
+    memset(s, 0, sizeof(*s));
+    for (int r = 0; r < e->cfg.board_height; r++) s->board[r] = board[r];
+    s->active = active; s->hold = hold;
+    s->qlen = qlen; for (int i = 0; i < qlen; i++) s->queue[i] = queue[i];
+    s->b2b = b2b; s->combo = combo;
+    s->rng.t = rng_t;
+    s->pending_len = pending_len; s->pending_pos = 0;
+    for (int i = 0; i < pending_len; i++) s->pending[i] = pending[i];
+    s->gcnt = gcnt;
+    for (int i = 0; i < gcnt; i++) { s->gq[i].rows = garb_rows[i]; s->gq[i].col = garb_col[i]; s->gq[i].timer = garb_timer[i]; }
+    t->root = root;
+}
+
+// Enumerate all roots (parallel). Emits net-input rows for live roots; dead roots flagged.
+// Returns nv (#rows); tree_ids[k] = tree index for row k.
+int mcts_collect_roots(void* h, float* boards, int64_t* pieces, float* bcg,
+                       float* pls, uint8_t* masks, int* tree_ids) {
+    MEngine* e = (MEngine*)h;
+    const MConfig* cfg = &e->cfg;
+    int pw = 2 + cfg->queue_size;
+    #pragma omp parallel for schedule(dynamic) num_threads(e->n_threads)
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (t->root == NULL) { t->dead = true; continue; }
+        if (!mcts_enumerate(t->root, cfg)) { t->dead = true; t->alive = false; }
+        else { t->alive = true; }
+    }
+    int nv = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        mcts_fill_request(t->root, cfg, &boards[(size_t)nv * cfg->board_height * BOARD_COLS],
+                          &pieces[(size_t)nv * pw], &bcg[(size_t)nv * 3],
+                          &pls[(size_t)nv * MCAP * 18], &masks[(size_t)nv * MCAP]);
+        tree_ids[nv] = i; nv++;
+    }
+    return nv;
+}
+
+// Apply root net eval + injected Dirichlet noise (Python-generated, one row per live tree
+// in the same order as collect_roots emitted). dir_noise is [nv * MCAP] (only legal slots used).
+void mcts_apply_roots(void* h, const float* logits, const float* values,
+                      const float* dir_noise, float dir_eps) {
+    MEngine* e = (MEngine*)h;
+    int row = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        MNode* root = t->root;
+        root->value = values[row];
+        root->expanded = true;
+        msoftmax_into_prior(root, &logits[(size_t)row * MCAP]);
+        const float* noise = &dir_noise[(size_t)row * MCAP];
+        for (int k = 0; k < root->n_legal; k++) {
+            int slot = root->legal[k];
+            root->prior[slot] = (1.0f - dir_eps) * root->prior[slot] + dir_eps * noise[slot];
+        }
+        row++;
+    }
+}
+
+// One simulation round: collect up to L leaves per live tree (parallel), emit leaf net-inputs.
+// Emission order is tree-major then pending-within-tree; apply_leaves must consume it identically.
+int mcts_collect_leaves(void* h, float* boards, int64_t* pieces, float* bcg,
+                        float* pls, uint8_t* masks, int* tree_ids) {
+    MEngine* e = (MEngine*)h;
+    const MConfig* cfg = &e->cfg;
+    int pw = 2 + cfg->queue_size;
+    #pragma omp parallel for schedule(dynamic) num_threads(e->n_threads)
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        mcts_collect_round(t, cfg);   // fills t->pending[0..n_pending) (+ their vloss paths)
+    }
+    int nv = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        for (int p = 0; p < t->n_pending; p++) {
+            mcts_fill_request(t->pending[p], cfg, &boards[(size_t)nv * cfg->board_height * BOARD_COLS],
+                              &pieces[(size_t)nv * pw], &bcg[(size_t)nv * 3],
+                              &pls[(size_t)nv * MCAP * 18], &masks[(size_t)nv * MCAP]);
+            tree_ids[nv] = i; nv++;
+        }
+    }
+    return nv;
+}
+
+// Apply leaf net eval + backup (rows match collect_leaves' emitted order). For each pending leaf:
+// set priors+value, revert its virtual loss, then back up the real bootstrap along its path.
+void mcts_apply_leaves(void* h, const float* logits, const float* values) {
+    MEngine* e = (MEngine*)h;
+    const MConfig* cfg = &e->cfg;
+    int row = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        for (int p = 0; p < t->n_pending; p++) {
+            MNode* leaf = t->pending[p];
+            leaf->value = values[row];
+            leaf->expanded = true;
+            leaf->awaiting_eval = false;
+            msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
+            float boot = leaf->value + cfg->w_b2b * (leaf->st.b2b > 0 ? leaf->st.b2b : 0) / (cfg->return_scale + 1e-8f);
+            mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
+            mtree_backup(t, cfg, t->path[p], t->path_len[p], boot);
+            row++;
+        }
+    }
+}
+
+// Read per-tree root visit counts + descriptors. pi/counts are [num_trees*MCAP];
+// root_desc is [num_trees*MCAP*5]; dead[num_trees] (1 if no move).
+void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead) {
+    MEngine* e = (MEngine*)h;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        for (int j = 0; j < MCAP; j++) { pi[(size_t)i * MCAP + j] = 0.0f; counts[(size_t)i * MCAP + j] = 0.0f; }
+        for (int j = 0; j < MCAP * 5; j++) root_desc[(size_t)i * MCAP * 5 + j] = -1;
+        if (!t->alive || t->root == NULL) { dead[i] = 1; continue; }
+        dead[i] = 0;
+        MNode* root = t->root;
+        float total = 0.0f;
+        for (int k = 0; k < root->n_legal; k++) total += root->N[root->legal[k]];
+        for (int k = 0; k < root->n_legal; k++) {
+            int slot = root->legal[k];
+            counts[(size_t)i * MCAP + slot] = root->N[slot];
+            pi[(size_t)i * MCAP + slot] = total > 0 ? root->N[slot] / total : root->prior[slot];
+            for (int d = 0; d < 5; d++) root_desc[((size_t)i * MCAP + slot) * 5 + d] = root->desc[slot][d];
+        }
+    }
+}
+
+void mcts_destroy(void* h) {
+    MEngine* e = (MEngine*)h;
+    if (!e) return;
+    omp_set_num_threads(e->prev_omp_threads);
+    for (int i = 0; i < e->num_trees; i++) free(e->trees[i].pool);
+    free(e->trees);
+    free(e);
+}
+
+// --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
+//     deterministic core after a subtree re-sync re-applies these edits) ---
+// Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.
+int mcts_debug_enum(const uint16_t* board, int board_height, int active, int hold, int queue0,
+                    int max_len, int* out_desc) {
+    MConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.board_height = board_height; cfg.max_len = max_len;
+    b2b_init_pieces();
+    MNode node; memset(&node, 0, sizeof(node));
+    for (int r = 0; r < board_height; r++) node.st.board[r] = board[r];
+    node.st.active = active; node.st.hold = hold; node.st.queue[0] = queue0; node.st.qlen = 1;
+    mcts_enumerate(&node, &cfg);
+    for (int j = 0; j < MCAP * 5; j++) out_desc[j] = -1;
+    for (int k = 0; k < node.n_legal; k++) {
+        int slot = node.legal[k];
+        for (int d = 0; d < 5; d++) out_desc[slot * 5 + d] = node.desc[slot][d];
+    }
+    return node.n_legal;
+}
+
+// Apply one step to a serialized state; returns raw attack, writes post-step state out.
+float mcts_debug_step(uint16_t* board, int board_height, int max_height, int max_holes,
+                      int garbage_push_delay, int queue_size,
+                      int* active, int* hold, int* queue, int* qlen,
+                      int64_t* rng_t, int* pending, int* pending_len,
+                      int* garb_rows, int* garb_col, int* garb_timer, int* gcnt,
+                      int* b2b, int* combo, const int* desc, int* out_terminal) {
+    MConfig cfg; memset(&cfg, 0, sizeof(cfg));
+    cfg.board_height = board_height; cfg.max_height = max_height; cfg.max_holes = max_holes;
+    cfg.garbage_push_delay = garbage_push_delay; cfg.queue_size = queue_size;
+    cfg.auto_push_garbage = 1; cfg.auto_fill_queue = 1;
+    b2b_init_pieces();
+    MState s; memset(&s, 0, sizeof(s));
+    for (int r = 0; r < board_height; r++) s.board[r] = board[r];
+    s.active = *active; s.hold = *hold; s.qlen = *qlen;
+    for (int i = 0; i < *qlen; i++) s.queue[i] = queue[i];
+    s.rng.t = *rng_t; s.pending_len = *pending_len; s.pending_pos = 0;
+    for (int i = 0; i < *pending_len; i++) s.pending[i] = pending[i];
+    s.gcnt = *gcnt;
+    for (int i = 0; i < *gcnt; i++) { s.gq[i].rows = garb_rows[i]; s.gq[i].col = garb_col[i]; s.gq[i].timer = garb_timer[i]; }
+    s.b2b = *b2b; s.combo = *combo;
+    bool term = false;
+    float attack = mcts_apply_step(&s, &cfg, desc, &term);
+    for (int r = 0; r < board_height; r++) board[r] = s.board[r];
+    *active = s.active; *hold = s.hold; *qlen = s.qlen;
+    for (int i = 0; i < s.qlen; i++) queue[i] = s.queue[i];
+    *rng_t = s.rng.t; *pending_len = s.pending_len;
+    for (int i = 0; i < s.pending_len; i++) pending[i] = s.pending[s.pending_pos + i];
+    *gcnt = s.gcnt;
+    for (int i = 0; i < s.gcnt; i++) { garb_rows[i] = s.gq[i].rows; garb_col[i] = s.gq[i].col; garb_timer[i] = s.gq[i].timer; }
+    *b2b = s.b2b; *combo = s.combo;
+    *out_terminal = term ? 1 : 0;
+    return attack;
+}

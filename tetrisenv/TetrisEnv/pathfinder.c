@@ -704,9 +704,13 @@ void find_placement_candidates_c(
 ) {
     if (!initialized) init_pieces();
 
-    static StateMeta meta[STATE_SPACE];
-    static bool visited[STATE_SPACE];
-    static int queue[QUEUE_CAPACITY];
+    // Scratch is stack-local (not `static`) so this entry is reentrant - the C MCTS engine
+    // calls it from OpenMP-parallel leaf enumeration. ~52KB/call; the loops below re-init it,
+    // so single-threaded env use is behaviourally unchanged. (init_pieces must be primed once
+    // single-threaded before any parallel call - see mcts_create.)
+    StateMeta meta[STATE_SPACE];
+    bool visited[STATE_SPACE];
+    int queue[QUEUE_CAPACITY];
 
     for(int i=0; i<STATE_SPACE; i++) {
         visited[i] = false;
