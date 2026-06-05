@@ -5,19 +5,7 @@ Flat / 1v1 overrides via construction:
     PPOConfig(num_collection_steps=256, target_kl=0.02, expert_coef=0.1)
 """
 
-from dataclasses import dataclass
-from pathlib import Path
-
 from pydantic import BaseModel
-
-
-@dataclass
-class Paths:
-    datasets_root: Path = Path("datasets")
-    checkpoints_root: Path = Path("checkpoints")
-
-    def for_family(self, family: str, purpose: str) -> Path:
-        return self.checkpoints_root / f"{family}_{purpose}"
 
 
 class ModelConfig(BaseModel):

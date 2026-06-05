@@ -28,7 +28,6 @@ num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
 
 # Environment params
-generations = 1_000_000
 num_envs = 64
 num_collection_steps = 256
 queue_size = 5
