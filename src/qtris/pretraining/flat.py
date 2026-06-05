@@ -1,3 +1,4 @@
+from qtris.config import PretrainConfig
 from qtris.models.value import ValueModel
 from qtris.models.flat.model import FlatPolicyModel
 from qtris.pretraining.base import (
@@ -135,7 +136,7 @@ def main(args):
         num_sequences=num_sequences,
     )
 
-    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_optimizer = keras.optimizers.Adam(PretrainConfig().learning_rate)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
     v_model = None
@@ -149,7 +150,7 @@ def main(args):
             dropout_rate=dropout_rate,
             output_dim=1,
         )
-        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_optimizer = keras.optimizers.Adam(PretrainConfig().learning_rate)
         v_model.compile(optimizer=v_optimizer, jit_compile=True)
     print("Initialized models and optimizers.", flush=True)
 

@@ -1,3 +1,4 @@
+from qtris.config import PretrainConfig
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.pretraining.base import PretrainerBase, resolve_resume_checkpoint
@@ -153,7 +154,8 @@ def main(args):
         dropout_rate=dropout_rate,
     )
     optimizer = keras.optimizers.AdamW(
-        learning_rate=3e-4, weight_decay=getattr(args, "weight_decay", 0.0)
+        learning_rate=PretrainConfig().learning_rate,
+        weight_decay=getattr(args, "weight_decay", 0.0),
     )
     model.compile(optimizer=optimizer, jit_compile=True)
     model(
