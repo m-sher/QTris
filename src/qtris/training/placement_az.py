@@ -13,6 +13,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 
+from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
@@ -20,7 +21,7 @@ from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
 from qtris.observability.wandb_backend import finish, init_run, log_step
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
-from qtris.search.placement_search import net_input_from_env
+from qtris.search.placement_search import net_input_from_env, placement_step
 from qtris.training.gae import compute_raw_returns
 
 GAMMA = 0.99
@@ -110,6 +111,40 @@ def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len
     ]
 
 
+def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_envs):
+    """Pre-training estimate of the discounted-return variance to seed return_scale.
+    The EMA on return_var is slow (0.01), so a fresh warm-start would sit mis-scaled for many
+    generations - giving the value head a huge initial loss and badly-scaled targets. One short
+    self-play rollout with the warm-started net, over the same attack-only return the value head
+    regresses (pure MC, no bootstrap), gives a calibrated starting scale."""
+    rewards = np.zeros((horizon, num_envs), dtype=np.float32)
+    dones = np.zeros((horizon, num_envs), dtype=np.float32)
+    for env in envs:
+        env._reset()
+    for t in range(horizon):
+        results = mcts.search(envs, 1.0, np.ones(num_envs, dtype=np.float32))
+        for i, res in enumerate(results):
+            if res["dead"]:
+                envs[i]._step(forced_drop.copy())
+                rewards[t, i] = -mcts.cfg.w_death
+                dones[t, i] = 1.0
+                envs[i]._reset()
+                continue
+            _total, attack, _clear, died = placement_step(
+                envs[i], searcher, res["descriptor"]
+            )
+            rewards[t, i] = mcts.cfg.w_attack * attack - (
+                mcts.cfg.w_death if died else 0.0
+            )
+            if died or envs[i]._episode_ended:
+                dones[t, i] = 1.0
+                envs[i]._reset()
+    raw = compute_raw_returns(
+        rewards[..., None], dones[..., None], gamma, horizon, num_envs
+    )
+    return max(float(tf.math.reduce_variance(raw)), 1.0)
+
+
 def main(args):
     piece_dim, depth, num_heads, num_layers = 8, 64, 4, 4
     queue_size, max_len = 5, 15
@@ -128,6 +163,11 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=getattr(args, "gamma", GAMMA),
         temp_moves=getattr(args, "temp_moves", 12),
+        w_attack=getattr(args, "w_attack", 1.0),
+        w_b2b=getattr(args, "w_b2b", 1.0),
+        w_death=getattr(args, "w_death", 5.0),
+        leaves_per_round=getattr(args, "leaves_per_round", 4),
+        vloss=getattr(args, "vloss", 1.0),
     )
 
     config = AlphaZeroTrainConfig(
@@ -196,6 +236,9 @@ def main(args):
         args=args,
     )
     mcts = PlacementMCTS(net, cfg)
+    searcher = (
+        CB2BSearch()
+    )  # lock-score core for committing the chosen move by descriptor
 
     forced_drop = np.full(max_len, Keys.PAD, dtype=np.int64)
     forced_drop[0], forced_drop[1] = Keys.START, Keys.HARD_DROP
@@ -206,6 +249,21 @@ def main(args):
 
     wandb_run = init_run(project="Tetris", config=config)
     return_var = float(return_scale) ** 2
+
+    # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
+    # whose return_scale was restored above). Avoids the slow-EMA cold-start mis-scaling.
+    if not manager.latest_checkpoint:
+        return_var = _estimate_return_var(
+            mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
+        )
+        return_scale.assign(tf.sqrt(return_var))
+        print(
+            f"Seeded return_scale={float(return_scale):.3f} from warm-start.",
+            flush=True,
+        )
+        for env in envs:
+            env._reset()
+        move_count = np.zeros(num_games, dtype=np.int64)
 
     for gen in range(num_generations):
         boards = np.zeros((horizon, num_games, 24, 10, 1), dtype=np.float32)
@@ -231,7 +289,11 @@ def main(args):
             for i, res in enumerate(results):
                 if res["dead"]:
                     ts = envs[i]._step(forced_drop.copy())
-                    rewards[t, i] = float(ts.reward["total_reward"])
+                    # Dead root = death: same attack-only reward the search optimizes, minus the
+                    # death penalty (b2b is a search-time leaf bootstrap, not a realized reward).
+                    rewards[t, i] = (
+                        cfg.w_attack * float(ts.reward["attack"]) - cfg.w_death
+                    )
                     attacks[t, i] = float(ts.reward["attack"])
                     clears[t, i] = float(ts.reward["clear"])
                     dones[t, i] = 1.0
@@ -246,11 +308,14 @@ def main(args):
                 pi_tgt[t, i] = res["pi"]
                 visits[t, i] = res["visits"]
                 storable[t, i] = True
-                ts = envs[i]._step(res["key_sequence"])
-                rewards[t, i] = float(ts.reward["total_reward"])
-                attacks[t, i] = float(ts.reward["attack"])
-                clears[t, i] = float(ts.reward["clear"])
-                if ts.is_last():
+                _total, attack, clear, died = placement_step(
+                    envs[i], searcher, res["descriptor"]
+                )
+                # attack-only return target (see above), minus the death penalty on a fatal move
+                rewards[t, i] = cfg.w_attack * attack - (cfg.w_death if died else 0.0)
+                attacks[t, i] = attack
+                clears[t, i] = clear
+                if died or envs[i]._episode_ended:
                     dones[t, i] = 1.0
                     envs[i]._reset()
                     move_count[i] = 0
