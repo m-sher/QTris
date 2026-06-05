@@ -190,29 +190,24 @@ def enumerate_node(env, searcher, cfg):
 
 
 def _policy_value_batch(net, boards, pieces, bcgs, placements, masks):
-    logits, value = net(
+    logits, value = net.policy_value(
         (
             tf.constant(np.concatenate(boards), tf.float32),
             tf.constant(np.concatenate(pieces), tf.int64),
             tf.constant(np.concatenate(bcgs), tf.float32),
             tf.constant(np.stack(placements), tf.float32),
             tf.constant(np.stack(masks), tf.bool),
-        ),
-        training=False,
+        )
     )
     return logits.numpy(), value.numpy()[:, 0]
 
 
 def _value_batch(net, boards, pieces, bcgs):
-    piece_dec = net.process_obs(
-        (
-            tf.constant(np.concatenate(boards), tf.float32),
-            tf.constant(np.concatenate(pieces), tf.int64),
-            tf.constant(np.concatenate(bcgs), tf.float32),
-        ),
-        training=False,
-    )[0]
-    return net.score_value(piece_dec, training=False).numpy()[:, 0]
+    return net.state_value(
+        tf.constant(np.concatenate(boards), tf.float32),
+        tf.constant(np.concatenate(pieces), tf.int64),
+        tf.constant(np.concatenate(bcgs), tf.float32),
+    ).numpy()[:, 0]
 
 
 def _gate(logits, mask, gate_k):

@@ -329,15 +329,11 @@ def main(args):
             last_b.append(b)
             last_p.append(p)
             last_g.append(g)
-        last_piece_dec = net.process_obs(
-            (
-                tf.constant(np.concatenate(last_b), tf.float32),
-                tf.constant(np.concatenate(last_p), tf.int64),
-                tf.constant(np.concatenate(last_g), tf.float32),
-            ),
-            training=False,
-        )[0]
-        last_values = net.score_value(last_piece_dec, training=False)
+        last_values = net.state_value(
+            tf.constant(np.concatenate(last_b), tf.float32),
+            tf.constant(np.concatenate(last_p), tf.int64),
+            tf.constant(np.concatenate(last_g), tf.float32),
+        )
 
         scaled = np.clip(rewards[..., None] / (scale + 1e-8), -REWARD_CLIP, REWARD_CLIP)
         returns = _discounted_returns(

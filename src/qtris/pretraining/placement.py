@@ -142,7 +142,7 @@ def main(args):
     queue_size = 5
     num_heads = 4
     num_layers = 4
-    dropout_rate = 0.0
+    dropout_rate = 0.2
     batch_size = args.batch_size
 
     model = PlacementPolicyValueNet(

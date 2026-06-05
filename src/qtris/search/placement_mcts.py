@@ -62,15 +62,14 @@ class PlacementMCTS:
                 z(pls),
                 z(masks),
             )
-        logits, value = self.net(
+        logits, value = self.net.policy_value(
             (
                 tf.constant(boards, tf.float32),
                 tf.constant(pieces, tf.int64),
                 tf.constant(bcg, tf.float32),
                 tf.constant(pls, tf.float32),
                 tf.constant(masks, tf.bool),
-            ),
-            training=False,
+            )
         )
         return logits.numpy()[:nv], value.numpy()[:nv, 0]
 
