@@ -185,8 +185,6 @@ def main(args):
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()
-    search_depth = datagen_cfg.search_depth
-    beam_width = datagen_cfg.beam_width
     queue_size = 5
     max_len = 15
     max_height = 18
@@ -197,7 +195,6 @@ def main(args):
     garbage_max = 4
     garbage_push_delay = 1
     num_row_tiers = 2
-    death_trim_count = datagen_cfg.death_trim_count
     gamma = 0.99
 
     existing_count = 0
@@ -234,8 +231,8 @@ def main(args):
     new_transitions, unmatched, deaths, max_b2b = collect(
         seed=seed + existing_count,
         num_steps=num_steps,
-        search_depth=search_depth,
-        beam_width=beam_width,
+        search_depth=datagen_cfg.search_depth,
+        beam_width=datagen_cfg.beam_width,
         queue_size=queue_size,
         max_len=max_len,
         max_height=max_height,
@@ -246,7 +243,7 @@ def main(args):
         garbage_max=garbage_max,
         garbage_push_delay=garbage_push_delay,
         num_row_tiers=num_row_tiers,
-        death_trim_count=death_trim_count,
+        death_trim_count=datagen_cfg.death_trim_count,
         gamma=gamma,
         headless=getattr(args, "headless", False),
     )
