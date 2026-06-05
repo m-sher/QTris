@@ -136,8 +136,6 @@ def main(args):
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()
-    search_depth = datagen_cfg.search_depth
-    beam_width = datagen_cfg.beam_width
     queue_size = 5
     max_len = 15
     max_height = 18
@@ -186,8 +184,8 @@ def main(args):
     new_transitions, deaths, max_b2b = collect(
         seed=seed + existing_count,
         num_steps=num_steps,
-        search_depth=search_depth,
-        beam_width=beam_width,
+        search_depth=datagen_cfg.search_depth,
+        beam_width=datagen_cfg.beam_width,
         queue_size=queue_size,
         max_len=max_len,
         max_height=max_height,
