@@ -129,15 +129,14 @@ class PlacementRunner:
                 pieces.numpy(),
             )
             cand_mask_tf = tf.constant(cand_mask)
-            logits, values = self.net(
+            logits, values = self.net.policy_value(
                 (
                     board,
                     pieces,
                     bcg,
                     tf.constant(cand_placements, tf.float32),
                     cand_mask_tf,
-                ),
-                training=False,
+                )
             )
             masked = tf.where(
                 cand_mask_tf, logits / self._temperature, tf.constant(-1e9, tf.float32)
@@ -166,15 +165,11 @@ class PlacementRunner:
             b["dones"].append(tf.cast(time_step.is_last(), tf.float32)[..., None])
 
         # bootstrap last value (state-only; no candidates needed)
-        piece_dec = self.net.process_obs(
-            (
-                time_step.observation["board"],
-                time_step.observation["pieces"],
-                time_step.observation["b2b_combo_garbage"],
-            ),
-            training=False,
-        )[0]
-        last_values = self.net.score_value(piece_dec, training=False)
+        last_values = self.net.state_value(
+            time_step.observation["board"],
+            time_step.observation["pieces"],
+            time_step.observation["b2b_combo_garbage"],
+        )
 
         out = {k: tf.stack(v) for k, v in b.items()}  # (T, N, ...)
         out["last_values"] = last_values

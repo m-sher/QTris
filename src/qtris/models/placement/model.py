@@ -109,22 +109,15 @@ class PlacementPolicyValueNet(QtrisModelBase):
         )
         self.value_top = layers.Dense(1, name="value")
 
-    @tf.function(
-        jit_compile=True,
-        input_signature=[
-            (
-                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
-                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
-            ),
-            tf.TensorSpec(shape=(), dtype=tf.bool),
-        ],
-    )
     def process_obs(self, inputs, training=False):
         """Encoder pass returning the piece latent AND the board patch latent.
 
         Overrides the base (which returns only `piece_dec`) so the candidate scorer
         can cross-attend to the board patches, not just the piece/bcg summary.
+
+        Plain method (no own @tf.function): composed by the non-jit training forward (`call`,
+        training=True -> graph-mode dropout) and inlined into the jit inference wrappers
+        (`predict`/`policy_value`/`state_value`, training=False -> no dropout op enters XLA).
         """
         board, piece, b2b_combo_garbage = inputs
 
@@ -152,7 +145,6 @@ class PlacementPolicyValueNet(QtrisModelBase):
 
         return piece_dec, board_dec, piece_scores
 
-    @tf.function(jit_compile=True)
     def score_candidates(self, context, cand_placements, cand_mask, training=False):
         # context = board patches + pieces + bcg tokens (the full encoded state).
         move_emb = self.move_encoder(cand_placements, training=training)  # (B,C,depth)
@@ -167,14 +159,15 @@ class PlacementPolicyValueNet(QtrisModelBase):
         )  # (B,C)
         return tf.where(cand_mask, logits, tf.constant(-1e9, dtype=tf.float32))
 
-    @tf.function(jit_compile=True)
     def score_value(self, piece_dec, training=False):
         return self.value_top(
             self.value_trunk(piece_dec, training=training), training=training
         )  # (B, 1)
 
-    @tf.function(jit_compile=True)
+    @tf.function
     def call(self, inputs, training=False, return_scores=False):
+        # Non-jit training forward (used by pretraining/AZ train_step at training=True). Graph mode,
+        # so dropout (dropout_rate>0) works. Inference goes through the jit wrappers below, not call.
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
 
         piece_dec, board_dec, piece_scores = self.process_obs(
@@ -189,6 +182,51 @@ class PlacementPolicyValueNet(QtrisModelBase):
         if return_scores:
             return logits, value, piece_scores
         return logits, value
+
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            (
+                tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+                tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+                tf.TensorSpec(
+                    shape=(None, CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM),
+                    dtype=tf.float32,
+                ),
+                tf.TensorSpec(shape=(None, CANDIDATE_CAPACITY), dtype=tf.bool),
+            )
+        ],
+    )
+    def policy_value(self, inputs):
+        """Jit inference forward for MCTS: (logits, value) from one encoder pass, training=False.
+        Same compute as call() at eval, minus the training flag - so XLA never sees dropout."""
+        board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
+        piece_dec, board_dec, _ = self.process_obs(
+            (board, piece, b2b_combo_garbage), training=False
+        )
+        context = tf.concat([board_dec, piece_dec], axis=1)
+        logits = self.score_candidates(
+            context, cand_placements, cand_mask, training=False
+        )
+        value = self.score_value(piece_dec, training=False)
+        return logits, value
+
+    @tf.function(
+        jit_compile=True,
+        input_signature=[
+            tf.TensorSpec(shape=(None, 24, 10, 1), dtype=tf.float32),
+            tf.TensorSpec(shape=(None, None), dtype=tf.int64),
+            tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
+        ],
+    )
+    def state_value(self, board, piece, b2b_combo_garbage):
+        """Jit inference value-only forward (AZ tail bootstrap): process_obs -> score_value,
+        training=False, skipping the candidate cross-attention. Returns (B, 1)."""
+        piece_dec, _, _ = self.process_obs(
+            (board, piece, b2b_combo_garbage), training=False
+        )
+        return self.score_value(piece_dec, training=False)
 
     @tf.function(
         jit_compile=True,
