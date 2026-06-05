@@ -1,4 +1,5 @@
 from TetrisEnv.Moves import Keys
+from qtris.config import PretrainConfig
 from qtris.models.ar.model import PolicyModel
 from qtris.models.value import ValueModel
 from qtris.pretraining.base import PretrainerBase, resolve_resume_checkpoint
@@ -164,7 +165,7 @@ def main(args):
         output_dim=key_dim,
     )
 
-    p_optimizer = keras.optimizers.Adam(3e-4)
+    p_optimizer = keras.optimizers.Adam(PretrainConfig().learning_rate)
     p_model.compile(optimizer=p_optimizer, jit_compile=True)
 
     v_model = None
@@ -178,7 +179,7 @@ def main(args):
             dropout_rate=dropout_rate,
             output_dim=1,
         )
-        v_optimizer = keras.optimizers.Adam(3e-4)
+        v_optimizer = keras.optimizers.Adam(PretrainConfig().learning_rate)
         v_model.compile(optimizer=v_optimizer, jit_compile=True)
     print("Initialized models and optimizers.", flush=True)
 

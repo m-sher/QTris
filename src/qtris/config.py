@@ -51,7 +51,7 @@ class PPOConfig(BaseModel):
 class PretrainConfig(BaseModel):
     return_clip_low: float = -150.0
     return_clip_high: float = 100.0
-    batch_size: int = 512
+    batch_size: int = 128
     epochs: int = 10
     learning_rate: float = 3e-4
 

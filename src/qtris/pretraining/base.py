@@ -11,8 +11,11 @@ import os
 import tensorflow as tf
 from tensorflow import keras
 
-RETURN_CLIP_LOW = -150.0
-RETURN_CLIP_HIGH = 100.0
+from qtris.config import PretrainConfig
+
+_pretrain_cfg = PretrainConfig()
+RETURN_CLIP_LOW = _pretrain_cfg.return_clip_low
+RETURN_CLIP_HIGH = _pretrain_cfg.return_clip_high
 
 
 def surge_correction(b2b):
