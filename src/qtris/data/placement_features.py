@@ -82,21 +82,6 @@ def build_placement_target(
     return placements, scores
 
 
-def build_placement_descriptors(cand_actions, cand_scores, cand_rows):
-    """Per-slot placement descriptors `(is_hold, rot, norm_col, landing_row, spin)` in the
-    same 128-slot order as `build_placement_inference`; empty slots are -1. Lets the search
-    step by placement (C lock-score) instead of replaying key sequences."""
-    desc = np.full((CANDIDATE_CAPACITY, 5), -1, dtype=np.int64)
-    actions = np.asarray(cand_actions, dtype=np.int64)
-    cand_scores = np.asarray(cand_scores, dtype=np.float32)
-    cand_rows = np.asarray(cand_rows, dtype=np.int64)
-    for slot, ci in _branch_order(actions, cand_scores):
-        a = int(actions[ci])
-        rem = a % 160
-        desc[slot] = (a // 160, rem // 40, (rem % 40) // 4, int(cand_rows[ci]), rem % 4)
-    return desc
-
-
 def build_placement_inference(
     cand_actions,
     cand_scores,
