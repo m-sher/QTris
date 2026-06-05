@@ -53,8 +53,8 @@ def placement_step(env, searcher, desc):
     """Step `env` by a placement descriptor `(is_hold, rot, norm_col, landing_row, spin)`,
     locking + scoring via the C core (`searcher.lock_score`) and reusing the env's own
     garbage / stats / shaping-reward path exactly as `_step`. Mutates `env` in place and
-    returns `(total_reward, died)`. Verified equivalent to `_step(key_sequence)` by the
-    placement parity gate, so MCTS search behaviour is unchanged."""
+    returns `(total_reward, attack, clears, died)`. Verified equivalent to `_step(key_sequence)`
+    by the placement parity gate, so committing real moves by descriptor matches `_step`."""
     is_hold, rot, norm_col, landing_row, spin = (int(x) for x in desc)
     env._step_num += 1
     pre_b2b = env._scorer._b2b
@@ -138,7 +138,7 @@ def placement_step(env, searcher, desc):
     env._episode_ended = died or (
         env._step_num >= env._max_steps if env._max_steps else False
     )
-    return float(total_reward), died
+    return float(total_reward), float(attack), int(clears), died
 
 
 def net_input_from_env(env):
