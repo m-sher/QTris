@@ -1,6 +1,7 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
+from qtris.config import DataGenConfig
 import os
 import shutil
 import numpy as np
@@ -183,8 +184,9 @@ def main(args):
     num_steps = args.steps
     seed = getattr(args, "seed", 0)
 
-    search_depth = 7
-    beam_width = 96
+    datagen_cfg = DataGenConfig()
+    search_depth = datagen_cfg.search_depth
+    beam_width = datagen_cfg.beam_width
     queue_size = 5
     max_len = 15
     max_height = 18
@@ -195,7 +197,7 @@ def main(args):
     garbage_max = 4
     garbage_push_delay = 1
     num_row_tiers = 2
-    death_trim_count = 20
+    death_trim_count = datagen_cfg.death_trim_count
     gamma = 0.99
 
     existing_count = 0

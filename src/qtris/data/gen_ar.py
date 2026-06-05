@@ -1,5 +1,6 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
+from qtris.config import DataGenConfig
 import os
 import shutil
 import numpy as np
@@ -134,8 +135,9 @@ def main(args):
     num_steps = args.steps
     seed = getattr(args, "seed", 0)
 
-    search_depth = 16
-    beam_width = 200
+    datagen_cfg = DataGenConfig()
+    search_depth = datagen_cfg.search_depth
+    beam_width = datagen_cfg.beam_width
     queue_size = 5
     max_len = 15
     max_height = 18
