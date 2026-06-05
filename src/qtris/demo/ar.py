@@ -1,7 +1,7 @@
 import tensorflow as tf
 from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Convert, Keys
+from TetrisEnv.Moves import Keys
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -17,8 +17,6 @@ from qtris.demo.rendering import (
 )
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 import time
-
-pathfinding = True
 
 # Model params
 num_envs = 1
@@ -68,7 +66,7 @@ def main(args):
         max_height=max_height,
         max_steps=num_steps,
         max_len=max_len,
-        pathfinding=pathfinding,
+        pathfinding=True,
         garbage_chance=0.15,
         garbage_min=1,
         garbage_max=4,
@@ -144,9 +142,6 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
-
-        if not pathfinding:
-            valid_sequences = Convert.tf_to_sequence[None, ...]
 
         # A reachable placement is any sequence row that is not all-PAD.
         num_valid_seqs = int(
