@@ -64,6 +64,22 @@ def main(args):
 
     load_checkpoint(p_model, args.checkpoint)
 
+    # MCTS search must use the SAME return_scale the value head was trained at - it normalizes
+    # the per-edge attack / b2b / death terms against the learned value. At the default 1.0 the
+    # immediate reward terms dwarf the value head (~return_scale x too large), so the search
+    # cashes out / breaks b2b instead of hoarding. Restore it from the (AZ) checkpoint; BC/PPO
+    # checkpoints have no return_scale -> fall back to 1.0.
+    mcts_return_scale = 1.0
+    try:
+        _ck = tf.train.latest_checkpoint(args.checkpoint)
+        _reader = tf.train.load_checkpoint(_ck)
+        mcts_return_scale = float(
+            _reader.get_tensor("return_scale/.ATTRIBUTES/VARIABLE_VALUE")
+        )
+        print(f"MCTS using trained return_scale={mcts_return_scale:.3f}", flush=True)
+    except Exception:
+        print("No return_scale in checkpoint; MCTS using return_scale=1.0", flush=True)
+
     p_model.summary()
 
     py_env = PyTetrisEnv(
@@ -96,6 +112,7 @@ def main(args):
                 num_simulations=args.mcts_sims,
                 c_puct=args.mcts_cpuct,
                 dirichlet_eps=0.0,
+                leaves_per_round=getattr(args, "mcts_leaves", 4),
             ),
         )
         if getattr(args, "mcts_sims", 0) > 0
@@ -206,13 +223,20 @@ def main(args):
         if mcts is not None:
             # AlphaZero-style play: PUCT MCTS picks the move greedily by visit count
             # (the predict above is only for the attention panel + piece_scores).
-            res = mcts.search([py_env], 1.0, 0.0)[0]
+            res = mcts.search([py_env], mcts_return_scale, 0.0)[0]
             if res["dead"]:
                 forced = np.full(max_len, Keys.PAD, dtype=np.int64)
                 forced[0], forced[1] = Keys.START, Keys.HARD_DROP
                 key_sequence = tf.constant(forced[None], dtype=tf.int64)
             else:
-                key_sequence = tf.constant(res["key_sequence"][None], dtype=tf.int64)
+                # The C engine steps by descriptor; reconstruct the key sequence for the
+                # chosen placement from the env pathfinder to drive the (TF-wrapped) demo env.
+                is_hold, rot, norm_col, _landing, spin = res["descriptor"]
+                action_index = is_hold * 160 + rot * 40 + norm_col * 4 + spin
+                _, _, cand_seqs = py_env._enumerate_placement_candidates()
+                key_sequence = tf.constant(
+                    cand_seqs[action_index][None], dtype=tf.int64
+                )
         elif search_cfg is not None:
             # Neural-guided search picks the move (the predict above is only for the
             # attention panel + piece_scores). The search handles dead states itself.

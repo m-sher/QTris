@@ -63,6 +63,14 @@ def main() -> None:
         default=1.5,
         help="placement --mcts-sims: PUCT exploration constant.",
     )
+    parser.add_argument(
+        "--mcts-leaves",
+        type=int,
+        default=4,
+        help="placement --mcts-sims: intra-tree leaf batching (leaves per net call via "
+        "virtual loss). Higher = fewer net calls (~L x faster); 1 = exact sequential. "
+        "Default 4.",
+    )
     args = parser.parse_args()
 
     if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:

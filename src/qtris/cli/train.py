@@ -39,6 +39,20 @@ def main() -> None:
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(
+        "--leaves-per-round",
+        type=int,
+        default=4,
+        help="intra-tree leaf batching: leaves collected per tree per net call (virtual "
+        "loss). Higher = fewer net calls (~L x faster) but more search distortion; 1 = "
+        "sequential. Default 4.",
+    )
+    az.add_argument(
+        "--vloss",
+        type=float,
+        default=1.0,
+        help="virtual-loss magnitude (scaled-Q units).",
+    )
+    az.add_argument(
         "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
     )
     az.add_argument(
