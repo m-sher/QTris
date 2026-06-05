@@ -29,7 +29,6 @@ dropout_rate = 0.00
 max_len = 15
 
 # Environment params
-generations = 1_000_000
 num_envs = 64
 num_collection_steps = 256
 queue_size = 5
