@@ -4,9 +4,10 @@ Same solo-play env + random-garbage settings as the PPO trainer
 (`qtris.training.placement`), but PPO is replaced by an AlphaZero loop: PUCT MCTS
 (`PlacementMCTS`) plays self-play games using the net's policy as priors and its value
 head at leaves; the net is then trained to imitate the search (policy -> root visit
-distribution) and to regress the Monte-Carlo discounted return (value -> outcome).
-Iterating makes search and net improve together. Warm-starts from the BC checkpoint;
-wandb observability via `qtris.observability`. No expert/BC anchor - pure self-play.
+distribution) and to regress the oracle `evaluate_state` (value -> board eval, the SAME
+target pretraining uses, so warm-start from the BC checkpoint doesn't collapse). Iterating
+improves the policy via search; the value stays the oracle critic. wandb observability via
+`qtris.observability`. No expert/BC anchor - pure self-play.
 """
 
 import numpy as np
@@ -21,11 +22,10 @@ from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
 from qtris.observability.wandb_backend import finish, init_run, log_step
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
-from qtris.search.placement_search import net_input_from_env, placement_step
+from qtris.search.placement_search import placement_step
 from qtris.training.gae import compute_raw_returns
 
 GAMMA = 0.99
-REWARD_CLIP = 10.0
 
 
 def _flat(arr, sel):
@@ -33,17 +33,25 @@ def _flat(arr, sel):
     return arr.reshape((-1,) + arr.shape[2:])[sel]
 
 
-@tf.function(jit_compile=True)
-def _discounted_returns(rewards, dones, last_values, gamma, num_steps, num_envs):
-    """MC discounted return per step, bootstrapped with `last_values` on the live tail
-    and cut at episode boundaries (mirrors compute_raw_returns but seeded)."""
-    returns = tf.TensorArray(tf.float32, size=num_steps, element_shape=(num_envs, 1))
-    last_ret = last_values
-    for t in tf.range(num_steps - 1, -1, -1):
-        mask = 1.0 - dones[t]
-        last_ret = rewards[t] + gamma * last_ret * mask
-        returns = returns.write(t, last_ret)
-    return tf.ensure_shape(returns.stack(), (num_steps, num_envs, 1))
+def _max_cand_value(searcher, env):
+    """Value target matching the pretraining target in form: max over the oracle's candidate
+    evaluations (full evaluate_state per resulting placement) for this state. Pretraining used
+    max(cand_scores)/value_scale from the depth-16 datagen beam; this is the cheap depth-0
+    version (one decompose call/move) - keeps the value the oracle critic so warm-start from the
+    BC checkpoint doesn't collapse. max over candidates also dodges evaluate_state's near-death
+    floor (the best move usually survives)."""
+    queue = np.array([p.value for p in env._queue], dtype=np.int32)
+    d = searcher.decompose(
+        env._board,
+        env._active_piece.piece_type.value,
+        env._hold_piece.value,
+        queue,
+        int(env._scorer._b2b),
+        int(env._scorer._combo),
+        int(env._get_total_garbage()),
+        2 * CANDIDATE_CAPACITY,
+    )
+    return float(d.sum(axis=1).max()) if len(d) else 0.0
 
 
 @tf.function
@@ -65,7 +73,7 @@ def train_step(net, batch, value_coef):
         policy_loss = tf.reduce_mean(
             -tf.reduce_sum(batch["pi_target"] * log_probs, axis=-1)
         )
-        value_loss = tf.reduce_mean((values[:, 0] - batch["returns"]) ** 2)
+        value_loss = tf.reduce_mean((values[:, 0] - batch["value_target"]) ** 2)
         loss = policy_loss + value_coef * value_loss
 
     grads = tape.gradient(loss, net.trainable_variables)
@@ -73,8 +81,8 @@ def train_step(net, batch, value_coef):
 
     probs = tf.nn.softmax(masked, axis=-1)
     entropy = tf.reduce_mean(-tf.reduce_sum(probs * log_probs, axis=-1))
-    ret_var = tf.math.reduce_variance(batch["returns"])
-    res_var = tf.math.reduce_variance(batch["returns"] - values[:, 0])
+    ret_var = tf.math.reduce_variance(batch["value_target"])
+    res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
     return {
         "policy_loss": policy_loss,
@@ -163,9 +171,6 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=getattr(args, "gamma", GAMMA),
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=getattr(args, "w_attack", 1.0),
-        w_b2b=getattr(args, "w_b2b", 1.0),
-        w_death=getattr(args, "w_death", 5.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -211,8 +216,16 @@ def main(args):
     return_scale = tf.Variable(
         1.0, trainable=False, dtype=tf.float32, name="return_scale"
     )
+    # Normalizer the value head was pretrained at (value target = max(cand_scores)/value_scale).
+    # The AZ value target reuses it so the phi target matches the pretrained value's units.
+    value_scale = tf.Variable(
+        1.0, trainable=False, dtype=tf.float32, name="value_scale"
+    )
     checkpoint = tf.train.Checkpoint(
-        model=net, optimizer=optimizer, return_scale=return_scale
+        model=net,
+        optimizer=optimizer,
+        return_scale=return_scale,
+        value_scale=value_scale,
     )
     manager = tf.train.CheckpointManager(
         checkpoint, "checkpoints/placement_az", max_to_keep=3
@@ -223,8 +236,15 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-            print(f"Warm-started from BC checkpoint {warm}.", flush=True)
+            # Also restore value_scale (the pretrain value normalizer) so the phi value target
+            # is in the same units the warm-started value head outputs - no warm-start mismatch.
+            tf.train.Checkpoint(model=net, value_scale=value_scale).restore(
+                warm
+            ).expect_partial()
+            print(
+                f"Warm-started from BC checkpoint {warm} (value_scale={float(value_scale):.3f}).",
+                flush=True,
+            )
 
     envs = _build_envs(
         num_games,
@@ -275,6 +295,7 @@ def main(args):
         )
         cand_mk = np.zeros((horizon, num_games, CANDIDATE_CAPACITY), dtype=bool)
         pi_tgt = np.zeros((horizon, num_games, CANDIDATE_CAPACITY), dtype=np.float32)
+        value_tgt = np.zeros((horizon, num_games), dtype=np.float32)
         rewards = np.zeros((horizon, num_games), dtype=np.float32)
         attacks = np.zeros((horizon, num_games), dtype=np.float32)
         clears = np.zeros((horizon, num_games), dtype=np.float32)
@@ -283,6 +304,7 @@ def main(args):
         visits = np.zeros((horizon, num_games), dtype=np.float32)
 
         scale = float(np.sqrt(return_var))
+        vs = float(value_scale) + 1e-8  # value-target normalizer (matches pretraining)
         for t in range(horizon):
             temps = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(np.float32)
             results = mcts.search(envs, scale, temps)
@@ -308,6 +330,10 @@ def main(args):
                 pi_tgt[t, i] = res["pi"]
                 visits[t, i] = res["visits"]
                 storable[t, i] = True
+                # Value target = max over the oracle's candidate evals for THIS (pre-move) state,
+                # /value_scale - the pretraining value target's form (depth-0 vs the datagen beam),
+                # so the warm-started value head stays the oracle critic and doesn't collapse.
+                value_tgt[t, i] = _max_cand_value(searcher, envs[i]) / vs
                 _total, attack, clear, died = placement_step(
                     envs[i], searcher, res["descriptor"]
                 )
@@ -322,29 +348,8 @@ def main(args):
                 else:
                     move_count[i] += 1
 
-        # Value targets (scaled space, bootstrapped on the live tail).
-        last_b, last_p, last_g = [], [], []
-        for env in envs:
-            b, p, g = net_input_from_env(env)
-            last_b.append(b)
-            last_p.append(p)
-            last_g.append(g)
-        last_values = net.state_value(
-            tf.constant(np.concatenate(last_b), tf.float32),
-            tf.constant(np.concatenate(last_p), tf.int64),
-            tf.constant(np.concatenate(last_g), tf.float32),
-        )
-
-        scaled = np.clip(rewards[..., None] / (scale + 1e-8), -REWARD_CLIP, REWARD_CLIP)
-        returns = _discounted_returns(
-            tf.constant(scaled, tf.float32),
-            tf.constant(dones[..., None], tf.float32),
-            last_values,
-            cfg.gamma,
-            horizon,
-            num_games,
-        )
-
+        # Value target = oracle evaluate_state (phi), collected per move above. No discounted-return
+        # bootstrap: the value matches the pretraining objective so warm-start doesn't collapse.
         sel = storable.reshape(-1)
         if not sel.any():
             print(
@@ -360,7 +365,7 @@ def main(args):
             "cand_placements": tf.constant(_flat(cand_pl, sel), tf.float32),
             "cand_mask": tf.constant(_flat(cand_mk, sel), tf.bool),
             "pi_target": tf.constant(_flat(pi_tgt, sel), tf.float32),
-            "returns": tf.constant(returns.numpy().reshape(-1)[sel], tf.float32),
+            "value_target": tf.constant(_flat(value_tgt, sel), tf.float32),
         }
         ds = (
             tf.data.Dataset.from_tensor_slices(buf)
