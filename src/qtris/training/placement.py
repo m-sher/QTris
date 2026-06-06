@@ -65,8 +65,28 @@ def _load_expert_iter(path, batch_size):
     return iter(ds)
 
 
+def _sum_grads(rest_grads, expert_grads):
+    """Per-variable sum of two gradient lists, densifying IndexedSlices (the embedding
+    gradient is sparse, and IndexedSlices + IndexedSlices is unsupported)."""
+    out = []
+    for rg, eg in zip(rest_grads, expert_grads):
+        if rg is None:
+            out.append(eg)
+        elif eg is None:
+            out.append(rg)
+        else:
+            if isinstance(rg, tf.IndexedSlices):
+                rg = tf.convert_to_tensor(rg)
+            if isinstance(eg, tf.IndexedSlices):
+                eg = tf.convert_to_tensor(eg)
+            out.append(rg + eg)
+    return out
+
+
 @tf.function
-def train_step(net, batch, use_expert, expert_batch=None):
+def _rollout_grads(net, batch):
+    """PPO + value + entropy on the rollout batch: one forward, one backward.
+    Returns (gradients, metrics)."""
     cand_mask = batch["cand_mask"]
     with tf.GradientTape() as tape:
         logits, values, piece_scores = net(
@@ -94,53 +114,15 @@ def train_step(net, batch, use_expert, expert_batch=None):
         value_loss = clipped_value_loss(
             values[:, 0], batch["old_values"], batch["returns"], VALUE_CLIP
         )
-
-        # Expert BC anchor: soft-CE to the oracle's cand_scores softmax, policy head
-        # only. Keeps PPO from drifting off the manifold.
-        if use_expert:
-            e_mask = expert_batch["cand_scores"] > -1e29
-            e_masked = tf.where(
-                e_mask, expert_batch["cand_scores"], tf.constant(-1e30, tf.float32)
-            )
-            e_target = tf.nn.softmax(e_masked / EXPERT_TEMP, axis=-1)
-            e_logits, _ = net(
-                (
-                    expert_batch["boards"],
-                    expert_batch["pieces"],
-                    expert_batch["b2b_combo_garbage"],
-                    expert_batch["cand_placements"],
-                    e_mask,
-                ),
-                training=True,
-            )
-            e_logp = tf.nn.log_softmax(e_logits, axis=-1)
-            expert_loss = tf.reduce_mean(-tf.reduce_sum(e_target * e_logp, axis=-1))
-            expert_pred = tf.argmax(e_logits, axis=-1, output_type=tf.int64)
-            expert_label = tf.argmax(e_masked, axis=-1, output_type=tf.int64)
-            expert_accuracy = tf.reduce_mean(
-                tf.cast(expert_pred == expert_label, tf.float32)
-            )
-        else:
-            expert_loss = tf.constant(0.0, tf.float32)
-            expert_accuracy = tf.constant(0.0, tf.float32)
-
-        loss = (
-            ppo_loss
-            - ENTROPY_COEF * entropy
-            + VALUE_COEF * value_loss
-            + EXPERT_COEF * expert_loss
-        )
-
+        loss = ppo_loss - ENTROPY_COEF * entropy + VALUE_COEF * value_loss
     grads = tape.gradient(loss, net.trainable_variables)
-    net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
 
     approx_kl = tf.reduce_mean(batch["old_log_prob"] - new_log_prob)
     clipped_frac = tf.reduce_mean(tf.cast(ratio != clipped_ratio, tf.float32))
     ret_var = tf.math.reduce_variance(batch["returns"])
     res_var = tf.math.reduce_variance(batch["returns"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
-
-    return {
+    metrics = {
         "ppo_loss": ppo_loss,
         "entropy": entropy,
         "approx_kl": approx_kl,
@@ -149,9 +131,57 @@ def train_step(net, batch, use_expert, expert_batch=None):
         "explained_var": explained_var,
         "board": batch["boards"][0],
         "scores": piece_scores,
-        "expert_loss": expert_loss,
-        "expert_accuracy": expert_accuracy,
     }
+    return grads, metrics
+
+
+@tf.function
+def _expert_grads(net, expert_batch):
+    """Expert BC anchor (soft-CE), policy head only: one forward, one backward.
+    Returns (gradients, expert_loss, expert_accuracy)."""
+    e_mask = expert_batch["cand_scores"] > -1e29
+    e_masked = tf.where(
+        e_mask, expert_batch["cand_scores"], tf.constant(-1e30, tf.float32)
+    )
+    e_target = tf.nn.softmax(e_masked / EXPERT_TEMP, axis=-1)
+    with tf.GradientTape() as tape:
+        e_logits, _ = net(
+            (
+                expert_batch["boards"],
+                expert_batch["pieces"],
+                expert_batch["b2b_combo_garbage"],
+                expert_batch["cand_placements"],
+                e_mask,
+            ),
+            training=True,
+        )
+        e_logp = tf.nn.log_softmax(e_logits, axis=-1)
+        expert_loss = tf.reduce_mean(-tf.reduce_sum(e_target * e_logp, axis=-1))
+        loss = EXPERT_COEF * expert_loss
+    grads = tape.gradient(loss, net.trainable_variables)
+
+    expert_pred = tf.argmax(e_logits, axis=-1, output_type=tf.int64)
+    expert_label = tf.argmax(e_masked, axis=-1, output_type=tf.int64)
+    expert_accuracy = tf.reduce_mean(tf.cast(expert_pred == expert_label, tf.float32))
+    return grads, expert_loss, expert_accuracy
+
+
+def train_step(net, batch, use_expert, expert_batch=None):
+    """Rollout and expert gradients are computed in SEPARATE tf.functions (each one
+    forward + backward, the known-good pattern) and summed before a single optimizer
+    step. Two net() forwards inside ONE tf.function compiled to a NaN backward; keeping
+    them in separate compiled graphs avoids it (see notes.md)."""
+    grads, metrics = _rollout_grads(net, batch)
+    if use_expert:
+        e_grads, expert_loss, expert_accuracy = _expert_grads(net, expert_batch)
+        grads = _sum_grads(grads, e_grads)
+    else:
+        expert_loss = tf.constant(0.0, tf.float32)
+        expert_accuracy = tf.constant(0.0, tf.float32)
+    net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
+    metrics["expert_loss"] = expert_loss
+    metrics["expert_accuracy"] = expert_accuracy
+    return metrics
 
 
 def main(args):
