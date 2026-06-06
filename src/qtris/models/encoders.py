@@ -58,17 +58,17 @@ def tokenize_bcg(
     ln,
     training=False,
 ):
-    """Log-compress + project a (B, 3) BCG tuple into (B, 3, depth) tokens.
+    """Squash/clip + project a (B, 3) BCG tuple into (B, 3, depth) tokens.
 
     Per-feature projections + layernorm passed as kwargs so each model owns
     its own submodules (AR uses 'relu' activation, Flat uses None) and the
     variable graph stays under the model's existing attribute names
     (`_bcg_proj_b2b`, `_bcg_proj_combo`, `_bcg_proj_garbage`, `_bcg_ln`).
     """
-    bcg_log = tf.math.log1p(b2b_combo_garbage + 1.0)  # (B, 3)
-    t_b2b = proj_b2b(bcg_log[:, 0:1], training=training)
-    t_combo = proj_combo(bcg_log[:, 1:2], training=training)
-    t_garbage = proj_garbage(bcg_log[:, 2:3], training=training)
+    bcg_norm = tf.minimum(b2b_combo_garbage / 20.0, 1.0)  # (B, 3)
+    t_b2b = proj_b2b(bcg_norm[:, 0:1], training=training)
+    t_combo = proj_combo(bcg_norm[:, 1:2], training=training)
+    t_garbage = proj_garbage(bcg_norm[:, 2:3], training=training)
     return ln(
         tf.stack([t_b2b, t_combo, t_garbage], axis=1), training=training
     )  # (B, 3, depth)
