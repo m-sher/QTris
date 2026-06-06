@@ -17,7 +17,7 @@ def main() -> None:
         "--expert-dataset",
         default=None,
         help="placement ppo only: path to the BC dataset for the PPO expert anchor "
-        "(default: datasets/tetris_oracle_placement; anchor is skipped if the path is absent).",
+        "(omit to train plain PPO with no expert anchor).",
     )
 
     az = parser.add_argument_group(

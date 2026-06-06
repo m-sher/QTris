@@ -32,8 +32,7 @@ TEMPERATURE = 1.0
 
 # Expert BC anchor: soft-CE to the oracle's cand_scores softmax, policy head only.
 EXPERT_COEF = 1.0
-EXPERT_TEMP = 1.0  # softmax temperature for the expert anchor target (matches pretraining)
-EXPERT_DATASET_PATH = "datasets/tetris_oracle_placement"
+EXPERT_TEMP = 1.0  # softmax temperature for the expert anchor target
 
 
 def _load_expert_iter(path, batch_size):
@@ -261,10 +260,11 @@ def main(args):
         temperature=TEMPERATURE,
     )
 
-    # argparse sets expert_dataset=None when the flag is omitted, so `or` resolves it to
-    # the default (getattr's fallback wouldn't fire on an attribute that exists as None).
-    expert_path = getattr(args, "expert_dataset", None) or EXPERT_DATASET_PATH
-    expert_iter = _load_expert_iter(expert_path, mini_batch_size)
+    # No --expert-dataset -> no expert anchor (plain PPO).
+    expert_path = getattr(args, "expert_dataset", None)
+    expert_iter = (
+        _load_expert_iter(expert_path, mini_batch_size) if expert_path else None
+    )
     use_expert = expert_iter is not None
 
     wandb_run = init_run(project="Tetris", config=config)
