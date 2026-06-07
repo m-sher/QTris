@@ -8,8 +8,9 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 
 Reward is attack + b2b only: per-edge `w_attack * attack` (surge + combo already fold into
 `compute_attack`'s attack), leaf bootstrap `v + w_b2b * max(0, b2b_leaf)` (unrealized-hoard
-credit). Q values are min-max normalized per tree so PUCT's exploration term stays calibrated.
-Dirichlet root noise and final action sampling are generated here in Python and passed into C.
+credit). The terminal edge applies `-w_death` UNCLIPPED, and PUCT uses Q in raw return_scale
+units (no per-tree min-max) so the death penalty isn't flattened to one normalized unit and
+raising `w_death` actually bites. Dirichlet root noise + final sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -32,7 +33,7 @@ class MCTSConfig:
     w_attack: float = 1.0  # per-edge reward weight on attack
     w_b2b: float = 1.0  # leaf-bootstrap weight on max(0, b2b)
     w_death: float = (
-        5.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
+        100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)

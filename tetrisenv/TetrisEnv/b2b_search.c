@@ -3242,7 +3242,6 @@ typedef struct {
     MNode* root;
     bool alive;                  // a live game with a spawnable (enumerable) root
     bool dead;                   // root had no legal placement
-    float minq, maxq;            // per-tree min-max Q stats
     // per-tree bump arena (sized to root + one node per simulation). Pre-allocated
     // single-threaded so node alloc inside the OpenMP region never hits the malloc lock.
     MNode* pool; int pool_used, pool_cap;
@@ -3424,11 +3423,10 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
 }
 
 // --- PUCT ---
-static float mtree_normalize(const MTree* t, float v) {
-    if (t->maxq > t->minq) return (v - t->minq) / (t->maxq - t->minq);
-    return v;
-}
-static int mcts_select(const MTree* t, const MNode* node, const MConfig* cfg) {
+// Q is used in return_scale units directly (no per-tree min-max): min-max pins the worst
+// edge to 0 and the best to 1, which caps the death penalty's pull at one normalized unit
+// regardless of w_death. Raw return_scale units let a large w_death actually dominate.
+static int mcts_select(const MNode* node, const MConfig* cfg) {
     float total = 0.0f;
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
     float best = -1e30f; int best_slot = node->legal[0];
@@ -3436,14 +3434,14 @@ static int mcts_select(const MTree* t, const MNode* node, const MConfig* cfg) {
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         float n = node->N[slot];
-        float q = n > 0 ? mtree_normalize(t, node->Q[slot]) : 0.0f;
+        float q = n > 0 ? node->Q[slot] : 0.0f;
         float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
     }
     return best_slot;
 }
-static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
+static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
@@ -3452,13 +3450,11 @@ static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, in
         node->N[slot] += 1.0f;
         node->W[slot] += g;
         node->Q[slot] = node->W[slot] / node->N[slot];
-        if (node->Q[slot] < t->minq) t->minq = node->Q[slot];
-        if (node->Q[slot] > t->maxq) t->maxq = node->Q[slot];
     }
 }
 
 // Virtual loss: pessimize each traversed edge so the next descent in the same round diverges.
-// Does NOT touch minq/maxq (the inverse revert in apply_leaves restores W/N exactly).
+// The inverse revert in apply_leaves restores W/N exactly before the real backup.
 static void mtree_apply_vloss(const PathEntry* path, int len, float vloss) {
     for (int i = 0; i < len; i++) {
         MNode* node = path[i].node; int slot = path[i].slot;
@@ -3493,28 +3489,31 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
         MNode* node = t->root;
         while (1) {
             if (node->terminal || node->n_legal == 0) {  // dead end: real backup of 0 in-place
-                mtree_backup(t, cfg, path, plen, 0.0f);
+                mtree_backup(cfg, path, plen, 0.0f);
                 break;
             }
             if (node->awaiting_eval) break;              // collision: another descent owns this leaf
-            int slot = mcts_select(t, node, cfg);
+            int slot = mcts_select(node, cfg);
             path[plen].node = node; path[plen].slot = slot; plen++;
             MNode* child = node->child[slot];
             if (child == NULL) {
                 MNode* leaf = mtree_alloc(t);
-                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); break; }  // arena full
+                if (leaf == NULL) { mtree_backup(cfg, path, plen, 0.0f); break; }  // arena full
                 leaf->st = node->st;
                 bool terminal = false;
                 float attack = mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal);
                 node->child[slot] = leaf;
-                // Death (top-out/holes, or a resulting no-legal position) is the loss signal:
-                // subtract w_death from the terminal edge reward (same raw scale as attack).
+                // Death (top-out/holes, or a resulting no-legal position) is the loss signal.
+                // The attack part goes through the reward clip; the w_death penalty is applied
+                // UNCLIPPED (return_scale units only) so raising w_death actually deepens the
+                // terminal Q instead of saturating at -MCLIP and being tuned away.
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
                     node->edge_reward[slot] =
-                        mcts_scale_reward(cfg, cfg->w_attack * attack - cfg->w_death);
-                    mtree_backup(t, cfg, path, plen, 0.0f);
+                        mcts_scale_reward(cfg, cfg->w_attack * attack)
+                        - cfg->w_death / (cfg->return_scale + 1e-8f);
+                    mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
                 node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack);
@@ -3597,7 +3596,7 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
     MEngine* e = (MEngine*)h;
     MTree* t = &e->trees[tree];
     t->root = NULL; t->alive = false; t->dead = false;
-    t->minq = 1e30f; t->maxq = -1e30f; t->pool_used = 0; t->n_pending = 0;
+    t->pool_used = 0; t->n_pending = 0;
     MNode* root = mtree_alloc(t);
     MState* s = &root->st;
     memset(s, 0, sizeof(*s));
@@ -3705,7 +3704,7 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
             float boot = leaf->value + cfg->w_b2b * (leaf->st.b2b > 0 ? leaf->st.b2b : 0) / (cfg->return_scale + 1e-8f);
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
-            mtree_backup(t, cfg, t->path[p], t->path_len[p], boot);
+            mtree_backup(cfg, t->path[p], t->path_len[p], boot);
             row++;
         }
     }
