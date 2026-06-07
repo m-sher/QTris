@@ -79,6 +79,8 @@ def collect(
     transitions = []
     deaths = 0
     max_b2b = 0
+    total_attack = 0.0
+    pieces_placed = 0
 
     pbar = tqdm(range(num_steps), disable=headless, desc="datagen ar", unit="step")
     for step in pbar:
@@ -112,6 +114,8 @@ def collect(
         transitions.append((board, pieces, bcg, seqs, scores))
 
         time_step = env._step(best_seq.astype(np.int64))
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
         if time_step.is_last():
@@ -119,13 +123,18 @@ def collect(
             time_step = env.reset()
 
         if (step + 1) % log_every == 0:
-            stats = f"transitions={len(transitions)} deaths={deaths} max_b2b={max_b2b}"
+            app = total_attack / max(pieces_placed, 1)
+            stats = (
+                f"transitions={len(transitions)} deaths={deaths} "
+                f"max_b2b={max_b2b} app={app:.3f}"
+            )
             if headless:
                 print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
             else:
                 pbar.set_postfix_str(stats)
 
-    return transitions, deaths, max_b2b
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, deaths, max_b2b, app
 
 
 def main(args):
@@ -181,7 +190,7 @@ def main(args):
         flush=True,
     )
 
-    new_transitions, deaths, max_b2b = collect(
+    new_transitions, deaths, max_b2b, app = collect(
         seed=seed + existing_count,
         num_steps=num_steps,
         search_depth=datagen_cfg.search_depth,
@@ -201,7 +210,7 @@ def main(args):
 
     print(
         f"Collected {len(new_transitions)} transitions | "
-        f"deaths: {deaths} | max_b2b: {max_b2b}",
+        f"deaths: {deaths} | max_b2b: {max_b2b} | APP: {app:.3f}",
         flush=True,
     )
 
