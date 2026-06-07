@@ -95,6 +95,8 @@ def collect_dagger(
     deaths = 0
     max_b2b = 0
     policy_disagrees = 0
+    total_attack = 0.0
+    pieces_placed = 0
 
     pbar = tqdm(range(num_steps), disable=headless, desc="dagger", unit="step")
     for step in pbar:
@@ -148,6 +150,8 @@ def collect_dagger(
 
         # Step env with the POLICY's choice (DAgger invariant).
         time_step = env._step(policy_seq)
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
         if not np.array_equal(policy_seq, best_seq):
             policy_disagrees += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
@@ -158,9 +162,10 @@ def collect_dagger(
 
         if (step + 1) % log_every == 0:
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
+            app = total_attack / max(pieces_placed, 1)
             stats = (
                 f"transitions={len(transitions)} beam_dead={beam_dead} "
-                f"deaths={deaths} max_b2b={max_b2b} "
+                f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
                 f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
             if headless:
@@ -168,7 +173,8 @@ def collect_dagger(
             else:
                 pbar.set_postfix_str(stats)
 
-    return transitions, beam_dead, deaths, max_b2b, policy_disagrees
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
 
 
 def collect_dagger_placement(
@@ -222,6 +228,8 @@ def collect_dagger_placement(
     deaths = 0
     max_b2b = 0
     policy_disagrees = 0
+    total_attack = 0.0
+    pieces_placed = 0
 
     pbar = tqdm(
         range(num_steps), disable=headless, desc="dagger placement", unit="step"
@@ -291,6 +299,8 @@ def collect_dagger_placement(
         policy_seq = policy_seq.numpy()[0].astype(np.int64)
 
         time_step = env._step(policy_seq)
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
         if not np.array_equal(policy_seq, best_seq):
             policy_disagrees += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
@@ -301,9 +311,10 @@ def collect_dagger_placement(
 
         if (step + 1) % log_every == 0:
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
+            app = total_attack / max(pieces_placed, 1)
             stats = (
                 f"transitions={len(transitions)} beam_dead={beam_dead} "
-                f"deaths={deaths} max_b2b={max_b2b} "
+                f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
                 f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
             if headless:
@@ -311,7 +322,8 @@ def collect_dagger_placement(
             else:
                 pbar.set_postfix_str(stats)
 
-    return transitions, beam_dead, deaths, max_b2b, policy_disagrees
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
 
 
 def _build_ar_model(args):
@@ -496,7 +508,7 @@ def main(cli_args):
     )
 
     collect_fn = collect_dagger_placement if is_placement else collect_dagger
-    new_transitions, beam_dead, deaths, max_b2b, policy_disagrees = collect_fn(
+    new_transitions, beam_dead, deaths, max_b2b, policy_disagrees, app = collect_fn(
         p_model=p_model,
         seed=args.seed + existing_count,
         num_steps=args.num_steps,
@@ -523,7 +535,7 @@ def main(cli_args):
     print(
         f"Collected {len(new_transitions)} DAgger transitions | "
         f"beam_dead: {beam_dead} | deaths: {deaths} | max_b2b: {max_b2b} | "
-        f"policy≠beam: {policy_disagrees}",
+        f"APP: {app:.3f} | policy≠beam: {policy_disagrees}",
         flush=True,
     )
 
