@@ -98,6 +98,37 @@ def main() -> None:
         "--learning-rate", type=float, default=1e-4, help="Adam learning rate."
     )
     az.add_argument(
+        "--w-attack",
+        type=float,
+        default=1.0,
+        help="per-edge search reward weight on attack (also scales the realized return).",
+    )
+    az.add_argument(
+        "--w-b2b",
+        type=float,
+        default=1.0,
+        help="search leaf-bootstrap weight on max(0, b2b). 0 lets the learned value carry "
+        "b2b's worth instead of the unbounded hoard crutch.",
+    )
+    az.add_argument(
+        "--w-death",
+        type=float,
+        default=100.0,
+        help="terminal-edge death penalty (raw attack units; also the realized death reward).",
+    )
+    az.add_argument(
+        "--replay-capacity",
+        type=int,
+        default=25_000,
+        help="max positions kept in the multi-generation replay buffer.",
+    )
+    az.add_argument(
+        "--gae-lambda",
+        type=float,
+        default=1.0,
+        help="lambda for the value-target return (1.0 = MC return + horizon bootstrap).",
+    )
+    az.add_argument(
         "--garbage-chance-min",
         type=float,
         default=0.0,
