@@ -5,19 +5,7 @@ Flat / 1v1 overrides via construction:
     PPOConfig(num_collection_steps=256, target_kl=0.02, expert_coef=0.1)
 """
 
-from dataclasses import dataclass
-from pathlib import Path
-
 from pydantic import BaseModel
-
-
-@dataclass
-class Paths:
-    datasets_root: Path = Path("datasets")
-    checkpoints_root: Path = Path("checkpoints")
-
-    def for_family(self, family: str, purpose: str) -> Path:
-        return self.checkpoints_root / f"{family}_{purpose}"
 
 
 class ModelConfig(BaseModel):
@@ -63,15 +51,14 @@ class PPOConfig(BaseModel):
 class PretrainConfig(BaseModel):
     return_clip_low: float = -150.0
     return_clip_high: float = 100.0
-    batch_size: int = 512
+    batch_size: int = 128
     epochs: int = 10
     learning_rate: float = 3e-4
 
 
 class DataGenConfig(BaseModel):
-    search_depth: int = 8
-    beam_width: int = 96
+    search_depth: int = 16
+    beam_width: int = 200
     death_trim_count: int = 20
-    gamma: float = 0.99
     num_steps: int = 200_000
     seed: int = 0

@@ -1,10 +1,12 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
+from qtris.config import DataGenConfig
 import os
 import shutil
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 HARD_DROP_ID = Keys.HARD_DROP
 
@@ -26,6 +28,7 @@ def collect(
     num_row_tiers,
     death_trim_count,
     gamma,
+    headless=False,
     log_every=1000,
 ):
     """Single-env sequential collection. Runs num_steps total transitions,
@@ -58,6 +61,8 @@ def collect(
     unmatched = 0
     deaths = 0
     max_b2b = 0
+    total_attack = 0.0
+    pieces_placed = 0
 
     def flush(buf, is_death):
         if not buf:
@@ -91,7 +96,8 @@ def collect(
                 )
             )
 
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), disable=headless, desc="datagen flat", unit="step")
+    for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
@@ -125,6 +131,8 @@ def collect(
         if not np.any(matches):
             unmatched += 1
             time_step = env._step(sequence)
+            total_attack += float(time_step.reward["attack"])
+            pieces_placed += 1
             if time_step.is_last():
                 flush(episode_buf, is_death=True)
                 episode_buf = []
@@ -136,6 +144,8 @@ def collect(
         valid_mask = np.any(valid_sequences == HARD_DROP_ID, axis=-1)
 
         time_step = env._step(sequence)
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
         reward = float(time_step.reward["total_reward"])
         done = bool(time_step.is_last())
 
@@ -160,15 +170,19 @@ def collect(
             time_step = env.reset()
 
         if (step + 1) % log_every == 0:
-            print(
-                f"Step {step + 1}/{num_steps} | "
+            app = total_attack / max(pieces_placed, 1)
+            stats = (
                 f"transitions={len(transitions)} unmatched={unmatched} "
-                f"deaths={deaths} max_b2b={max_b2b}",
-                flush=True,
+                f"deaths={deaths} max_b2b={max_b2b} app={app:.3f}"
             )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
 
     flush(episode_buf, is_death=False)
-    return transitions, unmatched, deaths, max_b2b
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, unmatched, deaths, max_b2b, app
 
 
 def main(args):
@@ -178,8 +192,7 @@ def main(args):
     num_steps = args.steps
     seed = getattr(args, "seed", 0)
 
-    search_depth = 7
-    beam_width = 96
+    datagen_cfg = DataGenConfig()
     queue_size = 5
     max_len = 15
     max_height = 18
@@ -190,7 +203,6 @@ def main(args):
     garbage_max = 4
     garbage_push_delay = 1
     num_row_tiers = 2
-    death_trim_count = 20
     gamma = 0.99
 
     existing_count = 0
@@ -224,11 +236,11 @@ def main(args):
         flush=True,
     )
 
-    new_transitions, unmatched, deaths, max_b2b = collect(
+    new_transitions, unmatched, deaths, max_b2b, app = collect(
         seed=seed + existing_count,
         num_steps=num_steps,
-        search_depth=search_depth,
-        beam_width=beam_width,
+        search_depth=datagen_cfg.search_depth,
+        beam_width=datagen_cfg.beam_width,
         queue_size=queue_size,
         max_len=max_len,
         max_height=max_height,
@@ -239,13 +251,15 @@ def main(args):
         garbage_max=garbage_max,
         garbage_push_delay=garbage_push_delay,
         num_row_tiers=num_row_tiers,
-        death_trim_count=death_trim_count,
+        death_trim_count=datagen_cfg.death_trim_count,
         gamma=gamma,
+        headless=getattr(args, "headless", False),
     )
 
     print(
         f"Collected {len(new_transitions)} transitions | "
-        f"unmatched: {unmatched} | deaths: {deaths} | max_b2b: {max_b2b}",
+        f"unmatched: {unmatched} | deaths: {deaths} | max_b2b: {max_b2b} | "
+        f"APP: {app:.3f}",
         flush=True,
     )
 

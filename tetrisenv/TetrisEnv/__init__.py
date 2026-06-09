@@ -13,7 +13,7 @@ from .PyTetris1v1Env import PyTetris1v1Env
 from .PyTetrisRunner import PyTetrisRunner
 from .Py1v1TetrisRunner import Py1v1TetrisRunner
 from .TetrioRandom import TetrioRNG
-from .KeySequencesBitboard import BitboardKeySequenceFinder
+from .KeySequences import KeySequenceFinder
 
 __version__ = "0.8.0"
 
@@ -29,7 +29,7 @@ __all__ = [
     "PyTetrisRunner",
     "Py1v1TetrisRunner",
     "TetrioRNG",
-    "BitboardKeySequenceFinder",
+    "KeySequenceFinder",
 ]
 
 

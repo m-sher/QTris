@@ -10,6 +10,15 @@
 #define ROTATIONS 4
 #define SPIN_STATES 2
 
+// Spin types (match b2b_search.c / Scorer)
+#define SPIN_NONE 0
+#define SPIN_T_MINI 1
+#define SPIN_T_FULL 2
+#define SPIN_ALL_MINI 3
+
+// Dense placement-candidate slots per branch: rot*40 + norm_col*4 + spin_type
+#define PLACEMENT_SLOTS 160
+
 // Keys
 #define KEY_START 0
 #define KEY_HOLD 1
@@ -330,8 +339,9 @@ void decode_state(int state, int* r, int* c, int* rot, int piece_type) {
     *c = norm_col - min_col;
 }
 
-bool is_t_spin(const uint16_t* board, int board_height, int r, int c, int rot, int last_move_key, int delta_loc_sum) {
-    // 3-corner rule
+// Detailed T-spin type: SPIN_NONE / SPIN_T_MINI / SPIN_T_FULL (matches b2b_search.c).
+static int detect_t_spin(const uint16_t* board, int board_height, int r, int c, int rot, int delta_loc_sum) {
+    // 3-corner rule + front/back split
     // T Piece corners: (0,0), (0,2), (2,0), (2,2)
     // Board bounds check included
     
@@ -382,9 +392,12 @@ bool is_t_spin(const uint16_t* board, int board_height, int r, int c, int rot, i
         }
     }
     
-    // T-Spin or Mini: 3 (or 4) corners filled counts as spin (matches Scorer spin != NO_SPIN).
-    if (corners_filled < 3) return false;
-    return true;
+    if (corners_filled < 3) return SPIN_NONE;
+    int back_corners_filled = corners_filled - front_corners_filled;
+    if (front_corners_filled == 2 && back_corners_filled >= 1) return SPIN_T_FULL;
+    if (front_corners_filled == 1 && back_corners_filled == 2)
+        return (delta_loc_sum > 2) ? SPIN_T_FULL : SPIN_T_MINI;
+    return SPIN_NONE;
 }
 
 bool check_immobility(const uint16_t* board, int board_height, int piece_type, int rot, int r, int c) {
@@ -399,6 +412,16 @@ bool check_immobility(const uint16_t* board, int board_height, int piece_type, i
          }
      }
      return true;
+}
+
+// 4-value spin type for a resting lock, matching datagen (b2b_search) encoding.
+static int compute_spin_type(const uint16_t* board, int board_height, int piece_type,
+                             int rot, int land_r, int c, int delta_r, int delta_loc_sum) {
+    if (delta_r == 0) return SPIN_NONE;
+    if (piece_type == PIECE_T)
+        return detect_t_spin(board, board_height, land_r, c, rot, delta_loc_sum);
+    return check_immobility(board, board_height, piece_type, rot, land_r, c)
+               ? SPIN_ALL_MINI : SPIN_NONE;
 }
 
 // -- Candidate collection for row tiers --
@@ -445,6 +468,100 @@ static void sort_candidates(SlotCandidates* slot) {
                 int tmp_s = slot->bfs_states[i];
                 slot->bfs_states[i] = slot->bfs_states[j];
                 slot->bfs_states[j] = tmp_s;
+            }
+        }
+    }
+}
+
+// Expand one BFS node: enqueue all reachable neighbors (taps, DAS, rotations w/ kicks, soft drop).
+static void bfs_expand(const uint16_t* board_rows, int board_height, int piece_type,
+                       int curr_state, int r, int c, int rot, int depth,
+                       StateMeta* meta, bool* visited, int* queue, int* tail) {
+    int moves[] = {KEY_TAP_LEFT, KEY_TAP_RIGHT, KEY_DAS_LEFT, KEY_DAS_RIGHT,
+                   KEY_CLOCKWISE, KEY_ANTICLOCKWISE, KEY_ROTATE_180, KEY_SOFT_DROP};
+
+    for(int m=0; m<8; m++) {
+        int key = moves[m];
+        int nr = r, nc = c, nrot = rot;
+        int dr=0, drow=0, dcol=0;
+
+        bool valid = false;
+
+        if (key == KEY_TAP_LEFT) {
+            if (!check_collision(board_rows, board_height, piece_type, rot, r, c-1)) {
+                nc--; valid = true; dcol=-1;
+            }
+        } else if (key == KEY_TAP_RIGHT) {
+            if (!check_collision(board_rows, board_height, piece_type, rot, r, c+1)) {
+                nc++; valid = true; dcol=1;
+            }
+        } else if (key == KEY_DAS_LEFT) {
+            int tmp = c;
+            while(!check_collision(board_rows, board_height, piece_type, rot, r, tmp-1)) {
+                tmp--;
+            }
+            if(tmp != c) { nc=tmp; valid=true; dcol=nc-c; }
+        } else if (key == KEY_DAS_RIGHT) {
+            int tmp = c;
+            while(!check_collision(board_rows, board_height, piece_type, rot, r, tmp+1)) {
+                tmp++;
+            }
+            if(tmp != c) { nc=tmp; valid=true; dcol=nc-c; }
+        } else if (key == KEY_SOFT_DROP) {
+             int tmp = r;
+             int max_row = PIECES[piece_type].orientations[rot].max_row;
+             while(!check_collision(board_rows, board_height, piece_type, rot, tmp+1, c)) {
+                 tmp++;
+                 if (tmp + max_row >= board_height - 1) break;
+             }
+             if(tmp != r) { nr=tmp; valid=true; drow=nr-r; }
+        } else {
+            int delta = 0;
+            if (key == KEY_CLOCKWISE) delta = 1;
+            else if (key == KEY_ANTICLOCKWISE) delta = 3;
+            else delta = 2;
+
+            int next_rot = (rot + delta) % 4;
+
+            if (!check_collision(board_rows, board_height, piece_type, next_rot, r, c)) {
+                nrot = next_rot; valid = true; dr = (delta==3)?-1:delta;
+            } else {
+                int8_t (*table)[2];
+                if (piece_type == PIECE_I) table = I_KICKS[rot][next_rot];
+                else table = KICKS[rot][next_rot];
+
+                int count = 4;
+                if (key == KEY_ROTATE_180) count = 5;
+
+                for(int k=0; k<count; k++) {
+                    int kdr = table[k][0];
+                    int kdc = table[k][1];
+                    if (kdr == 0 && kdc == 0 && count == 5) continue;
+
+                    if (!check_collision(board_rows, board_height, piece_type, next_rot, r+kdr, c+kdc)) {
+                        nr = r+kdr; nc = c+kdc; nrot = next_rot;
+                        valid = true;
+                        dr = (delta==3)?-1:delta;
+                        drow = kdr; dcol = kdc;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (valid) {
+            int next_s = encode_state(nr, nc, nrot, piece_type);
+            if (next_s != -1 && !visited[next_s]) {
+                visited[next_s] = true;
+                meta[next_s].parent = curr_state;
+                meta[next_s].last_move = key;
+                meta[next_s].depth = depth + 1;
+                meta[next_s].delta_r = dr;
+                meta[next_s].delta_row = drow;
+                meta[next_s].delta_col = dcol;
+
+                queue[(*tail)++] = next_s;
+                *tail %= QUEUE_CAPACITY;
             }
         }
     }
@@ -509,20 +626,10 @@ void find_sequences_c(
         int land_r = hard_drop_row(board_rows, board_height, piece_type, rot, r, c);
 
         if (r == land_r && land_r >= visible_start && land_r < visible_start + VISIBLE_ROWS) {
-            bool is_spin = false;
+            int delta_sum = abs(meta[curr_state].delta_row) + abs(meta[curr_state].delta_col);
+            bool is_spin = compute_spin_type(board_rows, board_height, piece_type, rot, land_r,
+                                             c, meta[curr_state].delta_r, delta_sum) != SPIN_NONE;
 
-            if (meta[curr_state].delta_r != 0) {
-                 if (piece_type == PIECE_T) {
-                     int delta_sum = abs(meta[curr_state].delta_row) + abs(meta[curr_state].delta_col);
-                     is_spin = is_t_spin(board_rows, board_height, land_r, c, rot, 
-                                         meta[curr_state].last_move, delta_sum);
-                 } else {
-                     if (check_immobility(board_rows, board_height, piece_type, rot, land_r, c)) {
-                         is_spin = true;
-                     }
-                 }
-            }
-            
             int norm_col = c + PIECES[piece_type].orientations[rot].min_col;
             int base_idx = rot * BOARD_COLS * SPIN_STATES + norm_col * SPIN_STATES + (is_spin ? 1 : 0);
             
@@ -539,95 +646,9 @@ void find_sequences_c(
         }
         
         if (depth >= max_depth) continue;
-        
-        int moves[] = {KEY_TAP_LEFT, KEY_TAP_RIGHT, KEY_DAS_LEFT, KEY_DAS_RIGHT, 
-                       KEY_CLOCKWISE, KEY_ANTICLOCKWISE, KEY_ROTATE_180, KEY_SOFT_DROP};
-                       
-        for(int m=0; m<8; m++) {
-            int key = moves[m];
-            int nr = r, nc = c, nrot = rot;
-            int dr=0, drow=0, dcol=0;
-            
-            bool valid = false;
-            
-            if (key == KEY_TAP_LEFT) {
-                if (!check_collision(board_rows, board_height, piece_type, rot, r, c-1)) {
-                    nc--; valid = true; dcol=-1;
-                }
-            } else if (key == KEY_TAP_RIGHT) {
-                if (!check_collision(board_rows, board_height, piece_type, rot, r, c+1)) {
-                    nc++; valid = true; dcol=1;
-                }
-            } else if (key == KEY_DAS_LEFT) {
-                int tmp = c;
-                while(!check_collision(board_rows, board_height, piece_type, rot, r, tmp-1)) {
-                    tmp--;
-                }
-                if(tmp != c) { nc=tmp; valid=true; dcol=nc-c; }
-            } else if (key == KEY_DAS_RIGHT) {
-                int tmp = c;
-                while(!check_collision(board_rows, board_height, piece_type, rot, r, tmp+1)) {
-                    tmp++;
-                }
-                if(tmp != c) { nc=tmp; valid=true; dcol=nc-c; }
-            } else if (key == KEY_SOFT_DROP) {
-                 int tmp = r;
-                 int max_row = PIECES[piece_type].orientations[rot].max_row;
-                 while(!check_collision(board_rows, board_height, piece_type, rot, tmp+1, c)) {
-                     tmp++;
-                     if (tmp + max_row >= board_height - 1) break;
-                 }
-                 if(tmp != r) { nr=tmp; valid=true; drow=nr-r; }
-            } else {
-                int delta = 0;
-                if (key == KEY_CLOCKWISE) delta = 1;
-                else if (key == KEY_ANTICLOCKWISE) delta = 3;
-                else delta = 2;
-                
-                int next_rot = (rot + delta) % 4;
-                
-                if (!check_collision(board_rows, board_height, piece_type, next_rot, r, c)) {
-                    nrot = next_rot; valid = true; dr = (delta==3)?-1:delta;
-                } else {
-                    int8_t (*table)[2];
-                    if (piece_type == PIECE_I) table = I_KICKS[rot][next_rot];
-                    else table = KICKS[rot][next_rot];
-                    
-                    int count = 4;
-                    if (key == KEY_ROTATE_180) count = 5;
-                    
-                    for(int k=0; k<count; k++) {
-                        int kdr = table[k][0];
-                        int kdc = table[k][1];
-                        if (kdr == 0 && kdc == 0 && count == 5) continue;
-                        
-                        if (!check_collision(board_rows, board_height, piece_type, next_rot, r+kdr, c+kdc)) {
-                            nr = r+kdr; nc = c+kdc; nrot = next_rot;
-                            valid = true;
-                            dr = (delta==3)?-1:delta;
-                            drow = kdr; dcol = kdc;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            if (valid) {
-                int next_s = encode_state(nr, nc, nrot, piece_type);
-                if (next_s != -1 && !visited[next_s]) {
-                    visited[next_s] = true;
-                    meta[next_s].parent = curr_state;
-                    meta[next_s].last_move = key;
-                    meta[next_s].depth = depth + 1;
-                    meta[next_s].delta_r = dr;
-                    meta[next_s].delta_row = drow;
-                    meta[next_s].delta_col = dcol;
-                    
-                    queue[tail++] = next_s;
-                    tail %= QUEUE_CAPACITY;
-                }
-            }
-        }
+
+        bfs_expand(board_rows, board_height, piece_type, curr_state, r, c, rot, depth,
+                   meta, visited, queue, &tail);
     }
 
     // Post-process: select tier representatives and write sequences
@@ -662,5 +683,83 @@ void find_sequences_c(
             write_sequence(meta, slot->bfs_states[ci], is_hold,
                            max_len, &output_buffer[out_slot * max_len]);
         }
+    }
+}
+
+// Dense placement-candidate enumeration for the candidate-ranking net: every reachable
+// resting placement, keyed by rot*40 + norm_col*4 + spin_type (one slot; deepest landing row
+// kept on collision). No death-pruning — death is the env's termination, not a filter — so a
+// playable board never yields an empty set. Encoding matches datagen (b2b_search).
+void find_placement_candidates_c(
+    const uint16_t* board_rows,
+    const int board_height,
+    const int piece_type,
+    const int start_row,
+    const int start_col,
+    const int start_rot,
+    const int max_len,
+    const int is_hold,
+    int64_t* out_sequences,    // [PLACEMENT_SLOTS * max_len], PAD-filled by caller
+    int32_t* out_landing_rows  // [PLACEMENT_SLOTS], -1 = empty
+) {
+    if (!initialized) init_pieces();
+
+    // Scratch is stack-local (not `static`) so this entry is reentrant - the C MCTS engine
+    // calls it from OpenMP-parallel leaf enumeration. ~52KB/call; the loops below re-init it,
+    // so single-threaded env use is behaviourally unchanged. (init_pieces must be primed once
+    // single-threaded before any parallel call - see mcts_create.)
+    StateMeta meta[STATE_SPACE];
+    bool visited[STATE_SPACE];
+    int queue[QUEUE_CAPACITY];
+
+    for(int i=0; i<STATE_SPACE; i++) {
+        visited[i] = false;
+        meta[i].parent = -1;
+    }
+    for(int i=0; i<PLACEMENT_SLOTS; i++) out_landing_rows[i] = -1;
+
+    int start_state = encode_state(start_row, start_col, start_rot, piece_type);
+    if (start_state == -1 || check_collision(board_rows, board_height, piece_type, start_rot, start_row, start_col)) {
+        return;
+    }
+
+    int head = 0, tail = 0;
+    queue[tail++] = start_state;
+    visited[start_state] = true;
+    meta[start_state].depth = 0;
+    meta[start_state].last_move = KEY_START;
+    meta[start_state].delta_r = 0;
+
+    int max_seq = is_hold ? max_len : max_len - 1;
+    int max_depth = max_seq - 2;
+
+    while(head != tail) {
+        int curr_state = queue[head++];
+        head %= QUEUE_CAPACITY;
+
+        int r, c, rot;
+        decode_state(curr_state, &r, &c, &rot, piece_type);
+        int depth = meta[curr_state].depth;
+
+        int land_r = hard_drop_row(board_rows, board_height, piece_type, rot, r, c);
+
+        if (r == land_r) {
+            int delta_sum = abs(meta[curr_state].delta_row) + abs(meta[curr_state].delta_col);
+            int spin_type = compute_spin_type(board_rows, board_height, piece_type, rot, land_r,
+                                              c, meta[curr_state].delta_r, delta_sum);
+            int norm_col = c + PIECES[piece_type].orientations[rot].min_col;
+            int slot = rot * 40 + norm_col * 4 + spin_type;
+            if (slot >= 0 && slot < PLACEMENT_SLOTS &&
+                (out_landing_rows[slot] < 0 || land_r > out_landing_rows[slot])) {
+                out_landing_rows[slot] = land_r;
+                write_sequence(meta, curr_state, is_hold, max_len,
+                               &out_sequences[(size_t)slot * max_len]);
+            }
+        }
+
+        if (depth >= max_depth) continue;
+
+        bfs_expand(board_rows, board_height, piece_type, curr_state, r, c, rot, depth,
+                   meta, visited, queue, &tail);
     }
 }

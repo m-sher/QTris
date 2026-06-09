@@ -6,7 +6,6 @@ import pygame
 import pygame_widgets
 from pygame_widgets.slider import Slider
 from pygame_widgets.button import Button
-import numpy as np
 import time
 
 from qtris.demo.constants import BCG_LABELS, PIECE_COLORS
@@ -23,7 +22,6 @@ dropout_rate = 0.1
 max_len = 15
 queue_size = 5
 num_row_tiers = 2
-num_sequences = 160 * num_row_tiers
 
 
 def load_policy(checkpoint_dir):
@@ -50,104 +48,6 @@ def load_policy(checkpoint_dir):
     return model
 
 
-def run_eval(p1_model, p2_model, args):
-    """Headless evaluation loop: run for --eval-steps total steps, resetting on
-    game end with a new seed, and report win/loss/draw statistics."""
-    num_steps = args.steps
-    total_steps = args.eval_steps
-    rng = np.random.RandomState(args.seed)
-
-    p1_wins = 0
-    p2_wins = 0
-    draws = 0
-    games = 0
-    steps_done = 0
-
-    start = time.time()
-
-    while steps_done < total_steps:
-        game_seed = int(rng.randint(0, 2**31))
-        py_env = PyTetris1v1Env(
-            queue_size=queue_size,
-            max_holes=50,
-            max_height=18,
-            max_steps=num_steps,
-            max_len=max_len,
-            pathfinding=True,
-            seed=game_seed,
-            idx=0,
-            num_row_tiers=num_row_tiers,
-        )
-        env = TFPyEnvironment(py_env)
-        time_step = env.reset()
-
-        for t in range(num_steps):
-            board1 = time_step.observation["board"]
-            pieces1 = time_step.observation["pieces"]
-            bcg1 = time_step.observation["b2b_combo_garbage"]
-            seqs1 = time_step.observation["sequences"]
-
-            board2 = time_step.observation["opp_board"]
-            pieces2 = time_step.observation["opp_pieces"]
-            bcg2 = time_step.observation["opp_b2b_combo_garbage"]
-            seqs2 = time_step.observation["opp_sequences"]
-
-            p1_keys, _, _, _ = p1_model.predict(
-                (board1, pieces1, bcg1),
-                greedy=args.greedy,
-                valid_sequences=seqs1,
-                temperature=args.temperature,
-            )
-            p2_keys, _, _, _ = p2_model.predict(
-                (board2, pieces2, bcg2),
-                greedy=args.greedy,
-                valid_sequences=seqs2,
-                temperature=args.temperature,
-            )
-
-            combined = tf.concat([p1_keys, p2_keys], axis=-1)
-            time_step = env.step(combined)
-            steps_done += 1
-
-            if time_step.is_last():
-                break
-
-        # Determine outcome
-        win_reward = time_step.reward["win"].numpy()[0]
-        if not time_step.is_last():
-            # Ran out of eval steps before the game finished
-            draws += 1
-        elif win_reward > 0:
-            p1_wins += 1
-        elif t + 1 >= num_steps:
-            # Hit max steps per game - timeout draw
-            draws += 1
-        else:
-            # Episode ended by death and P1 didn't win
-            p2_wins += 1
-
-        games += 1
-        elapsed = time.time() - start
-        p1_wr = p1_wins / games * 100
-        p2_wr = p2_wins / games * 100
-        draw_pct = draws / games * 100
-        print(
-            f"Game {games:>4d} | Steps {steps_done:>7d}/{total_steps} | "
-            f"P1 {p1_wins}W ({p1_wr:.1f}%)  P2 {p2_wins}W ({p2_wr:.1f}%)  "
-            f"Draw {draws} ({draw_pct:.1f}%) | {elapsed:.1f}s",
-            flush=True,
-        )
-        env.close()
-
-    elapsed = time.time() - start
-    print(f"\n{'=' * 60}")
-    print(f"Evaluation complete: {games} games, {steps_done} steps, {elapsed:.1f}s")
-    print(f"  P1 wins: {p1_wins:>4d} ({p1_wins / games * 100:.1f}%)")
-    print(f"  P2 wins: {p2_wins:>4d} ({p2_wins / games * 100:.1f}%)")
-    print(f"  Draws:   {draws:>4d} ({draws / games * 100:.1f}%)")
-    print(f"{'=' * 60}")
-
-
 def main(cli_args):
     from types import SimpleNamespace
 
@@ -158,7 +58,6 @@ def main(cli_args):
         seed=getattr(cli_args, "seed", 0),
         greedy=getattr(cli_args, "greedy", False),
         temperature=getattr(cli_args, "temperature", 1.0),
-        eval_steps=getattr(cli_args, "eval_steps", None),
     )
 
     num_steps = args.steps
@@ -167,10 +66,6 @@ def main(cli_args):
     p1_model = load_policy(args.p1)
     p2_model = load_policy(args.p2)
     p1_model.summary()
-
-    if args.eval_steps is not None:
-        run_eval(p1_model, p2_model, args)
-        return
 
     # Create environment
     py_env = PyTetris1v1Env(
