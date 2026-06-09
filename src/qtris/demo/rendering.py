@@ -24,6 +24,22 @@ def compute_bcg_heatmaps(piece_scores):
     return out
 
 
+def colorize_attention_scores(piece_scores, pieces_array, piece_colors):
+    """Color board patches by their dominant piece's attention: (12, 5, 3) uint8.
+
+    Each patch takes the color of the queue piece attending to it most, scaled
+    by that attention weight (min-max normalized over the board).
+    """
+    attention = tf.reduce_sum(piece_scores, axis=[0, 2])  # (batch, query, key)
+    piece_patch_attn = attention[0, :7, :60].numpy()  # (7, 60)
+    dominant = piece_patch_attn.argmax(axis=0).reshape(12, 5)
+    intensity = piece_patch_attn.max(axis=0).reshape(12, 5)
+    i_min, i_max = intensity.min(), intensity.max()
+    norm = (intensity - i_min) / (i_max - i_min + 1e-8)
+    colors = piece_colors[pieces_array][dominant]  # (12, 5, 3)
+    return (colors * norm[..., None]).astype(np.uint8)
+
+
 def draw_garbage_bar(env_instance, height=24, width=4):
     """Create a garbage queue visualization array (height, width, 3)."""
     surface = np.zeros((height, width, 3), dtype=np.uint8)
