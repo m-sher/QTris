@@ -330,7 +330,8 @@ def main(cli_args):
         colour=(125, 125, 125),
         handleColour=(50, 50, 50),
     )
-    Button(
+    # Held in vars so pygame_widgets' WeakSet doesn't GC them (bare exprs vanish).
+    _back_btn = Button(
         screen,
         screen_w - 60,
         0,
@@ -341,7 +342,7 @@ def main(cli_args):
         margin=0,
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
-    Button(
+    _fwd_btn = Button(
         screen,
         screen_w - 28,
         0,
