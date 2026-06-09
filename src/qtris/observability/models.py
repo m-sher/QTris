@@ -55,12 +55,14 @@ class OneVsOneTrainConfig(PPOConfigBase):
 
 class LogPayloadModel(BaseModel):
     """Base for any per-step log payload model. The backend writes the fields
-    named in `_image_fields` as images and the numeric rest as scalars."""
+    named in `_image_fields` as images and the numeric rest as scalars, tagged
+    `group/field` per `_tag_groups` (how TensorBoard/wandb section the charts)."""
 
     class Config:
         arbitrary_types_allowed = True
 
     _image_fields: tuple[str, ...] = ()
+    _tag_groups: dict[str, tuple[str, ...]] = {}
 
     def to_payload(self) -> dict[str, Any]:
         return self.dict()
@@ -109,6 +111,28 @@ class PPOLogBase(LogPayloadModel):
     # Names of fields the backend should write as images instead of scalars.
     # Override in subclasses if they add more image fields.
     _image_fields: tuple[str, ...] = ("board", "scores")
+    _tag_groups: dict[str, tuple[str, ...]] = {
+        "optimization": (
+            "ppo_loss",
+            "entropy",
+            "approx_kl",
+            "clipped_frac",
+            "value_loss",
+            "explained_var",
+            "return_var",
+            "avg_probs",
+        ),
+        "rewards": (
+            "avg_attacks",
+            "avg_clears",
+            "avg_attack_reward",
+            "avg_total_reward",
+            "avg_garbage_pushed",
+            "avg_pieces",
+        ),
+        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "progress": ("updates",),
+    }
 
 
 class SingleAgentPPOLog(PPOLogBase):
@@ -120,6 +144,12 @@ class SingleAgentPPOLog(PPOLogBase):
     expert_loss: float
     expert_accuracy: float
     expert_coef: float
+
+    _tag_groups: dict[str, tuple[str, ...]] = {
+        **PPOLogBase._tag_groups,
+        "rewards": PPOLogBase._tag_groups["rewards"] + ("avg_reward", "avg_deaths"),
+        "expert": ("expert_loss", "expert_accuracy", "expert_coef"),
+    }
 
 
 class OneVsOnePPOLog(PPOLogBase):
@@ -143,6 +173,29 @@ class OneVsOnePPOLog(PPOLogBase):
     win_rate: float
     decisive_wr: float
     wr_ema: float
+
+    _tag_groups: dict[str, tuple[str, ...]] = {
+        **PPOLogBase._tag_groups,
+        "rewards": PPOLogBase._tag_groups["rewards"]
+        + ("avg_net_attacks", "avg_episodes"),
+        "gameplay": PPOLogBase._tag_groups["gameplay"]
+        + (
+            "APP_reward",
+            "APP_gross",
+            "APP_net",
+            "reward_per_clear",
+            "att_per_clear",
+            "cancel_rate",
+        ),
+        "outcomes": (
+            "total_wins",
+            "total_losses",
+            "total_nondec",
+            "win_rate",
+            "decisive_wr",
+            "wr_ema",
+        ),
+    }
 
 
 class AlphaZeroTrainConfig(BaseModel):
@@ -201,3 +254,23 @@ class SingleAgentAZLog(LogPayloadModel):
     board: np.ndarray
 
     _image_fields: tuple[str, ...] = ("board",)
+    _tag_groups: dict[str, tuple[str, ...]] = {
+        "optimization": (
+            "policy_loss",
+            "value_loss",
+            "entropy",
+            "explained_var",
+            "value_mean",
+            "return_var",
+        ),
+        "rewards": (
+            "avg_total_reward",
+            "avg_attacks",
+            "avg_clears",
+            "avg_deaths",
+            "avg_pieces",
+        ),
+        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "search": ("avg_visits", "dead_rate"),
+        "progress": ("updates", "buffer_size"),
+    }
