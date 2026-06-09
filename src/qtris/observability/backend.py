@@ -92,6 +92,7 @@ def log_step(metrics: LogPayloadModel, *, step: int | None = None) -> None:
     run.step = step + 1
 
     payload = metrics.to_payload()
+    group_of = {f: g for g, fields in metrics._tag_groups.items() for f in fields}
     with run.writer.as_default():
         for key in metrics._image_fields:
             img = payload.pop(key, None)
@@ -99,7 +100,8 @@ def log_step(metrics: LogPayloadModel, *, step: int | None = None) -> None:
                 tf.summary.image(key, _to_image_batch(img), step=step)
         for key, val in payload.items():
             if isinstance(val, (int, float, np.integer, np.floating)):
-                tf.summary.scalar(key, float(val), step=step)
+                tag = f"{group_of[key]}/{key}" if key in group_of else key
+                tf.summary.scalar(tag, float(val), step=step)
     run.writer.flush()
 
 
