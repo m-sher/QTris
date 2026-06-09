@@ -1,8 +1,8 @@
-"""Pydantic schemas for wandb run configs + per-step training metrics.
+"""Pydantic schemas for run configs + per-step training metrics.
 
-Each `wandb.init` config dict and each `wandb.log` payload has a typed model
-here. Trainers construct an instance per step; the wandb_backend serializes
-it (wrapping numpy image fields in `wandb.Image` at the boundary).
+Each run config and each per-step log payload has a typed model here. Trainers
+construct an instance per step; the observability backend serializes it and
+writes the numpy fields named in `_image_fields` as images.
 
 Hierarchy:
     PPOConfigBase           - 10 shared PPO knobs
@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 
 class PPOConfigBase(BaseModel):
-    """Hyperparams logged to wandb.config; shared across all PPO trainers."""
+    """Hyperparams logged as the run config; shared across all PPO trainers."""
 
     num_envs: int
     num_collection_steps: int
@@ -53,33 +53,24 @@ class OneVsOneTrainConfig(PPOConfigBase):
     max_pool_size: int
 
 
-class WandbPayloadModel(BaseModel):
-    """Base for any wandb.log payload model: serializes to a dict and wraps the
-    fields named in `_image_fields` as `wandb.Image` at the boundary, so callers
-    never import wandb directly."""
+class LogPayloadModel(BaseModel):
+    """Base for any per-step log payload model. The backend writes the fields
+    named in `_image_fields` as images and the numeric rest as scalars."""
 
     class Config:
         arbitrary_types_allowed = True
 
     _image_fields: tuple[str, ...] = ()
 
-    def to_wandb_payload(self) -> dict[str, Any]:
-        """Dict shaped for `wandb.log()`, with image fields wrapped."""
-        import wandb
-
-        payload = self.dict()
-        for key in self._image_fields:
-            arr = payload.get(key)
-            if arr is not None:
-                payload[key] = wandb.Image(arr)
-        return payload
+    def to_payload(self) -> dict[str, Any]:
+        return self.dict()
 
 
-class PPOLogBase(WandbPayloadModel):
+class PPOLogBase(LogPayloadModel):
     """Metrics logged every generation; shared across all PPO trainers.
 
-    `board` and `scores` are numpy arrays; the wandb_backend wraps them in
-    `wandb.Image` at log time so callers don't need to import wandb directly.
+    `board` and `scores` are numpy arrays; the backend writes them as images
+    at log time.
     """
 
     # PPO optimization
@@ -115,7 +106,7 @@ class PPOLogBase(WandbPayloadModel):
     board: np.ndarray
     scores: np.ndarray
 
-    # Names of fields the backend should wrap with wandb.Image before logging.
+    # Names of fields the backend should write as images instead of scalars.
     # Override in subclasses if they add more image fields.
     _image_fields: tuple[str, ...] = ("board", "scores")
 
@@ -176,7 +167,7 @@ class AlphaZeroTrainConfig(BaseModel):
     gae_lambda: float
 
 
-class SingleAgentAZLog(WandbPayloadModel):
+class SingleAgentAZLog(LogPayloadModel):
     """Single-player AlphaZero per-generation metrics."""
 
     # Optimization

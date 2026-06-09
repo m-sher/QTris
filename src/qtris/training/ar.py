@@ -9,7 +9,7 @@ from tensorflow import keras
 
 from qtris.config import ModelConfig, PPOConfig, EnvConfig
 from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
-from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.observability.backend import finish, init_run, log_step
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
 import time
@@ -438,11 +438,10 @@ def main(args):
     last_time = time.time()
 
     # Initialize WandB logging
-    wandb_run = init_run(
+    run = init_run(
         project="Tetris",
         config=config,
-        # id='iauixt1w',
-        # resume='must',
+        wandb_mirror=getattr(args, "wandb", False),
     )
 
     # Initialize running return variance for reward scaling (EMA)
@@ -660,4 +659,4 @@ def main(args):
         last_time = time.time()
 
     runner.env.close()
-    finish(wandb_run)
+    finish(run)
