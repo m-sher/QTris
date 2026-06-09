@@ -4,11 +4,16 @@ Same solo-play env + random-garbage settings as the PPO trainer
 (`qtris.training.placement`), but PPO is replaced by an AlphaZero loop: PUCT MCTS
 (`PlacementMCTS`) plays self-play games using the net's policy as priors and its value
 head at leaves; the net is then trained to imitate the search (policy -> root visit
-distribution) and to regress the oracle `evaluate_state` (value -> board eval, the SAME
-target pretraining uses, so warm-start from the BC checkpoint doesn't collapse). Iterating
-improves the policy via search; the value stays the oracle critic. wandb observability via
-`qtris.observability`. No expert/BC anchor - pure self-play.
+distribution) and to regress the search-bootstrapped self-play return (value -> the
+discounted attack/death return the search optimizes, with the net's own root value
+bootstrapping the truncation horizon). Both the policy and the value improve via search.
+Positions are accumulated in a multi-generation replay buffer (decorrelates the tiny
+on-policy batches and resists drift off the pretrained init). The value lives in
+`return_scale` units - the same units the MCTS leaf bootstrap + edge rewards use, so the
+search value/reward weighting is consistent. wandb observability via `qtris.observability`.
 """
+
+from collections import deque
 
 import numpy as np
 import tensorflow as tf
@@ -23,7 +28,7 @@ from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
 from qtris.observability.wandb_backend import finish, init_run, log_step
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
-from qtris.training.gae import compute_raw_returns
+from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 
 GAMMA = 0.99
 
@@ -31,27 +36,6 @@ GAMMA = 0.99
 def _flat(arr, sel):
     """Collapse the (horizon, num_games) leading axes and keep storable rows."""
     return arr.reshape((-1,) + arr.shape[2:])[sel]
-
-
-def _max_cand_value(searcher, env):
-    """Value target matching the pretraining target in form: max over the oracle's candidate
-    evaluations (full evaluate_state per resulting placement) for this state. Pretraining used
-    max(cand_scores)/value_scale from the depth-16 datagen beam; this is the cheap depth-0
-    version (one decompose call/move) - keeps the value the oracle critic so warm-start from the
-    BC checkpoint doesn't collapse. max over candidates also dodges evaluate_state's near-death
-    floor (the best move usually survives)."""
-    queue = np.array([p.value for p in env._queue], dtype=np.int32)
-    d = searcher.decompose(
-        env._board,
-        env._active_piece.piece_type.value,
-        env._hold_piece.value,
-        queue,
-        int(env._scorer._b2b),
-        int(env._scorer._combo),
-        int(env._get_total_garbage()),
-        2 * CANDIDATE_CAPACITY,
-    )
-    return float(d.sum(axis=1).max()) if len(d) else 0.0
 
 
 @tf.function
@@ -163,6 +147,8 @@ def main(args):
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 1e-4)
+    replay_capacity = getattr(args, "replay_capacity", 25_000)
+    gae_lambda = getattr(args, "gae_lambda", 1.0)
 
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
@@ -171,6 +157,9 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=getattr(args, "gamma", GAMMA),
         temp_moves=getattr(args, "temp_moves", 12),
+        w_attack=getattr(args, "w_attack", 1.0),
+        w_b2b=getattr(args, "w_b2b", 1.0),
+        w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -184,10 +173,15 @@ def main(args):
         dirichlet_alpha=cfg.dirichlet_alpha,
         dirichlet_eps=cfg.dirichlet_eps,
         temp_moves=cfg.temp_moves,
+        w_attack=cfg.w_attack,
+        w_b2b=cfg.w_b2b,
+        w_death=cfg.w_death,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
         learning_rate=learning_rate,
+        replay_capacity=replay_capacity,
+        gae_lambda=gae_lambda,
     )
 
     net = PlacementPolicyValueNet(
@@ -216,16 +210,10 @@ def main(args):
     return_scale = tf.Variable(
         1.0, trainable=False, dtype=tf.float32, name="return_scale"
     )
-    # Normalizer the value head was pretrained at (value target = max(cand_scores)/value_scale).
-    # The AZ value target reuses it so the phi target matches the pretrained value's units.
-    value_scale = tf.Variable(
-        1.0, trainable=False, dtype=tf.float32, name="value_scale"
-    )
     checkpoint = tf.train.Checkpoint(
         model=net,
         optimizer=optimizer,
         return_scale=return_scale,
-        value_scale=value_scale,
     )
     manager = tf.train.CheckpointManager(
         checkpoint, "checkpoints/placement_az", max_to_keep=3
@@ -236,15 +224,11 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            # Also restore value_scale (the pretrain value normalizer) so the phi value target
-            # is in the same units the warm-started value head outputs - no warm-start mismatch.
-            tf.train.Checkpoint(model=net, value_scale=value_scale).restore(
-                warm
-            ).expect_partial()
-            print(
-                f"Warm-started from BC checkpoint {warm} (value_scale={float(value_scale):.3f}).",
-                flush=True,
-            )
+            # Warm-start the policy only. The value head was pretrained against the oracle
+            # depth-0 max (value_scale units); it retargets to the search return (return_scale
+            # units) over the first few generations - a transient that self-corrects.
+            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
+            print(f"Warm-started policy from BC checkpoint {warm}.", flush=True)
 
     envs = _build_envs(
         num_games,
@@ -285,6 +269,12 @@ def main(args):
             env._reset()
         move_count = np.zeros(num_games, dtype=np.int64)
 
+    # Multi-generation replay of storable positions (decorrelates the tiny on-policy batches
+    # and resists drift off the pretrained init). Each entry is one generation's numpy arrays;
+    # oldest generations are evicted once the total position count exceeds replay_capacity.
+    replay = deque()
+    replay_size = 0
+
     for gen in range(num_generations):
         boards = np.zeros((horizon, num_games, 24, 10, 1), dtype=np.float32)
         pieces = np.zeros((horizon, num_games, queue_size + 2), dtype=np.int64)
@@ -295,7 +285,9 @@ def main(args):
         )
         cand_mk = np.zeros((horizon, num_games, CANDIDATE_CAPACITY), dtype=bool)
         pi_tgt = np.zeros((horizon, num_games, CANDIDATE_CAPACITY), dtype=np.float32)
-        value_tgt = np.zeros((horizon, num_games), dtype=np.float32)
+        v_root = np.zeros(
+            (horizon, num_games), dtype=np.float32
+        )  # net root value baseline
         rewards = np.zeros((horizon, num_games), dtype=np.float32)
         attacks = np.zeros((horizon, num_games), dtype=np.float32)
         clears = np.zeros((horizon, num_games), dtype=np.float32)
@@ -304,7 +296,6 @@ def main(args):
         visits = np.zeros((horizon, num_games), dtype=np.float32)
 
         scale = float(np.sqrt(return_var))
-        vs = float(value_scale) + 1e-8  # value-target normalizer (matches pretraining)
         for t in range(horizon):
             temps = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(np.float32)
             results = mcts.search(envs, scale, temps)
@@ -328,12 +319,11 @@ def main(args):
                 cand_pl[t, i] = res["cand_placements"]
                 cand_mk[t, i] = res["cand_mask"]
                 pi_tgt[t, i] = res["pi"]
+                v_root[t, i] = res[
+                    "value"
+                ]  # net value of this root (return-bootstrap baseline)
                 visits[t, i] = res["visits"]
                 storable[t, i] = True
-                # Value target = max over the oracle's candidate evals for THIS (pre-move) state,
-                # /value_scale - the pretraining value target's form (depth-0 vs the datagen beam),
-                # so the warm-started value head stays the oracle critic and doesn't collapse.
-                value_tgt[t, i] = _max_cand_value(searcher, envs[i]) / vs
                 _total, attack, clear, died = placement_step(
                     envs[i], searcher, res["descriptor"]
                 )
@@ -348,42 +338,34 @@ def main(args):
                 else:
                     move_count[i] += 1
 
-        # Value target = oracle evaluate_state (phi), collected per move above. No discounted-return
-        # bootstrap: the value matches the pretraining objective so warm-start doesn't collapse.
         sel = storable.reshape(-1)
-        if not sel.any():
+        n_new = int(sel.sum())
+        if n_new == 0:
             print(
                 f"Gen {gen}: no storable samples (all dead); skipping update.",
                 flush=True,
             )
             continue
 
-        buf = {
-            "boards": tf.constant(_flat(boards, sel), tf.float32),
-            "pieces": tf.constant(_flat(pieces, sel), tf.int64),
-            "bcg": tf.constant(_flat(bcg, sel), tf.float32),
-            "cand_placements": tf.constant(_flat(cand_pl, sel), tf.float32),
-            "cand_mask": tf.constant(_flat(cand_mk, sel), tf.bool),
-            "pi_target": tf.constant(_flat(pi_tgt, sel), tf.float32),
-            "value_target": tf.constant(_flat(value_tgt, sel), tf.float32),
-        }
-        ds = (
-            tf.data.Dataset.from_tensor_slices(buf)
-            .shuffle(int(sel.sum()))
-            .batch(mini_batch_size, drop_remainder=True)
-            .prefetch(tf.data.AUTOTUNE)
+        # Value target = the discounted self-play return the search optimizes (attack - death),
+        # bootstrapped at the horizon by the net's own root value (root_values, no simulation),
+        # then put in return_scale units to match the MCTS leaf bootstrap + edge rewards. lam=1
+        # gives the MC return + a single boundary bootstrap; lam<1 trades variance for value bias.
+        last_v = mcts.root_values(envs)
+        _adv, returns = compute_gae_and_returns(
+            v_root[..., None],
+            last_v[..., None],
+            rewards[..., None],
+            dones[..., None],
+            cfg.gamma,
+            gae_lambda,
+            horizon,
+            num_games,
         )
+        value_tgt = returns.numpy()[..., 0] / (scale + 1e-8)
 
-        updates = 0
-        step_out = None
-        for _ in range(num_epochs):
-            for batch in ds:
-                step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
-                updates += 1
-        if step_out is None:
-            print(f"Gen {gen}: buffer smaller than batch; skipping update.", flush=True)
-            continue
-
+        # EMA the raw-return variance for the next generation's return_scale (search normalizer +
+        # value-target units). Updated before the skip checks so the scale evolves every gen.
         raw_returns = compute_raw_returns(
             rewards[..., None], dones[..., None], cfg.gamma, horizon, num_games
         )
@@ -391,6 +373,52 @@ def main(args):
             tf.math.reduce_variance(raw_returns)
         )
         return_scale.assign(tf.sqrt(return_var))
+
+        # Append this generation's storable positions to the replay buffer; evict oldest gens
+        # once total positions exceed replay_capacity.
+        replay.append(
+            {
+                "boards": _flat(boards, sel),
+                "pieces": _flat(pieces, sel),
+                "bcg": _flat(bcg, sel),
+                "cand_placements": _flat(cand_pl, sel),
+                "cand_mask": _flat(cand_mk, sel),
+                "pi_target": _flat(pi_tgt, sel),
+                "value_target": _flat(value_tgt, sel),
+            }
+        )
+        replay_size += n_new
+        while replay_size > replay_capacity and len(replay) > 1:
+            replay_size -= len(replay.popleft()["value_target"])
+
+        if replay_size < mini_batch_size:
+            print(
+                f"Gen {gen}: replay {replay_size} < batch {mini_batch_size}; skipping update.",
+                flush=True,
+            )
+            continue
+
+        # Train on minibatches sampled from the whole replay buffer (old + new mixed). Step count
+        # scales with the NEW data so per-gen compute stays bounded as the buffer grows.
+        full = {k: np.concatenate([e[k] for e in replay], axis=0) for k in replay[0]}
+        total_steps = num_epochs * max(1, n_new // mini_batch_size)
+        ds = (
+            tf.data.Dataset.from_tensor_slices(full)
+            .shuffle(replay_size)
+            .repeat()
+            .batch(mini_batch_size, drop_remainder=True)
+            .take(total_steps)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+        updates = 0
+        step_out = None
+        for batch in ds:
+            step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
+            updates += 1
+        if step_out is None:
+            print(f"Gen {gen}: no batch produced; skipping update.", flush=True)
+            continue
 
         deaths_per_game = dones.sum(axis=0)
         b2b_series = bcg[..., 0][storable]
@@ -420,6 +448,7 @@ def main(args):
                     else 0.0,
                     dead_rate=float((~storable).mean()),
                     updates=updates,
+                    buffer_size=replay_size,
                     board=boards[storable][0, ..., 0],
                 )
             )

@@ -140,6 +140,9 @@ class PlacementMCTS:
                         "bcg": bcg[k].copy(),
                         "cand_placements": pls[k].copy(),
                         "cand_mask": masks[k].copy(),
+                        "value": float(
+                            values[k]
+                        ),  # net root value, for the AZ return bootstrap
                     }
 
             lpr = max(1, self.cfg.leaves_per_round)
@@ -174,3 +177,44 @@ class PlacementMCTS:
                 }
             )
         return results
+
+    def root_values(self, real_envs):
+        """Net value of each env's current root state (no simulation), for the n-step return
+        bootstrap at the collection horizon. Returns a (num_games,) array; 0 where the root has
+        no legal move (dead). Costs one batched root eval - the first half of `search()`."""
+        n = len(real_envs)
+        self._fullb = n * max(1, self.cfg.leaves_per_round)
+        e0 = real_envs[0]
+        engine = CMCTS(
+            n,
+            board_height=24,
+            queue_size=e0._queue_size,
+            max_height=e0._max_height,
+            max_holes=e0._max_holes,
+            garbage_push_delay=e0._garbage_push_delay,
+            auto_push_garbage=int(e0._auto_push_garbage),
+            auto_fill_queue=int(e0._auto_fill_queue),
+            c_puct=self.cfg.c_puct,
+            gamma=self.cfg.gamma,
+            w_attack=self.cfg.w_attack,
+            w_b2b=self.cfg.w_b2b,
+            w_death=self.cfg.w_death,
+            return_scale=1.0,
+            max_len=e0._max_len,
+            num_simulations=self.cfg.num_simulations,
+            leaves_per_round=self.cfg.leaves_per_round,
+            vloss=self.cfg.vloss,
+        )
+        out = np.zeros(n, dtype=np.float32)
+        try:
+            for i, env in enumerate(real_envs):
+                engine.set_root(i, env)
+            nv, req = engine.collect_roots()
+            if nv:
+                boards, pieces, bcg, pls, masks, tree_ids = req
+                _logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
+                for k in range(nv):
+                    out[tree_ids[k]] = values[k]
+        finally:
+            engine.destroy()
+        return out

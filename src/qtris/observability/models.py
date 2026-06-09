@@ -165,10 +165,15 @@ class AlphaZeroTrainConfig(BaseModel):
     dirichlet_alpha: float
     dirichlet_eps: float
     temp_moves: int
+    w_attack: float
+    w_b2b: float
+    w_death: float
     mini_batch_size: int
     num_epochs: int
     value_coef: float
     learning_rate: float
+    replay_capacity: int
+    gae_lambda: float
 
 
 class SingleAgentAZLog(WandbPayloadModel):
@@ -199,6 +204,7 @@ class SingleAgentAZLog(WandbPayloadModel):
 
     # Training progress
     updates: int
+    buffer_size: int
 
     # Visualization (wrapped at log time)
     board: np.ndarray
