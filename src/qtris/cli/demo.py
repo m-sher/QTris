@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="demo")
-    parser.add_argument("family", choices=["ar", "flat", "vs", "placement"])
+    parser.add_argument("family", choices=["ar", "flat", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--checkpoint",
@@ -18,18 +18,6 @@ def main() -> None:
         type=Path,
         default=None,
         help="Required for `demo <family> --mode 1v1`. Opponent's checkpoint directory.",
-    )
-    parser.add_argument(
-        "--left",
-        type=Path,
-        default=None,
-        help="Required for `demo vs`. Left player's checkpoint directory.",
-    )
-    parser.add_argument(
-        "--right",
-        type=Path,
-        default=None,
-        help="Required for `demo vs`. Right player's checkpoint directory.",
     )
     parser.add_argument(
         "--search",
@@ -76,11 +64,7 @@ def main() -> None:
     if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:
         parser.error("use either --search or --mcts-sims, not both.")
 
-    if args.family == "vs":
-        if args.left is None or args.right is None:
-            parser.error("`demo vs` requires --left and --right.")
-        from qtris.demo.vs import main as run
-    elif args.mode == "1v1":
+    if args.mode == "1v1":
         if args.checkpoint is None or args.opponent is None:
             parser.error(
                 "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
