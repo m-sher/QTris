@@ -68,7 +68,7 @@ uv run datagen ar --dagger --policy-checkpoint checkpoints/ar_pretrained_policy
 
 # Watch a checkpoint play (pygame)
 uv run demo placement --checkpoint checkpoints/placement_az --mcts-sims 256
-uv run demo vs --left checkpoints/ar_policy_445k --right checkpoints/ar_pretrained_policy
+uv run demo ar --mode 1v1 --checkpoint checkpoints/ar_policy_445k --opponent checkpoints/ar_pretrained_policy
 ```
 
 Run any command with `--help` for the full flag surface (MCTS knobs, garbage schedule,
