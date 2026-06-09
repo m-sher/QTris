@@ -15,6 +15,7 @@ import numpy as np
 import time
 
 from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS, BCG_LABELS
+from qtris.demo.panels import MaxStatTracker, draw_max_stats
 from qtris.demo.rendering import (
     compute_bcg_heatmaps,
     draw_garbage_bar,
@@ -147,10 +148,13 @@ def main(args):
     current_b2b = []
     current_combo = []
     current_garbage = []
+    value_ests = []
+    max_stats = []
 
     death = 0
     running_attacks = 0
     running_clears = 0
+    stat_tracker = MaxStatTracker()
 
     piece_display = load_piece_display()
 
@@ -168,11 +172,15 @@ def main(args):
         current_b2b_val = py_env._scorer._b2b
         current_combo_val = py_env._scorer._combo
         current_garbage_val = py_env._get_total_garbage()
+        max_stats.append(
+            stat_tracker.update(current_b2b_val, current_combo_val, attack)
+        )
 
         if time_step.is_last():
             death = t
             running_attacks = 0
             running_clears = 0
+            stat_tracker.reset_episode()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -218,6 +226,10 @@ def main(args):
             greedy=True,
             cand_sequences=tf.constant(cand_sequences[None], dtype=tf.int64),
             temperature=1.0,
+        )
+
+        value_est = float(
+            p_model.state_value(board, pieces, b2b_combo_garbage).numpy()[0, 0]
         )
 
         if mcts is not None:
@@ -360,6 +372,7 @@ def main(args):
         clears.append(running_clears)
         attack_rewards.append(attack_reward)
         total_rewards.append(total_reward)
+        value_ests.append(value_est)
         current_b2b.append(current_b2b_val)
         current_combo.append(current_combo_val)
         current_garbage.append(current_garbage_val)
@@ -369,7 +382,8 @@ def main(args):
         text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
         pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
-        pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
+        pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 765), 2)
+        pygame.draw.line(screen, (255, 255, 255), (590, 610), (590, 765), 2)
 
         base_y = 615
 
@@ -379,9 +393,11 @@ def main(args):
         total_reward_text = font.render(
             f"Total Reward: {total_reward:0.2f}", True, (255, 255, 255)
         )
+        value_text = font.render(f"Value Est: {value_est:0.2f}", True, (255, 255, 255))
 
         screen.blit(attack_reward_text, (10, base_y))
         screen.blit(total_reward_text, (10, base_y + 20))
+        screen.blit(value_text, (10, base_y + 40))
 
         attack_text = font.render(f"Attack: {int(attacks[-1])}", True, (255, 255, 255))
         app_text = font.render(f"APP: {apps[-1]:0.2f}", True, (255, 255, 255))
@@ -399,7 +415,9 @@ def main(args):
         screen.blit(clear_text, (345, base_y + 40))
         screen.blit(current_b2b_text, (345, base_y + 60))
         screen.blit(current_combo_text, (345, base_y + 80))
-        screen.blit(action_text, (345, base_y + 100))
+
+        draw_max_stats(screen, font, small_font, 600, base_y, *max_stats[-1])
+        screen.blit(action_text, (10, base_y + 155))
 
         pygame.display.update()
 
@@ -526,7 +544,8 @@ def main(args):
         text_bg_rect = pygame.Rect(0, 610, screen_w, 190)
         pygame.draw.rect(screen, (0, 0, 0), text_bg_rect)
 
-        pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 800), 2)
+        pygame.draw.line(screen, (255, 255, 255), (335, 610), (335, 765), 2)
+        pygame.draw.line(screen, (255, 255, 255), (590, 610), (590, 765), 2)
 
         base_y = 615
 
@@ -536,9 +555,13 @@ def main(args):
         total_reward_text = font.render(
             f"Total Reward: {total_rewards[ind]:0.2f}", True, (255, 255, 255)
         )
+        value_text = font.render(
+            f"Value Est: {value_ests[ind]:0.2f}", True, (255, 255, 255)
+        )
 
         screen.blit(attack_reward_text, (10, base_y))
         screen.blit(total_reward_text, (10, base_y + 20))
+        screen.blit(value_text, (10, base_y + 40))
 
         attack_text = font.render(f"Attack: {int(attacks[ind])}", True, (255, 255, 255))
         app_text = font.render(f"APP: {apps[ind]:0.2f}", True, (255, 255, 255))
@@ -556,6 +579,8 @@ def main(args):
         screen.blit(clear_text, (345, base_y + 40))
         screen.blit(current_b2b_text, (345, base_y + 60))
         screen.blit(current_combo_text, (345, base_y + 80))
-        screen.blit(action_text, (345, base_y + 100))
+
+        draw_max_stats(screen, font, small_font, 600, base_y, *max_stats[ind])
+        screen.blit(action_text, (10, base_y + 155))
 
         pygame.display.update()
