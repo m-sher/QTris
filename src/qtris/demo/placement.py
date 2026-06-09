@@ -127,13 +127,13 @@ def main(args):
     font = pygame.font.Font(None, 30)
     small_font = pygame.font.Font(None, 22)
 
-    # BCG attention panel layout
-    bcg_panel_x = 680
-    bcg_label_y = 5
-    bcg_heatmap_y = 30
-    bcg_heatmap_w = 50
-    bcg_heatmap_h = 120
-    bcg_gap = 15
+    # BCG attention panel layout (vertical column along the right edge)
+    bcg_panel_x = 720
+    bcg_panel_y = 8
+    bcg_label_h = 20
+    bcg_heatmap_w = 90
+    bcg_heatmap_h = 168
+    bcg_gap = 10
 
     time_step = env.reset()
 
@@ -328,17 +328,17 @@ def main(args):
         # BCG attention panel (b2b, combo, garbage attention over board patches)
         bcg_vals = [current_b2b_val, current_combo_val, current_garbage_val]
         for i in range(3):
-            hx = bcg_panel_x + i * (bcg_heatmap_w + bcg_gap)
+            hy = bcg_panel_y + i * (bcg_label_h + bcg_heatmap_h + bcg_gap)
             label_text = small_font.render(
                 f"{BCG_LABELS[i]}: {bcg_vals[i]}", True, (255, 255, 255)
             )
-            screen.blit(label_text, (hx, bcg_label_y))
+            screen.blit(label_text, (bcg_panel_x, hy))
             bcg_surf = pygame.Surface((5, 12))
             pygame.surfarray.blit_array(
                 bcg_surf, bcg_colored_heatmaps[i].transpose(1, 0, 2)
             )
             bcg_surf = pygame.transform.scale(bcg_surf, (bcg_heatmap_w, bcg_heatmap_h))
-            screen.blit(bcg_surf, (hx, bcg_heatmap_y))
+            screen.blit(bcg_surf, (bcg_panel_x, hy + bcg_label_h))
 
         step_text = font.render(f"Step: {t + 1}/{num_steps}", True, (255, 255, 255))
         step_rect = step_text.get_rect()
