@@ -235,7 +235,7 @@ def main(args):
         queue_size,
         max_holes=50,
         max_height=18,
-        max_steps=1024,
+        max_steps=None,  # a cap counts truncations as deaths and cuts the bootstrap
         max_len=max_len,
         args=args,
     )
@@ -351,9 +351,10 @@ def main(args):
         # bootstrapped at the horizon by the net's own root value (root_values, no simulation),
         # then put in return_scale units to match the MCTS leaf bootstrap + edge rewards. lam=1
         # gives the MC return + a single boundary bootstrap; lam<1 trades variance for value bias.
-        last_v = mcts.root_values(envs)
+        # Net values are in return_scale units, rewards are raw: scale values up before mixing.
+        last_v = mcts.root_values(envs) * scale
         _adv, returns = compute_gae_and_returns(
-            v_root[..., None],
+            (v_root * scale)[..., None],
             last_v[..., None],
             rewards[..., None],
             dones[..., None],
