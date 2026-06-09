@@ -235,13 +235,15 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
 
         screen.fill((0, 0, 0))
 
-        speed_text = font.render(f"Speed: {speed_slider.getValue()} FPS", True, WHITE)
-        screen.blit(speed_text, (220, 55))
-
         ind = slider.getValue()
         pygame.surfarray.blit_array(screen, frames[ind].swapaxes(0, 1))
 
         draw_step_counter(screen, font, ind + 1, num_steps)
+
+        speed_text = font.render(f"Speed: {speed_slider.getValue()} FPS", True, WHITE)
+        speed_rect = speed_text.get_rect(topleft=(220, 55))
+        pygame.draw.rect(screen, (0, 0, 0), speed_rect.inflate(10, 4))
+        screen.blit(speed_text, (220, 55))
 
         pygame_widgets.update(events)
 
