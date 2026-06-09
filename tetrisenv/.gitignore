@@ -4,3 +4,4 @@
 /logdir
 /tests
 *__pycache__*
+*.so

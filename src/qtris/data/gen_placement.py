@@ -1,33 +1,16 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.config import DataGenConfig
+from qtris.data.placement_features import (
+    CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+    build_placement_target,
+)
 import os
 import shutil
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
-
-# Action space: is_hold(2) * rot(4) * col(10) * spin(4). The policy target is a
-# dense score per action index (sentinel for illegal/unreached moves), so every
-# position carries a score for all 320 possible placement-sequences.
-NUM_ACTIONS = 320
-PAD = 11  # key-sequence padding token
-SENTINEL = np.float32(-1e30)  # score for illegal/unreached actions
-
-
-def dense_target(cand_actions, cand_scores, cand_seqs, max_len):
-    """Scatter per-root candidates into a dense action-indexed target: one score
-    + key-sequence per action index, sentinel for illegal/unreached. Colliding
-    placements keep the best score. Returns (sequences[NUM_ACTIONS, max_len] int8,
-    scores[NUM_ACTIONS] float32)."""
-    seqs = np.full((NUM_ACTIONS, max_len), PAD, dtype=np.int8)
-    scores = np.full(NUM_ACTIONS, SENTINEL, dtype=np.float32)
-    for a, sc, seq in zip(cand_actions, cand_scores, cand_seqs):
-        a = int(a)
-        if 0 <= a < NUM_ACTIONS and sc > scores[a]:
-            scores[a] = sc
-            seqs[a] = seq
-    return seqs, scores
 
 
 def collect(
@@ -48,12 +31,11 @@ def collect(
     headless=False,
     log_every=1000,
 ):
-    """Single-env sequential collection of search-aligned policy/value targets.
+    """Single-env sequential collection of candidate-ranking placement targets.
 
-    For each position the beam search scores every reachable root placement,
-    stored as a dense action-indexed target: a raw score + key-sequence per
-    action index (sentinel for illegal/unreached). The env advances by playing
-    the best move; each position is labeled independently.
+    For each position the beam search scores every reachable root placement; the
+    target is a 128-slot pack of fusion-style placement vectors (64 no-hold + 64
+    hold) plus their raw search scores. The env advances by playing the best move.
     """
     env = PyTetrisEnv(
         queue_size=queue_size,
@@ -82,19 +64,22 @@ def collect(
     total_attack = 0.0
     pieces_placed = 0
 
-    pbar = tqdm(range(num_steps), disable=headless, desc="datagen ar", unit="step")
+    pbar = tqdm(
+        range(num_steps), disable=headless, desc="datagen placement", unit="step"
+    )
     for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
 
-        best_action, best_seq, cand_actions, cand_scores, cand_seqs, _cand_rows = (
+        queue = np.array([p.value for p in env._queue], dtype=np.int32)
+        best_action, best_seq, cand_actions, cand_scores, _cand_seqs, cand_rows = (
             searcher.search_with_scores(
                 board=env._board,
                 active_piece=env._active_piece.piece_type.value,
                 hold_piece=env._hold_piece.value,
-                queue=np.array([p.value for p in env._queue], dtype=np.int32),
+                queue=queue,
                 b2b=int(env._scorer._b2b),
                 combo=int(env._scorer._combo),
                 total_garbage=int(env._get_total_garbage()),
@@ -110,8 +95,17 @@ def collect(
             time_step = env.reset()
             continue
 
-        seqs, scores = dense_target(cand_actions, cand_scores, cand_seqs, max_len)
-        transitions.append((board, pieces, bcg, seqs, scores))
+        row_norm = env._board.shape[0] - 1
+        placements, scores = build_placement_target(
+            cand_actions,
+            cand_scores,
+            cand_rows,
+            active_piece=env._active_piece.piece_type.value,
+            hold_piece=env._hold_piece.value,
+            queue0=int(queue[0]),
+            row_norm=row_norm,
+        )
+        transitions.append((board, pieces, bcg, placements, scores))
 
         time_step = env._step(best_seq.astype(np.int64))
         total_attack += float(time_step.reward["attack"])
@@ -139,7 +133,7 @@ def collect(
 
 def main(args):
     dataset_path = (
-        str(args.output) if args.output else "datasets/tetris_expert_dataset_b2b"
+        str(args.output) if args.output else "datasets/tetris_oracle_placement"
     )
     num_steps = args.steps
     seed = getattr(args, "seed", 0)
@@ -166,13 +160,14 @@ def main(args):
                 for k, v in next(iter(existing_ds.batch(10_000_000))).items()
             }
             existing_count = len(existing.get("cand_scores", []))
-            if (
-                "cand_scores" not in existing
-                or existing["cand_scores"].shape[1] != NUM_ACTIONS
+            cp = existing.get("cand_placements")
+            if cp is None or cp.shape[1:] != (
+                CANDIDATE_CAPACITY,
+                PLACEMENT_FEATURE_DIM,
             ):
                 print(
-                    "Existing dataset is an older schema (not dense 320-action "
-                    "`cand_scores`) - starting fresh for search-aligned targets.",
+                    "Existing dataset is an older schema (not 128-slot "
+                    "`cand_placements`) - starting fresh.",
                     flush=True,
                 )
                 existing = None
@@ -217,14 +212,14 @@ def main(args):
     boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    cand_sequences = np.stack([t[3] for t in new_transitions]).astype(np.int8)
+    cand_placements = np.stack([t[3] for t in new_transitions]).astype(np.float32)
     cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
 
     if existing is not None:
         boards = np.concatenate([existing["boards"], boards])
         pieces = np.concatenate([existing["pieces"], pieces])
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        cand_sequences = np.concatenate([existing["cand_sequences"], cand_sequences])
+        cand_placements = np.concatenate([existing["cand_placements"], cand_placements])
         cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} new = "
@@ -240,7 +235,7 @@ def main(args):
             "boards": boards,
             "pieces": pieces,
             "b2b_combo_garbage": bcg,
-            "cand_sequences": cand_sequences,
+            "cand_placements": cand_placements,
             "cand_scores": cand_scores,
         }
     )

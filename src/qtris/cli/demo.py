@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="demo")
-    parser.add_argument("family", choices=["ar", "flat", "vs"])
+    parser.add_argument("family", choices=["ar", "flat", "vs", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--checkpoint",
@@ -31,7 +31,50 @@ def main() -> None:
         default=None,
         help="Required for `demo vs`. Right player's checkpoint directory.",
     )
+    parser.add_argument(
+        "--search",
+        action="store_true",
+        help="placement only: pick moves with the neural-guided beam search "
+        "(policy prior + value leaf) instead of greedy top-1.",
+    )
+    parser.add_argument(
+        "--depth", type=int, default=1, help="placement --search: lookahead plies."
+    )
+    parser.add_argument(
+        "--beam", type=int, default=8, help="placement --search: beam width."
+    )
+    parser.add_argument(
+        "--gate",
+        type=int,
+        default=8,
+        help="placement --search: top-K candidates expanded per node.",
+    )
+    parser.add_argument(
+        "--mcts-sims",
+        type=int,
+        default=0,
+        help="placement only: play with PUCT MCTS (net policy priors + value leaves) "
+        "at this simulation budget, greedy by visit count - the AlphaZero way to play "
+        "an `--algo az` checkpoint. 0 = off (use greedy top-1 or --search).",
+    )
+    parser.add_argument(
+        "--mcts-cpuct",
+        type=float,
+        default=1.5,
+        help="placement --mcts-sims: PUCT exploration constant.",
+    )
+    parser.add_argument(
+        "--mcts-leaves",
+        type=int,
+        default=4,
+        help="placement --mcts-sims: intra-tree leaf batching (leaves per net call via "
+        "virtual loss). Higher = fewer net calls (~L x faster); 1 = exact sequential. "
+        "Default 4.",
+    )
     args = parser.parse_args()
+
+    if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:
+        parser.error("use either --search or --mcts-sims, not both.")
 
     if args.family == "vs":
         if args.left is None or args.right is None:
@@ -42,9 +85,9 @@ def main() -> None:
             parser.error(
                 "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
             )
-        if args.family == "flat":
+        if args.family in ("flat", "placement"):
             parser.error(
-                "flat 1v1 demo not yet implemented; only `demo ar --mode 1v1` is supported."
+                f"{args.family} 1v1 demo not yet implemented; only `demo ar --mode 1v1` is supported."
             )
         from qtris.demo.ar_1v1 import main as run
     else:
@@ -52,6 +95,8 @@ def main() -> None:
             parser.error(f"`demo {args.family}` requires --checkpoint.")
         if args.family == "ar":
             from qtris.demo.ar import main as run
+        elif args.family == "placement":
+            from qtris.demo.placement import main as run
         else:
             from qtris.demo.flat import main as run
     run(args)

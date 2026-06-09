@@ -29,7 +29,6 @@ dropout_rate = 0.00
 max_len = 15
 
 # Environment params
-generations = 1_000_000
 num_envs = 64
 num_collection_steps = 256
 queue_size = 5
@@ -709,7 +708,13 @@ def main(args):
             num_envs=num_envs,
         )
 
-        raw_returns = compute_raw_returns(all_rewards, all_dones, gamma)
+        raw_returns = compute_raw_returns(
+            all_rewards,
+            all_dones,
+            gamma,
+            num_collection_steps=num_collection_steps,
+            num_envs=num_envs,
+        )
         batch_var = tf.math.reduce_variance(raw_returns)
         return_var = return_var_decay * return_var + (1 - return_var_decay) * batch_var
 

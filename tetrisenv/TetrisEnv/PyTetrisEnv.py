@@ -14,6 +14,9 @@ import random
 import copy
 from typing import List, Dict, Tuple, Optional
 
+# Dense placement action space: is_hold(2) * rot(4) * col(10) * spin(4).
+NUM_PLACEMENT_ACTIONS = 320
+
 
 class PyTetrisEnv(py_environment.PyEnvironment):
     def __init__(
@@ -37,6 +40,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         use_shaping: bool = True,
         b2b_extend_flat: float = 1.5,
         b2b_extend_scale: float = 1.0,
+        placement_candidates: bool = False,
     ) -> None:
         self._attack_reward = 1.0
         self._b2b_coef = 2.0
@@ -98,6 +102,10 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         self._episode_ended = False
 
+        # Placement-model RL rollout: expose per-step candidate placements (dense
+        # by action index, from pathfinding) so the candidate-ranking net can be driven.
+        self._placement_candidates = placement_candidates
+
         self._observation_spec = {
             "board": array_spec.BoundedArraySpec(
                 shape=(24, 10, 1),
@@ -127,6 +135,16 @@ class PyTetrisEnv(py_environment.PyEnvironment):
                 shape=(160 * num_row_tiers, max_len), dtype=np.int64, name="sequences"
             ),
         }
+        if placement_candidates:
+            self._observation_spec["cand_scores"] = array_spec.ArraySpec(
+                shape=(NUM_PLACEMENT_ACTIONS,), dtype=np.float32, name="cand_scores"
+            )
+            self._observation_spec["cand_landing_rows"] = array_spec.ArraySpec(
+                shape=(NUM_PLACEMENT_ACTIONS,), dtype=np.int32, name="cand_landing_rows"
+            )
+            self._observation_spec["cand_sequences"] = array_spec.ArraySpec(
+                shape=(NUM_PLACEMENT_ACTIONS, max_len), dtype=np.int64, name="cand_sequences"
+            )
 
         self._action_spec = array_spec.BoundedArraySpec(
             shape=(15,), dtype=np.int64, minimum=0, maximum=11, name="key_sequence"
@@ -430,7 +448,38 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             "sequences": sequences,
         }
 
+        if self._placement_candidates:
+            cand_scores, cand_rows, cand_seqs = self._enumerate_placement_candidates()
+            observation["cand_scores"] = cand_scores
+            observation["cand_landing_rows"] = cand_rows
+            observation["cand_sequences"] = cand_seqs
+
         return observation
+
+    def _enumerate_placement_candidates(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Dense-320 placement candidates from pathfinding (the full legal set, no death-pruning
+        — death is this env's termination, not a filter, so a spawnable board never yields an
+        empty set). cand_scores is a validity sentinel (0.0 valid / -1e30 empty); the net ranks
+        and RL gets its value target from returns. Runs in-subprocess so it parallelizes."""
+        scores = np.full(NUM_PLACEMENT_ACTIONS, -1e30, dtype=np.float32)
+        rows = np.zeros(NUM_PLACEMENT_ACTIONS, dtype=np.int32)
+        seqs = np.full((NUM_PLACEMENT_ACTIONS, self._max_len), Keys.PAD, dtype=np.int64)
+
+        hold_piece = (
+            self._spawn_piece(self._hold_piece)
+            if self._hold_piece != PieceType.N
+            else self._spawn_piece(self._queue[0])
+        )
+        for offset, is_hold, piece in ((0, False, self._active_piece), (160, True, hold_piece)):
+            sq, lr = self._key_sequence_finder.find_placement_candidates(
+                board=self._board, piece=piece, max_len=self._max_len, is_hold=is_hold
+            )
+            idx = offset + np.flatnonzero(lr >= 0)
+            valid = lr >= 0
+            scores[idx] = 0.0
+            rows[idx] = lr[valid]
+            seqs[idx] = sq[valid]
+        return scores, rows, seqs
 
     def _convert_to_keys(self, action: Dict[str, int]) -> List[int]:
         hold = Moves._holds[action["hold"]]

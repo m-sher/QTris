@@ -1,7 +1,6 @@
 import tensorflow as tf
 from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from TetrisEnv.Moves import Convert
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 import pygame_widgets
@@ -32,9 +31,7 @@ max_height = 19
 
 def main(args):
     left_path = str(args.left)
-    left_pathfinding = True
     right_path = str(args.right)
-    right_pathfinding = True
 
     p_model_left = PolicyModel(
         batch_size=num_envs,
@@ -67,7 +64,7 @@ def main(args):
         max_height=max_height,
         max_steps=num_steps,
         max_len=15,
-        pathfinding=left_pathfinding,
+        pathfinding=True,
         garbage_chance=0,
         garbage_min=0,
         garbage_max=0,
@@ -107,7 +104,7 @@ def main(args):
         max_height=max_height,
         max_steps=num_steps,
         max_len=15,
-        pathfinding=right_pathfinding,
+        pathfinding=True,
         garbage_chance=0,
         garbage_min=0,
         garbage_max=0,
@@ -255,11 +252,6 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
-
-        if not left_pathfinding:
-            valid_sequences_left = Convert.tf_to_sequence[None, ...]
-        if not right_pathfinding:
-            valid_sequences_right = Convert.tf_to_sequence[None, ...]
 
         key_sequence_left, log_probs_left, masks_left, scores_left = (
             p_model_left.predict(

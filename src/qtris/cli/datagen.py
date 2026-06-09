@@ -4,7 +4,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="datagen")
-    parser.add_argument("family", choices=["ar", "flat"])
+    parser.add_argument("family", choices=["ar", "flat", "placement"])
     parser.add_argument(
         "--dagger",
         action="store_true",
@@ -32,6 +32,11 @@ def main() -> None:
         default=None,
         help="Seed offset. Default: 0 for non-dagger; 10_000_000 for --dagger.",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Disable the progress bar; emit periodic log lines instead.",
+    )
     args = parser.parse_args()
 
     if args.dagger:
@@ -44,6 +49,10 @@ def main() -> None:
         if args.seed is None:
             args.seed = 0
         from qtris.data.gen_ar import main as run
+    elif args.family == "placement":
+        if args.seed is None:
+            args.seed = 0
+        from qtris.data.gen_placement import main as run
     else:
         if args.seed is None:
             args.seed = 0

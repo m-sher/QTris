@@ -1,25 +1,23 @@
 """DAgger-style data collection for the Tetris policy.
 
-Supports both ``ar`` (autoregressive) and ``flat`` policy variants. In either
-case the loop is:
+The loop rolls a trained policy forward in env and labels each visited state
+with the beam search's dense action-indexed target (the same schema gen_ar
+stores):
 
-  * Roll the trained policy forward in env.
-  * At each visited state, query beam search for the expert label.
-  * Step the env with the POLICY's choice (the DAgger invariant - this
-    is what shifts the visited-state distribution toward what the policy
-    actually sees in deployment).
-  * Record (state, beam_label) in the dataset.
+  * Roll the trained policy forward in env (greedy decode under valid-sequence
+    masking).
+  * At each visited state, query the beam search for the per-action scores +
+    key-sequences and scatter them into a dense action-indexed target.
+  * Step the env with the POLICY's choice (the DAgger invariant) - this shifts
+    the visited-state distribution toward what the policy sees in deployment,
+    the canonical fix for compounding error in BC on long-horizon games
+    (Ross & Bagnell, 2010).
+  * Record (state, dense search target).
 
-Output schema mirrors gen_ar / gen_flat exactly so transitions accumulate
-seamlessly across BC + DAgger rounds in a single dataset.
-
-Distinction from gen_ar / gen_flat:
-- gen_ar/gen_flat have BEAM play; (state, beam_action) are co-trajectory.
-- This module has POLICY play; we ASK beam what it would do at each
-  visited state but step the env with the policy's choice. This shifts
-  the state distribution toward what the policy actually visits in
-  deployment, which is the canonical fix for compounding-error in BC
-  on long-horizon, fragile-strategy games (Ross & Bagnell, 2010).
+``family`` selects which policy checkpoint drives the rollout and which target
+schema is stored: ar/flat use gen_ar's dense 320-action schema; placement uses
+gen_placement's 128-slot placement schema. Within a family the DAgger output
+matches the pretrain dataset, so transitions accumulate across BC + DAgger rounds.
 """
 
 import os
@@ -28,41 +26,30 @@ import shutil
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
+from tqdm import tqdm
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
-from TetrisEnv.Moves import Keys
 from qtris.models.ar.model import PolicyModel
 from qtris.models.flat.model import FlatPolicyModel
-from qtris.data.gen_ar import _build_mask
-
-
-HARD_DROP_ID = Keys.HARD_DROP
-
-
-def _make_flat_mask(valid_sequences):
-    """1D placement-validity mask (matches gen_flat)."""
-    return np.any(valid_sequences == HARD_DROP_ID, axis=-1)
-
-
-def _flat_action_idx(beam_seq, valid_sequences):
-    """Scalar index into valid_sequences matching beam_seq, or -1."""
-    matches = np.all(valid_sequences == beam_seq[None, :], axis=-1)
-    if not np.any(matches):
-        return -1
-    return int(np.argmax(matches))
+from qtris.models.placement.model import PlacementPolicyValueNet
+from qtris.data.gen_ar import NUM_ACTIONS, dense_target
+from qtris.data.placement_features import (
+    CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+    build_placement_inference,
+    build_placement_target,
+)
 
 
 def collect_dagger(
     p_model,
-    mode,
     seed,
     num_steps,
     search_depth,
     beam_width,
     queue_size,
     max_len,
-    key_dim,
     max_height,
     max_holes,
     max_steps_env,
@@ -71,19 +58,16 @@ def collect_dagger(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
-    death_trim_count,
-    gamma,
+    headless=False,
     log_every=1000,
 ):
-    """Roll the policy forward; record beam's expert label per visited state.
+    """Roll the policy forward; label each visited state with the search target.
 
-    The env is stepped with the POLICY's chosen sequence (greedy decode
-    under valid-sequence masking). Beam is queried only to provide the
-    label that gets appended to the dataset; beam's choice does NOT
-    drive env transitions.
-
-    ``mode`` is ``"ar"`` or ``"flat"`` and controls only the label /
-    mask format stored per transition. The rollout itself is identical.
+    The env is stepped with the policy's greedy choice (under valid-sequence
+    masking) - the DAgger invariant that shifts the visited-state distribution
+    toward deployment. The beam search labels each state with the same dense
+    action-indexed target as gen_ar; the search's own best move does not drive
+    transitions.
     """
     env = PyTetrisEnv(
         queue_size=queue_size,
@@ -101,66 +85,30 @@ def collect_dagger(
         auto_push_garbage=True,
         auto_fill_queue=True,
         num_row_tiers=num_row_tiers,
-        gamma=gamma,
     )
 
     time_step = env.reset()
     searcher = CB2BSearch()
 
     transitions = []
-    episode_buf = []
-    unmatched = 0
     beam_dead = 0
     deaths = 0
     max_b2b = 0
     policy_disagrees = 0
+    total_attack = 0.0
+    pieces_placed = 0
 
-    def flush(buf, death_kind):
-        # death_kind is one of:
-        #   "beam_fail"    – beam returned action_idx < 0 from a buffered
-        #                    state; the tail is genuinely unrecoverable, so
-        #                    trim like gen_ar.
-        #   "policy_fail"  – env signalled terminal while every recorded
-        #                    state had a beam-valid label; those tail
-        #                    transitions are exactly the high-signal
-        #                    correction examples DAgger exists to harvest,
-        #                    so keep them all.
-        #   "graceful_end" – ran out of num_steps mid-episode. Not a death.
-        if not buf:
-            return
-        returns_arr = np.zeros(len(buf), dtype=np.float32)
-        last = 0.0
-        for t in reversed(range(len(buf))):
-            r = buf[t][6]
-            d = float(buf[t][7])
-            last = r + gamma * last * (1.0 - d)
-            returns_arr[t] = last
-
-        if death_kind == "beam_fail":
-            kept_count = (
-                len(buf) - death_trim_count if len(buf) > death_trim_count else 0
-            )
-        else:
-            kept_count = len(buf)
-
-        for t in range(kept_count):
-            board, pieces, bcg, label, mask, sample_weight, _r, _d = buf[t]
-            transitions.append(
-                (board, pieces, bcg, label, mask, sample_weight, returns_arr[t])
-            )
-
-    for step in range(num_steps):
+    pbar = tqdm(range(num_steps), disable=headless, desc="dagger", unit="step")
+    for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
         valid_sequences = obs["sequences"].astype(np.int64)
 
-        # Policy's greedy choice in this state - under valid-sequence
-        # masking the model never emits a sequence the env can't replay.
-        # PolicyModel and FlatPolicyModel share the same predict()
-        # signature: both return (selected_sequence, ...) as the first
-        # tuple element regardless of internal factorization.
+        # Policy's greedy choice under valid-sequence masking (drives the env).
+        # PolicyModel and FlatPolicyModel share predict(): both return the
+        # selected key-sequence as the first tuple element.
         b_in = tf.constant(board[None, ...], dtype=tf.float32)
         p_in = tf.constant(pieces[None, ...], dtype=tf.int64)
         g_in = tf.constant(bcg[None, ...], dtype=tf.float32)
@@ -173,104 +121,209 @@ def collect_dagger(
         )
         policy_seq = policy_seq.numpy()[0].astype(np.int64)
 
-        # Beam's expert choice for this state - the supervised label.
-        action_idx, beam_seq = searcher.search(
-            board=env._board,
-            active_piece=env._active_piece.piece_type.value,
-            hold_piece=env._hold_piece.value,
-            queue=np.array([p.value for p in env._queue], dtype=np.int32),
-            b2b=int(env._scorer._b2b),
-            combo=int(env._scorer._combo),
-            total_garbage=int(env._get_total_garbage()),
-            garbage_push_delay=env._garbage_push_delay,
-            search_depth=search_depth,
-            beam_width=beam_width,
-            max_len=max_len,
+        # Beam's dense action-indexed target for this state (the label).
+        best_action, best_seq, cand_actions, cand_scores, cand_seqs, _cand_rows = (
+            searcher.search_with_scores(
+                board=env._board,
+                active_piece=env._active_piece.piece_type.value,
+                hold_piece=env._hold_piece.value,
+                queue=np.array([p.value for p in env._queue], dtype=np.int32),
+                b2b=int(env._scorer._b2b),
+                combo=int(env._scorer._combo),
+                total_garbage=int(env._get_total_garbage()),
+                garbage_push_delay=env._garbage_push_delay,
+                search_depth=search_depth,
+                beam_width=beam_width,
+                max_len=max_len,
+            )
         )
 
-        if action_idx < 0:
-            # Beam can't label this state (no valid placements).
-            # Treat as terminal: flush as beam-fail death and reset.
-            flush(episode_buf, death_kind="beam_fail")
-            episode_buf = []
+        if best_action < 0 or len(cand_scores) == 0:
+            # No labelable placement - treat as terminal and reset.
             beam_dead += 1
             deaths += 1
             time_step = env.reset()
             continue
 
-        beam_seq = beam_seq.astype(np.int64)
+        seqs, scores = dense_target(cand_actions, cand_scores, cand_seqs, max_len)
+        transitions.append((board, pieces, bcg, seqs, scores))
 
-        # Build the per-mode label/mask around BEAM's sequence (the
-        # supervised target). For AR we record the full key sequence
-        # plus the per-position next-token mask; for flat we collapse
-        # to the scalar placement index plus the 1D HARD_DROP-presence
-        # mask. If beam's sequence isn't present in valid_sequences
-        # (rare; same case as gen_ar's `unmatched`), we can't build a
-        # clean label, so skip recording. Still step the env with the
-        # policy's choice - that's the DAgger invariant.
-        if mode == "ar":
-            beam_in_valid = np.any(
-                np.all(valid_sequences == beam_seq[None, :], axis=-1)
-            )
-            if not beam_in_valid:
-                unmatched += 1
-                time_step = env._step(policy_seq)
-                if time_step.is_last():
-                    flush(episode_buf, death_kind="policy_fail")
-                    episode_buf = []
-                    deaths += 1
-                    time_step = env.reset()
-                continue
-            label = beam_seq
-            mask = _build_mask(beam_seq, valid_sequences, max_len, key_dim)
-        else:  # flat
-            flat_idx = _flat_action_idx(beam_seq, valid_sequences)
-            if flat_idx < 0:
-                unmatched += 1
-                time_step = env._step(policy_seq)
-                if time_step.is_last():
-                    flush(episode_buf, death_kind="policy_fail")
-                    episode_buf = []
-                    deaths += 1
-                    time_step = env.reset()
-                continue
-            label = np.int64(flat_idx)
-            mask = _make_flat_mask(valid_sequences)
-
-        # Step env with POLICY's choice (DAgger invariant).
+        # Step env with the POLICY's choice (DAgger invariant).
         time_step = env._step(policy_seq)
-        reward = float(time_step.reward["total_reward"])
-        done = bool(time_step.is_last())
-
-        if not np.array_equal(policy_seq, beam_seq):
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
+        if not np.array_equal(policy_seq, best_seq):
             policy_disagrees += 1
-
-        episode_buf.append(
-            (board, pieces, bcg, label, mask, np.float32(search_depth), reward, done)
-        )
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
-        if done:
-            flush(episode_buf, death_kind="policy_fail")
-            episode_buf = []
+        if time_step.is_last():
             deaths += 1
             time_step = env.reset()
 
         if (step + 1) % log_every == 0:
-            disagree_rate = (
-                100.0 * policy_disagrees / (step + 1) if step + 1 > 0 else 0.0
+            disagree_rate = 100.0 * policy_disagrees / (step + 1)
+            app = total_attack / max(pieces_placed, 1)
+            stats = (
+                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
+                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
-            print(
-                f"Step {step + 1}/{num_steps} | "
-                f"transitions={len(transitions)} unmatched={unmatched} "
-                f"beam_dead={beam_dead} deaths={deaths} "
-                f"max_b2b={max_b2b} "
-                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)",
-                flush=True,
-            )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
 
-    flush(episode_buf, death_kind="graceful_end")
-    return transitions, unmatched, beam_dead, deaths, max_b2b, policy_disagrees
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
+
+
+def collect_dagger_placement(
+    p_model,
+    seed,
+    num_steps,
+    search_depth,
+    beam_width,
+    queue_size,
+    max_len,
+    max_height,
+    max_holes,
+    max_steps_env,
+    garbage_chance,
+    garbage_min,
+    garbage_max,
+    garbage_push_delay,
+    num_row_tiers,
+    headless=False,
+    log_every=1000,
+):
+    """Roll the placement policy forward; label each visited state with the search
+    placement target.
+
+    The search is run once per state and serves both roles: its candidates feed the
+    policy's ranking (which drives the env - the DAgger invariant) and its scores
+    form the label (gen_placement's 128-slot target)."""
+    env = PyTetrisEnv(
+        queue_size=queue_size,
+        max_holes=max_holes,
+        max_height=max_height,
+        max_steps=max_steps_env,
+        max_len=max_len,
+        pathfinding=True,
+        seed=seed,
+        idx=0,
+        garbage_chance=garbage_chance,
+        garbage_min=garbage_min,
+        garbage_max=garbage_max,
+        garbage_push_delay=garbage_push_delay,
+        auto_push_garbage=True,
+        auto_fill_queue=True,
+        num_row_tiers=num_row_tiers,
+    )
+
+    time_step = env.reset()
+    searcher = CB2BSearch()
+
+    transitions = []
+    beam_dead = 0
+    deaths = 0
+    max_b2b = 0
+    policy_disagrees = 0
+    total_attack = 0.0
+    pieces_placed = 0
+
+    pbar = tqdm(
+        range(num_steps), disable=headless, desc="dagger placement", unit="step"
+    )
+    for step in pbar:
+        obs = time_step.observation
+        board = obs["board"].astype(np.float32)
+        pieces = obs["pieces"].astype(np.int64)
+        bcg = obs["b2b_combo_garbage"].astype(np.float32)
+
+        active = env._active_piece.piece_type.value
+        hold = env._hold_piece.value
+        queue = np.array([p.value for p in env._queue], dtype=np.int32)
+        best_action, best_seq, cand_actions, cand_scores, cand_seqs, cand_rows = (
+            searcher.search_with_scores(
+                board=env._board,
+                active_piece=active,
+                hold_piece=hold,
+                queue=queue,
+                b2b=int(env._scorer._b2b),
+                combo=int(env._scorer._combo),
+                total_garbage=int(env._get_total_garbage()),
+                garbage_push_delay=env._garbage_push_delay,
+                search_depth=search_depth,
+                beam_width=beam_width,
+                max_len=max_len,
+            )
+        )
+
+        if best_action < 0 or len(cand_scores) == 0:
+            beam_dead += 1
+            deaths += 1
+            time_step = env.reset()
+            continue
+
+        row_norm = env._board.shape[0] - 1
+        # Label: the search's placement target for this state.
+        placements_t, scores_t = build_placement_target(
+            cand_actions, cand_scores, cand_rows, active, hold, int(queue[0]), row_norm
+        )
+        transitions.append((board, pieces, bcg, placements_t, scores_t))
+
+        # Policy ranks the same candidates; its choice drives the env.
+        infer_pl, infer_mask, infer_seqs = build_placement_inference(
+            cand_actions,
+            cand_scores,
+            cand_rows,
+            cand_seqs,
+            active,
+            hold,
+            int(queue[0]),
+            row_norm,
+            max_len,
+        )
+        policy_seq, _, _, _ = p_model.predict(
+            (
+                tf.constant(board[None], dtype=tf.float32),
+                tf.constant(pieces[None], dtype=tf.int64),
+                tf.constant(bcg[None], dtype=tf.float32),
+                tf.constant(infer_pl[None], dtype=tf.float32),
+                tf.constant(infer_mask[None], dtype=tf.bool),
+            ),
+            greedy=True,
+            cand_sequences=tf.constant(infer_seqs[None], dtype=tf.int64),
+            temperature=1.0,
+        )
+        policy_seq = policy_seq.numpy()[0].astype(np.int64)
+
+        time_step = env._step(policy_seq)
+        total_attack += float(time_step.reward["attack"])
+        pieces_placed += 1
+        if not np.array_equal(policy_seq, best_seq):
+            policy_disagrees += 1
+        max_b2b = max(max_b2b, int(env._scorer._b2b))
+
+        if time_step.is_last():
+            deaths += 1
+            time_step = env.reset()
+
+        if (step + 1) % log_every == 0:
+            disagree_rate = 100.0 * policy_disagrees / (step + 1)
+            app = total_attack / max(pieces_placed, 1)
+            stats = (
+                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
+                f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
+            )
+            if headless:
+                print(f"Step {step + 1}/{num_steps} | {stats}", flush=True)
+            else:
+                pbar.set_postfix_str(stats)
+
+    app = total_attack / max(pieces_placed, 1)
+    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
 
 
 def _build_ar_model(args):
@@ -317,21 +370,41 @@ def _build_flat_model(args):
     return p_model
 
 
+def _build_placement_model(args):
+    p_model = PlacementPolicyValueNet(
+        batch_size=1,
+        piece_dim=args.piece_dim,
+        depth=args.depth,
+        num_heads=args.num_heads,
+        num_layers=args.num_layers,
+        dropout_rate=args.dropout_rate,
+    )
+    p_model(
+        (
+            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
+            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(3,), dtype=tf.float32),
+            keras.Input(shape=(None, PLACEMENT_FEATURE_DIM), dtype=tf.float32),
+            keras.Input(shape=(None,), dtype=tf.bool),
+        )
+    )
+    return p_model
+
+
 def main(cli_args):
     from types import SimpleNamespace
-    from qtris.config import ModelConfig, EnvConfig, DataGenConfig
+    from qtris.config import ModelConfig, EnvConfig
 
     m = ModelConfig()
     e = EnvConfig()
-    d = DataGenConfig()
     args = SimpleNamespace(
-        mode=cli_args.family,
+        family=cli_args.family,
         policy_checkpoint=getattr(cli_args, "policy_checkpoint", None),
         dataset_path=getattr(cli_args, "output", None),
         num_steps=cli_args.steps,
         seed=getattr(cli_args, "seed", 10_000_000),
-        search_depth=d.search_depth,
-        beam_width=d.beam_width,
+        search_depth=16,
+        beam_width=200,
         queue_size=m.queue_size,
         max_len=m.max_len,
         key_dim=m.key_dim,
@@ -348,32 +421,31 @@ def main(cli_args):
         garbage_max=e.garbage_max,
         garbage_push_delay=e.garbage_push_delay,
         num_row_tiers=m.num_row_tiers,
-        death_trim_count=d.death_trim_count,
-        gamma=d.gamma,
+        headless=getattr(cli_args, "headless", False),
         log_every=1000,
     )
 
-    mode_defaults = {
+    family_defaults = {
         "ar": {
             "policy_checkpoint": "checkpoints/ar_pretrained_policy",
             "dataset_path": "datasets/tetris_expert_dataset_b2b",
-            "label_key": "actions",
-            "mask_key": "masks",
             "build_model": _build_ar_model,
         },
         "flat": {
             "policy_checkpoint": "checkpoints/flat_pretrained_policy",
             "dataset_path": "datasets/tetris_expert_dataset_flat",
-            "label_key": "action_indices",
-            "mask_key": "valid_masks",
             "build_model": _build_flat_model,
         },
+        "placement": {
+            "policy_checkpoint": "checkpoints/placement_pretrained_policy",
+            "dataset_path": "datasets/tetris_oracle_placement",
+            "build_model": _build_placement_model,
+        },
     }
-    cfg = mode_defaults[args.mode]
-    policy_checkpoint = args.policy_checkpoint or cfg["policy_checkpoint"]
-    dataset_path = args.dataset_path or cfg["dataset_path"]
-    label_key = cfg["label_key"]
-    mask_key = cfg["mask_key"]
+    cfg = family_defaults[args.family]
+    is_placement = args.family == "placement"
+    policy_checkpoint = str(args.policy_checkpoint or cfg["policy_checkpoint"])
+    dataset_path = str(args.dataset_path) if args.dataset_path else cfg["dataset_path"]
 
     p_model = cfg["build_model"](args)
 
@@ -384,15 +456,11 @@ def main(cli_args):
         max_to_keep=3,
     )
     if p_checkpoint_manager.latest_checkpoint is None:
-        print(
-            f"ERROR: no policy checkpoint at {policy_checkpoint}. "
-            f"Pretrain via {'Pretrainer.py' if args.mode == 'ar' else 'PretrainFlat.py'} first.",
-            flush=True,
-        )
+        print(f"ERROR: no policy checkpoint at {policy_checkpoint}.", flush=True)
         return 1
     p_checkpoint.restore(p_checkpoint_manager.latest_checkpoint).expect_partial()
     print(
-        f"Restored {args.mode} policy from {p_checkpoint_manager.latest_checkpoint}",
+        f"Restored {args.family} policy from {p_checkpoint_manager.latest_checkpoint}",
         flush=True,
     )
 
@@ -405,11 +473,22 @@ def main(cli_args):
                 k: v.numpy()
                 for k, v in next(iter(existing_ds.batch(10_000_000))).items()
             }
-            existing_count = len(existing[label_key])
-            if "returns" not in existing:
+            existing_count = len(existing.get("cand_scores", []))
+            if is_placement:
+                cp = existing.get("cand_placements")
+                schema_ok = cp is not None and cp.shape[1:] == (
+                    CANDIDATE_CAPACITY,
+                    PLACEMENT_FEATURE_DIM,
+                )
+            else:
+                schema_ok = (
+                    "cand_scores" in existing
+                    and existing["cand_scores"].shape[1] == NUM_ACTIONS
+                )
+            if not schema_ok:
                 print(
-                    "Existing dataset has no `returns` field - starting "
-                    "fresh (value pretraining requires returns).",
+                    "Existing dataset is an older/incompatible schema for this "
+                    "family - starting fresh.",
                     flush=True,
                 )
                 existing = None
@@ -428,29 +507,25 @@ def main(cli_args):
         flush=True,
     )
 
-    new_transitions, unmatched, beam_dead, deaths, max_b2b, policy_disagrees = (
-        collect_dagger(
-            p_model=p_model,
-            mode=args.mode,
-            seed=args.seed + existing_count,
-            num_steps=args.num_steps,
-            search_depth=args.search_depth,
-            beam_width=args.beam_width,
-            queue_size=args.queue_size,
-            max_len=args.max_len,
-            key_dim=args.key_dim,
-            max_height=args.max_height,
-            max_holes=args.max_holes,
-            max_steps_env=args.max_steps_env,
-            garbage_chance=args.garbage_chance,
-            garbage_min=args.garbage_min,
-            garbage_max=args.garbage_max,
-            garbage_push_delay=args.garbage_push_delay,
-            num_row_tiers=args.num_row_tiers,
-            death_trim_count=args.death_trim_count,
-            gamma=args.gamma,
-            log_every=args.log_every,
-        )
+    collect_fn = collect_dagger_placement if is_placement else collect_dagger
+    new_transitions, beam_dead, deaths, max_b2b, policy_disagrees, app = collect_fn(
+        p_model=p_model,
+        seed=args.seed + existing_count,
+        num_steps=args.num_steps,
+        search_depth=args.search_depth,
+        beam_width=args.beam_width,
+        queue_size=args.queue_size,
+        max_len=args.max_len,
+        max_height=args.max_height,
+        max_holes=args.max_holes,
+        max_steps_env=args.max_steps_env,
+        garbage_chance=args.garbage_chance,
+        garbage_min=args.garbage_min,
+        garbage_max=args.garbage_max,
+        garbage_push_delay=args.garbage_push_delay,
+        num_row_tiers=args.num_row_tiers,
+        headless=args.headless,
+        log_every=args.log_every,
     )
 
     if not new_transitions:
@@ -459,39 +534,31 @@ def main(cli_args):
 
     print(
         f"Collected {len(new_transitions)} DAgger transitions | "
-        f"unmatched: {unmatched} | beam_dead: {beam_dead} | "
-        f"deaths: {deaths} | max_b2b: {max_b2b} | "
-        f"policy≠beam: {policy_disagrees}",
+        f"beam_dead: {beam_dead} | deaths: {deaths} | max_b2b: {max_b2b} | "
+        f"APP: {app:.3f} | policy≠beam: {policy_disagrees}",
         flush=True,
     )
 
     boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    if args.mode == "ar":
-        labels = np.stack([t[3] for t in new_transitions]).astype(np.int64)
-        masks = np.stack([t[4] for t in new_transitions]).astype(bool)
+    cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
+    if is_placement:
+        label_key = "cand_placements"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.float32)
     else:
-        labels = np.array([t[3] for t in new_transitions]).astype(np.int64)
-        masks = np.stack([t[4] for t in new_transitions]).astype(bool)
-    sample_weights = np.array([t[5] for t in new_transitions]).astype(np.float32)
-    returns = np.array([t[6] for t in new_transitions]).astype(np.float32)
+        label_key = "cand_sequences"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.int8)
 
     if existing is not None:
         boards = np.concatenate([existing["boards"], boards])
         pieces = np.concatenate([existing["pieces"], pieces])
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        labels = np.concatenate([existing[label_key], labels])
-        masks = np.concatenate([existing[mask_key], masks])
-        existing_weights = existing.get(
-            "sample_weights",
-            np.ones(existing_count, dtype=np.float32),
-        )
-        sample_weights = np.concatenate([existing_weights, sample_weights])
-        returns = np.concatenate([existing["returns"], returns])
+        label = np.concatenate([existing[label_key], label])
+        cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} "
-            f"new = {len(labels)} total",
+            f"new = {len(cand_scores)} total",
             flush=True,
         )
 
@@ -503,12 +570,10 @@ def main(cli_args):
             "boards": boards,
             "pieces": pieces,
             "b2b_combo_garbage": bcg,
-            label_key: labels,
-            mask_key: masks,
-            "sample_weights": sample_weights,
-            "returns": returns,
+            label_key: label,
+            "cand_scores": cand_scores,
         }
     )
     dataset.save(dataset_path)
-    print(f"Saved {len(labels)} transitions to {dataset_path}", flush=True)
+    print(f"Saved {len(cand_scores)} transitions to {dataset_path}", flush=True)
     return 0
