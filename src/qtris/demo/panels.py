@@ -138,13 +138,20 @@ def draw_step_counter(screen, font, step, num_steps):
 def run_replay(screen, font, frames, num_steps, draw_overlay):
     """Replay UI shared by the single-player demos; runs until window close.
 
-    draw_overlay(ind) redraws the per-step overlay (the bottom info panel)
-    on top of the recorded frame.
+    The window grows by a header strip holding the scrubber and speed controls
+    so they never cover gameplay; the recorded frame is blitted below it.
+    draw_overlay(surface, ind) redraws the per-step overlay (the bottom info
+    panel) on top of the recorded frame.
     """
+    header_h = 60
+    frame_h, frame_w = frames[0].shape[:2]
+    screen = pygame.display.set_mode((frame_w, header_h + frame_h))
+    play_area = screen.subsurface((0, header_h, frame_w, frame_h))
+
     slider = Slider(
         screen,
         x=10,
-        y=5,
+        y=8,
         width=585,
         height=10,
         min=0,
@@ -158,7 +165,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     _back_btn = Button(
         screen,
         605,
-        0,
+        3,
         28,
         20,
         text="<",
@@ -170,7 +177,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     _fwd_btn = Button(
         screen,
         637,
-        0,
+        3,
         28,
         20,
         text=">",
@@ -188,8 +195,8 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
 
     play_btn = Button(
         screen,
-        605,
-        25,
+        675,
+        3,
         60,
         20,
         text="Play",
@@ -201,7 +208,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     speed_slider = Slider(
         screen,
         x=10,
-        y=60,
+        y=38,
         width=200,
         height=10,
         min=1,
@@ -236,17 +243,13 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
         screen.fill((0, 0, 0))
 
         ind = slider.getValue()
-        pygame.surfarray.blit_array(screen, frames[ind].swapaxes(0, 1))
-
-        draw_step_counter(screen, font, ind + 1, num_steps)
+        pygame.surfarray.blit_array(play_area, frames[ind].swapaxes(0, 1))
 
         speed_text = font.render(f"Speed: {speed_slider.getValue()} FPS", True, WHITE)
-        speed_rect = speed_text.get_rect(topleft=(220, 55))
-        pygame.draw.rect(screen, (0, 0, 0), speed_rect.inflate(10, 4))
-        screen.blit(speed_text, (220, 55))
+        screen.blit(speed_text, (220, 33))
 
         pygame_widgets.update(events)
 
-        draw_overlay(ind)
+        draw_overlay(play_area, ind)
 
         pygame.display.update()
