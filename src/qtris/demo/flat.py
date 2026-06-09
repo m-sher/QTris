@@ -311,7 +311,8 @@ def main(args):
         handleColour=(50, 50, 50),
     )
 
-    Button(
+    # Held in vars so pygame_widgets' WeakSet doesn't GC them (bare exprs vanish).
+    _back_btn = Button(
         screen,
         605,
         0,
@@ -323,7 +324,7 @@ def main(args):
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
 
-    Button(
+    _fwd_btn = Button(
         screen,
         637,
         0,
@@ -338,7 +339,7 @@ def main(args):
     paused = True
 
     def toggle_pause():
-        global paused
+        nonlocal paused
         paused = not paused
         play_btn.setText("Play" if paused else "Pause")
 

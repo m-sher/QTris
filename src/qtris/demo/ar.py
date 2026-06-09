@@ -380,7 +380,8 @@ def main(args):
         handleColour=(50, 50, 50),
     )
 
-    Button(
+    # Held in vars so pygame_widgets' WeakSet doesn't GC them (bare exprs vanish).
+    _back_btn = Button(
         screen,
         605,
         0,
@@ -392,7 +393,7 @@ def main(args):
         onClick=lambda: slider.setValue(max(0, slider.getValue() - 1)),
     )
 
-    Button(
+    _fwd_btn = Button(
         screen,
         637,
         0,
@@ -404,6 +405,41 @@ def main(args):
         onClick=lambda: slider.setValue(min(num_steps - 1, slider.getValue() + 1)),
     )
 
+    paused = True
+
+    def toggle_pause():
+        nonlocal paused
+        paused = not paused
+        play_btn.setText("Play" if paused else "Pause")
+
+    play_btn = Button(
+        screen,
+        605,
+        25,
+        60,
+        20,
+        text="Play",
+        fontSize=16,
+        margin=0,
+        onClick=toggle_pause,
+    )
+
+    speed_slider = Slider(
+        screen,
+        x=10,
+        y=60,
+        width=200,
+        height=10,
+        min=1,
+        max=60,
+        step=1,
+        initial=30,
+        colour=(125, 125, 125),
+        handleColour=(50, 50, 50),
+    )
+
+    last_step_time = pygame.time.get_ticks()
+
     while True:
         events = pygame.event.get()
         for event in events:
@@ -411,7 +447,24 @@ def main(args):
                 pygame.quit()
                 exit()
 
+        if not paused:
+            current_time = pygame.time.get_ticks()
+            delay = int(1000 / speed_slider.getValue())
+            if current_time - last_step_time >= delay:
+                current_val = slider.getValue()
+                if current_val < num_steps - 1:
+                    slider.setValue(current_val + 1)
+                    last_step_time = current_time
+                else:
+                    paused = True
+                    play_btn.setText("Play")
+
         screen.fill((0, 0, 0))
+
+        speed_text = font.render(
+            f"Speed: {speed_slider.getValue()} FPS", True, (255, 255, 255)
+        )
+        screen.blit(speed_text, (220, 55))
 
         ind = slider.getValue()
         frame = frames[ind]
