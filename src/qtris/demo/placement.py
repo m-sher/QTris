@@ -155,9 +155,9 @@ def main(args):
 
     piece_display = load_piece_display()
 
-    def draw_bottom_panel(ind):
+    def draw_bottom_panel(surface, ind):
         draw_info_panel(
-            screen,
+            surface,
             font,
             small_font,
             screen_w,
@@ -333,7 +333,7 @@ def main(args):
 
         time_step = env.step(key_sequence)
 
-        draw_bottom_panel(-1)
+        draw_bottom_panel(screen, -1)
 
         pygame.display.update()
 
