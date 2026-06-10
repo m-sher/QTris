@@ -8,7 +8,7 @@ from tensorflow_probability import distributions
 from tensorflow import keras
 
 from qtris.observability.models import OneVsOnePPOLog, OneVsOneTrainConfig
-from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.observability.backend import finish, init_run, log_step
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
 import time
@@ -610,9 +610,10 @@ def main(args):
     last_time = time.time()
 
     # Initialize WandB logging
-    wandb_run = init_run(
+    run = init_run(
         project="Tetris-1v1",
         config=config,
+        wandb_mirror=getattr(args, "wandb", False),
     )
 
     # Initialize running return variance for reward scaling (EMA)
@@ -950,4 +951,4 @@ def main(args):
         last_time = time.time()
 
     runner.env.close()
-    finish(wandb_run)
+    finish(run)
