@@ -25,7 +25,7 @@ from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
-from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.observability.backend import finish, init_run, log_step
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
@@ -251,7 +251,11 @@ def main(args):
         env._reset()
     move_count = np.zeros(num_games, dtype=np.int64)
 
-    wandb_run = init_run(project="Tetris", config=config)
+    run = init_run(
+        project="Tetris",
+        config=config,
+        wandb_mirror=getattr(args, "wandb", False),
+    )
     return_var = float(return_scale) ** 2
 
     # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
@@ -464,4 +468,4 @@ def main(args):
         if gen % 5 == 0:
             manager.save()
 
-    finish(wandb_run)
+    finish(run)

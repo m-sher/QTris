@@ -19,6 +19,11 @@ def main() -> None:
         help="placement ppo only: path to the BC dataset for the PPO expert anchor "
         "(omit to train plain PPO with no expert anchor).",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="mirror the TensorBoard run to wandb (sync_tensorboard).",
+    )
 
     az = parser.add_argument_group(
         "AlphaZero (placement --algo az)", "Knobs for the MCTS self-play trainer."

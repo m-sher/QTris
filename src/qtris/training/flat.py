@@ -9,7 +9,7 @@ from tensorflow import keras
 import time
 
 from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
-from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.observability.backend import finish, init_run, log_step
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
 import os
@@ -396,9 +396,10 @@ def main(args):
     print("Initialized runner", flush=True)
     last_time = time.time()
 
-    wandb_run = init_run(
+    run = init_run(
         project="Tetris",
         config=config,
+        wandb_mirror=getattr(args, "wandb", False),
     )
 
     if os.path.exists(expert_dataset_path):
@@ -619,4 +620,4 @@ def main(args):
         last_time = time.time()
 
     runner.env.close()
-    finish(wandb_run)
+    finish(run)

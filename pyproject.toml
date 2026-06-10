@@ -39,4 +39,5 @@ extend-exclude = ["tetrisenv"]
 [dependency-groups]
 dev = [
     "ruff>=0.15.14",
+    "setuptools<81",
 ]

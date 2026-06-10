@@ -16,7 +16,7 @@ from tensorflow_probability import distributions
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import SingleAgentPPOLog, SingleAgentTrainConfig
-from qtris.observability.wandb_backend import finish, init_run, log_step
+from qtris.observability.backend import finish, init_run, log_step
 from qtris.runners.placement import PlacementRunner
 from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 from qtris.training.ppo_loss import clipped_surrogate, clipped_value_loss
@@ -267,7 +267,11 @@ def main(args):
     )
     use_expert = expert_iter is not None
 
-    wandb_run = init_run(project="Tetris", config=config)
+    run = init_run(
+        project="Tetris",
+        config=config,
+        wandb_mirror=getattr(args, "wandb", False),
+    )
 
     return_var = float(return_scale) ** 2
     B = num_steps * num_envs
@@ -407,4 +411,4 @@ def main(args):
             manager.save()
 
     runner.env.close()
-    finish(wandb_run)
+    finish(run)
