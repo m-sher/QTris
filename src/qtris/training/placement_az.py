@@ -4,13 +4,15 @@ Same solo-play env + random-garbage settings as the PPO trainer
 (`qtris.training.placement`), but PPO is replaced by an AlphaZero loop: PUCT MCTS
 (`PlacementMCTS`) plays self-play games using the net's policy as priors and its value
 head at leaves; the net is then trained to imitate the search (policy -> root visit
-distribution) and to regress the search-bootstrapped self-play return (value -> the
-discounted attack/death return the search optimizes, with the net's own root value
-bootstrapping the truncation horizon). Both the policy and the value improve via search.
-Positions are accumulated in a multi-generation replay buffer (decorrelates the tiny
-on-policy batches and resists drift off the pretrained init). The value lives in
-`return_scale` units - the same units the MCTS leaf bootstrap + edge rewards use, so the
-search value/reward weighting is consistent. wandb observability via `qtris.observability`.
+distribution) and to regress the search-bootstrapped self-play return. The return uses b2b
+potential shaping `F = gamma*Phi(s') - Phi(s)`, `Phi(s) = w_b2b*max(0, b2b)`: the value head
+therefore learns `V_shaped = V_true - Phi` (matching the C MCTS edge shaping), and dying with a
+hoard forfeits `Phi`. The shaping is policy-invariant - it front-loads b2b credit so the search
+discovers the surge payoff without distorting the realized attack-death objective. Both the
+policy and the value improve via search. Positions accumulate in a multi-generation replay
+buffer (decorrelates the tiny on-policy batches and resists drift off the pretrained init). The
+value lives in `return_scale` units - the same units the MCTS edges use, so the search
+value/reward weighting is consistent. Observability via `qtris.observability`.
 """
 
 from collections import deque
@@ -36,6 +38,12 @@ GAMMA = 0.99
 def _flat(arr, sel):
     """Collapse the (horizon, num_games) leading axes and keep storable rows."""
     return arr.reshape((-1,) + arr.shape[2:])[sel]
+
+
+def _phi(w_b2b, b2b):
+    """b2b potential for reward shaping: Phi(s) = w_b2b * max(0, b2b). Mirrors `mphi` in the
+    C search so the value target regresses the same V_shaped the MCTS edges are shaped by."""
+    return w_b2b * max(0, int(b2b))
 
 
 @tf.function
@@ -111,11 +119,15 @@ def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_
     regresses (pure MC, no bootstrap), gives a calibrated starting scale."""
     rewards = np.zeros((horizon, num_envs), dtype=np.float32)
     dones = np.zeros((horizon, num_envs), dtype=np.float32)
+    phi_pre = np.zeros((horizon, num_envs), dtype=np.float32)
+    phi_post = np.zeros((horizon, num_envs), dtype=np.float32)
+    w_b2b = mcts.cfg.w_b2b
     for env in envs:
         env._reset()
     for t in range(horizon):
         results = mcts.search(envs, 1.0, np.ones(num_envs, dtype=np.float32))
         for i, res in enumerate(results):
+            phi_pre[t, i] = _phi(w_b2b, envs[i]._scorer._b2b)
             if res["dead"]:
                 envs[i]._step(forced_drop.copy())
                 rewards[t, i] = -mcts.cfg.w_death
@@ -128,11 +140,14 @@ def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_
             rewards[t, i] = mcts.cfg.w_attack * attack - (
                 mcts.cfg.w_death if died else 0.0
             )
-            if died or envs[i]._episode_ended:
+            terminal = died or envs[i]._episode_ended
+            phi_post[t, i] = 0.0 if terminal else _phi(w_b2b, envs[i]._scorer._b2b)
+            if terminal:
                 dones[t, i] = 1.0
                 envs[i]._reset()
+    shaped = rewards + (gamma * phi_post - phi_pre)
     raw = compute_raw_returns(
-        rewards[..., None], dones[..., None], gamma, horizon, num_envs
+        shaped[..., None], dones[..., None], gamma, horizon, num_envs
     )
     return max(float(tf.math.reduce_variance(raw)), 1.0)
 
@@ -296,6 +311,10 @@ def main(args):
         attacks = np.zeros((horizon, num_games), dtype=np.float32)
         clears = np.zeros((horizon, num_games), dtype=np.float32)
         dones = np.zeros((horizon, num_games), dtype=np.float32)
+        phi_pre = np.zeros((horizon, num_games), dtype=np.float32)  # Phi(s_t)
+        phi_post = np.zeros(
+            (horizon, num_games), dtype=np.float32
+        )  # Phi(s_t+1), 0 if terminal
         storable = np.zeros((horizon, num_games), dtype=bool)
         visits = np.zeros((horizon, num_games), dtype=np.float32)
 
@@ -304,10 +323,12 @@ def main(args):
             temps = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(np.float32)
             results = mcts.search(envs, scale, temps)
             for i, res in enumerate(results):
+                pre_b2b = envs[i]._scorer._b2b  # b2b before this move (s_t)
+                phi_pre[t, i] = _phi(cfg.w_b2b, pre_b2b)
                 if res["dead"]:
                     ts = envs[i]._step(forced_drop.copy())
-                    # Dead root = death: same attack-only reward the search optimizes, minus the
-                    # death penalty (b2b is a search-time leaf bootstrap, not a realized reward).
+                    # Dead root = death (terminal, Phi=0): attack-only reward minus the death
+                    # penalty; the held potential is forfeited by the shaping (phi_post = 0).
                     rewards[t, i] = (
                         cfg.w_attack * float(ts.reward["attack"]) - cfg.w_death
                     )
@@ -331,11 +352,16 @@ def main(args):
                 _total, attack, clear, died = placement_step(
                     envs[i], searcher, res["descriptor"]
                 )
-                # attack-only return target (see above), minus the death penalty on a fatal move
+                # attack-only realized reward, minus the death penalty on a fatal move
                 rewards[t, i] = cfg.w_attack * attack - (cfg.w_death if died else 0.0)
                 attacks[t, i] = attack
                 clears[t, i] = clear
-                if died or envs[i]._episode_ended:
+                terminal = died or envs[i]._episode_ended
+                # Phi(s_t+1): 0 at a terminal boundary (forfeit), else the post-move b2b.
+                phi_post[t, i] = (
+                    0.0 if terminal else _phi(cfg.w_b2b, envs[i]._scorer._b2b)
+                )
+                if terminal:
                     dones[t, i] = 1.0
                     envs[i]._reset()
                     move_count[i] = 0
@@ -351,16 +377,22 @@ def main(args):
             )
             continue
 
-        # Value target = the discounted self-play return the search optimizes (attack - death),
-        # bootstrapped at the horizon by the net's own root value (root_values, no simulation),
-        # then put in return_scale units to match the MCTS leaf bootstrap + edge rewards. lam=1
-        # gives the MC return + a single boundary bootstrap; lam<1 trades variance for value bias.
-        # Net values are in return_scale units, rewards are raw: scale values up before mixing.
+        # b2b potential shaping F = gamma*Phi(s_t+1) - Phi(s_t) added to the realized reward, so
+        # the value head regresses V_shaped = V_true - Phi (the same target the C MCTS edges are
+        # shaped by). Policy-invariant: it front-loads b2b credit without distorting the realized
+        # attack-death objective; dying with a hoard forfeits Phi (phi_post = 0 at a boundary).
+        shaped_rewards = rewards + (cfg.gamma * phi_post - phi_pre)
+
+        # Value target = the discounted shaped self-play return, bootstrapped at the horizon by the
+        # net's own root value (root_values, no simulation; the net IS V_shaped), then put in
+        # return_scale units to match the MCTS edges. lam=1 gives the MC return + a single boundary
+        # bootstrap; lam<1 trades variance for value bias. Net values are in return_scale units,
+        # rewards are raw: scale values up before mixing.
         last_v = mcts.root_values(envs) * scale
         _adv, returns = compute_gae_and_returns(
             (v_root * scale)[..., None],
             last_v[..., None],
-            rewards[..., None],
+            shaped_rewards[..., None],
             dones[..., None],
             cfg.gamma,
             gae_lambda,
@@ -369,10 +401,10 @@ def main(args):
         )
         value_tgt = returns.numpy()[..., 0] / (scale + 1e-8)
 
-        # EMA the raw-return variance for the next generation's return_scale (search normalizer +
+        # EMA the shaped-return variance for the next generation's return_scale (search normalizer +
         # value-target units). Updated before the skip checks so the scale evolves every gen.
         raw_returns = compute_raw_returns(
-            rewards[..., None], dones[..., None], cfg.gamma, horizon, num_games
+            shaped_rewards[..., None], dones[..., None], cfg.gamma, horizon, num_games
         )
         return_var = 0.99 * return_var + 0.01 * float(
             tf.math.reduce_variance(raw_returns)

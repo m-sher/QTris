@@ -3186,9 +3186,10 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // The entire PUCT simulation loop runs in C on a compact bitboard+scalars node;
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
-// batched net eval (collect_leaves -> net -> apply_leaves). Reward = attack + b2b only:
-// per-edge w_attack*attack (surge+combo already in compute_attack), leaf bootstrap
-// v + w_b2b*max(0,b2b). Dirichlet noise + final sampling stay in Python.
+// batched net eval (collect_leaves -> net -> apply_leaves). Reward = attack plus b2b
+// potential shaping: per-edge w_attack*attack + (gamma*Phi(child) - Phi(parent)) with
+// Phi(s)=w_b2b*max(0,b2b); death forfeits Phi (terminal Phi=0); leaf bootstrap is the
+// net value (= V_shaped). Dirichlet noise + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -3478,6 +3479,11 @@ static float mcts_scale_reward(const MConfig* cfg, float reward) {
     return r;
 }
 
+// b2b potential for reward shaping: Phi(s) = w_b2b * max(0, b2b), raw attack units.
+static inline float mphi(const MConfig* cfg, int b2b) {
+    return cfg->w_b2b * (b2b > 0 ? (float)b2b : 0.0f);
+}
+
 // --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
 //     and their paths; terminal/dead leaves back up in-place; stops on collision or arena-full. ---
 static void mcts_collect_round(MTree* t, const MConfig* cfg) {
@@ -3510,13 +3516,18 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
+                    // Death is terminal (Phi=0): shaping forfeits the held potential,
+                    // so dying with a hoard costs -Phi(parent) on top of -w_death.
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
-                        - cfg->w_death / (cfg->return_scale + 1e-8f);
+                        - (cfg->w_death + mphi(cfg, node->st.b2b)) / (cfg->return_scale + 1e-8f);
                     mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
-                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack);
+                // Potential shaping: edge += gamma*Phi(child) - Phi(parent), unclipped.
+                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack)
+                    + (cfg->gamma * mphi(cfg, leaf->st.b2b) - mphi(cfg, node->st.b2b))
+                      / (cfg->return_scale + 1e-8f);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3702,7 +3713,9 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             leaf->expanded = true;
             leaf->awaiting_eval = false;
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
-            float boot = leaf->value + cfg->w_b2b * (leaf->st.b2b > 0 ? leaf->st.b2b : 0) / (cfg->return_scale + 1e-8f);
+            // Bootstrap is the net value directly; the net learns V_shaped = V_true - Phi
+            // (b2b's worth is carried by the per-edge potential shaping, not added here).
+            float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
             mtree_backup(cfg, t->path[p], t->path_len[p], boot);
             row++;
