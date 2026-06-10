@@ -6,11 +6,14 @@ net stays in Python. Per move: build one C tree per game, evaluate the roots in 
 call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one net call ->
 `apply_leaves` until the budget is spent, and read out per-root visit counts.
 
-Reward is attack + b2b only: per-edge `w_attack * attack` (surge + combo already fold into
-`compute_attack`'s attack), leaf bootstrap `v + w_b2b * max(0, b2b_leaf)` (unrealized-hoard
-credit). The terminal edge applies `-w_death` UNCLIPPED, and PUCT uses Q in raw return_scale
-units (no per-tree min-max) so the death penalty isn't flattened to one normalized unit and
-raising `w_death` actually bites. Dirichlet root noise + final sampling stay in Python.
+Reward is attack + b2b potential shaping: per-edge `w_attack * attack` (surge + combo already
+fold into `compute_attack`'s attack) plus `gamma*Phi(child) - Phi(parent)` with
+`Phi(s) = w_b2b * max(0, b2b)`. Death is terminal (`Phi = 0`) so dying forfeits the held
+potential on top of `-w_death`; the leaf bootstrap is the net value directly (the net learns
+`V_shaped = V_true - Phi`). PUCT uses Q in raw return_scale units (no per-tree min-max) so the
+death penalty isn't flattened to one normalized unit and `w_death` actually bites. The shaping
+is policy-invariant: it front-loads b2b credit so the search/value discover the surge payoff
+without distorting the realized attack-death objective. Dirichlet noise + sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -31,7 +34,7 @@ class MCTSConfig:
     gamma: float = 0.99
     temp_moves: int = 12  # moves played at temperature 1 before switching to greedy
     w_attack: float = 1.0  # per-edge reward weight on attack
-    w_b2b: float = 1.0  # leaf-bootstrap weight on max(0, b2b)
+    w_b2b: float = 1.0  # b2b potential-shaping weight: Phi(s) = w_b2b * max(0, b2b)
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
