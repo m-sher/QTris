@@ -210,7 +210,6 @@ class AlphaZeroTrainConfig(BaseModel):
     dirichlet_eps: float
     temp_moves: int
     w_attack: float
-    w_b2b: float
     w_death: float
     mini_batch_size: int
     num_epochs: int

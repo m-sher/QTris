@@ -36,7 +36,7 @@ def _load_lib():
     lib = ctypes.CDLL(cands[0])
     lib.mcts_create.argtypes = (
         [ctypes.c_int] * 8
-        + [ctypes.c_float] * 6
+        + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
     )
@@ -93,7 +93,6 @@ class CMCTS:
         c_puct=1.5,
         gamma=0.99,
         w_attack=1.0,
-        w_b2b=1.0,
         w_death=0.0,
         return_scale=1.0,
         max_len=15,
@@ -123,7 +122,6 @@ class CMCTS:
             c_puct,
             gamma,
             w_attack,
-            w_b2b,
             w_death,
             return_scale,
             max_len,
