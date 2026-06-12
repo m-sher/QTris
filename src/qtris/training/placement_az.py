@@ -8,8 +8,10 @@ distribution) and to regress the search-bootstrapped self-play return (attack mi
 death penalty, no shaping). Both the policy and the value improve via search. Positions
 accumulate in a multi-generation replay buffer (decorrelates the tiny on-policy batches and
 resists drift off the pretrained init). The value lives in `return_scale` units - the same
-units the MCTS edges use, so the search value/reward weighting is consistent.
-Observability via `qtris.observability`.
+units the MCTS edges use, so the search value/reward weighting is consistent. `policy_kl`
+(KL of the net to the visit targets) and `update_kl` (how far the policy moves per
+generation of updates) are logged to watch optimization divergence. Observability via
+`qtris.observability`.
 """
 
 from collections import deque
@@ -64,6 +66,11 @@ def train_step(net, batch, value_coef):
 
     probs = tf.nn.softmax(masked, axis=-1)
     entropy = tf.reduce_mean(-tf.reduce_sum(probs * log_probs, axis=-1))
+    # Exact KL(pi_target || p_net) = CE - H(pi_target); zero target arms contribute 0.
+    tgt = batch["pi_target"]
+    tgt_entropy = tf.reduce_mean(
+        -tf.reduce_sum(tgt * tf.math.log(tgt + 1e-12), axis=-1)
+    )
     ret_var = tf.math.reduce_variance(batch["value_target"])
     res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
@@ -71,9 +78,20 @@ def train_step(net, batch, value_coef):
         "policy_loss": policy_loss,
         "value_loss": value_loss,
         "entropy": entropy,
+        "policy_kl": policy_loss - tgt_entropy,
         "explained_var": explained_var,
         "value_mean": tf.reduce_mean(values[:, 0]),
     }
+
+
+@tf.function
+def _gen_log_probs(net, boards, pieces, bcg, cand_pl, cand_mk):
+    """Masked policy log-probs over one generation's states (fixed horizon*num_games
+    shape, so this traces once). Used to measure update_kl: how far the policy moved
+    over the generation's update steps."""
+    logits, _ = net((boards, pieces, bcg, cand_pl, cand_mk), training=False)
+    masked = tf.where(cand_mk, logits, tf.constant(-1e9, tf.float32))
+    return tf.nn.log_softmax(masked, axis=-1)
 
 
 def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len, args):
@@ -414,6 +432,17 @@ def main(args):
             .prefetch(tf.data.AUTOTUNE)
         )
 
+        # Snapshot the policy on this generation's states (full fixed-shape arrays, one
+        # trace) so update_kl below measures how far the update steps moved it.
+        gen_inputs = (
+            tf.constant(boards.reshape(-1, 24, 10, 1)),
+            tf.constant(pieces.reshape(-1, queue_size + 2)),
+            tf.constant(bcg.reshape(-1, 3)),
+            tf.constant(cand_pl.reshape(-1, CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM)),
+            tf.constant(cand_mk.reshape(-1, CANDIDATE_CAPACITY)),
+        )
+        lp_before = _gen_log_probs(net, *gen_inputs).numpy()[sel]
+
         updates = 0
         step_out = None
         for batch in ds:
@@ -422,6 +451,14 @@ def main(args):
         if step_out is None:
             print(f"Gen {gen}: no batch produced; skipping update.", flush=True)
             continue
+
+        # Per-generation policy divergence: mean KL(p_before || p_after) over the gen's
+        # storable states. Illegal arms sit at the same -1e9 logit on both sides, so they
+        # contribute ~0 mass and ~0 log-ratio.
+        lp_after = _gen_log_probs(net, *gen_inputs).numpy()[sel]
+        update_kl = float(
+            (np.exp(lp_before) * (lp_before - lp_after)).sum(axis=-1).mean()
+        )
 
         deaths_per_game = dones.sum(axis=0)
         b2b_series = bcg[..., 0][storable]
@@ -432,6 +469,8 @@ def main(args):
                     policy_loss=step_out["policy_loss"],
                     value_loss=step_out["value_loss"],
                     entropy=step_out["entropy"],
+                    policy_kl=step_out["policy_kl"],
+                    update_kl=update_kl,
                     explained_var=step_out["explained_var"],
                     value_mean=step_out["value_mean"],
                     return_var=return_var,
@@ -459,6 +498,7 @@ def main(args):
                 f"Gen {gen} | Policy: {float(step_out['policy_loss']):2.3f} | "
                 f"Value: {float(step_out['value_loss']):2.3f} | "
                 f"Ent: {float(step_out['entropy']):1.3f} | "
+                f"KL: {update_kl:1.4f} | "
                 f"Reward: {float(rewards.sum(axis=0).mean()):3.1f} | "
                 f"Deaths: {float(deaths_per_game.mean()):1.2f} | Updates: {updates}",
                 flush=True,
