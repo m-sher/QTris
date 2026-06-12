@@ -14,7 +14,9 @@ generation of updates) are logged to watch optimization divergence. Observabilit
 `qtris.observability`.
 """
 
+import time
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -94,12 +96,59 @@ def _gen_log_probs(net, boards, pieces, bcg, cand_pl, cand_mk):
     return tf.nn.log_softmax(masked, axis=-1)
 
 
-def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len, args):
+def _load_trace_pools(traces_dir):
+    """Load the trace library: tier subdirs of .npy attack streams, sorted name =
+    difficulty order (e.g. 00_sims16 .. 03_sims256, 99_recent). Skips empty tiers."""
+    pools = {}
+    for tier in sorted(p for p in Path(traces_dir).iterdir() if p.is_dir()):
+        traces = [np.load(f) for f in sorted(tier.glob("*.npy"))]
+        traces = [t for t in traces if t.size > 0]
+        if traces:
+            pools[tier.name] = traces
+    return pools
+
+
+def _trace_tier_map(num_games, trace_free_envs, tiers):
+    """env index -> tier name (None = garbage-free). First trace_free_envs envs are
+    free; the rest split evenly across tiers, weakest (first sorted name) first."""
+    mapping = {}
+    rest = num_games - trace_free_envs
+    for i in range(num_games):
+        if i < trace_free_envs or not tiers:
+            mapping[i] = None
+        else:
+            mapping[i] = tiers[(i - trace_free_envs) * len(tiers) // rest]
+    return mapping
+
+
+def _build_envs(
+    num_games,
+    queue_size,
+    max_holes,
+    max_height,
+    max_steps,
+    max_len,
+    args,
+    trace_pools=None,
+):
     gmin = getattr(args, "garbage_chance_min", 0.0)
     gmax = getattr(args, "garbage_chance_max", 0.2)
     chances = [
         gmin + (gmax - gmin) * i / max(num_games - 1, 1) for i in range(num_games)
     ]
+    tier_map = {}
+    if trace_pools:
+        tier_map = _trace_tier_map(
+            num_games, getattr(args, "trace_free_envs", 2), list(trace_pools)
+        )
+        chances = [0.0] * num_games  # pressure comes from traces (or nothing)
+        print(
+            "Trace garbage tiers: "
+            + ", ".join(f"{t}({len(p)})" for t, p in trace_pools.items())
+            + " | env map: "
+            + " ".join(str(tier_map[i] or "-") for i in range(num_games)),
+            flush=True,
+        )
     return [
         PyTetrisEnv(
             queue_size=queue_size,
@@ -115,6 +164,7 @@ def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len
             garbage_max=getattr(args, "garbage_rows_max", 4),
             num_row_tiers=2,
             placement_candidates=False,
+            garbage_traces=trace_pools.get(tier_map[i]) if tier_map.get(i) else None,
         )
         for i in range(num_games)
     ]
@@ -166,6 +216,11 @@ def main(args):
     learning_rate = getattr(args, "learning_rate", 1e-4)
     replay_capacity = getattr(args, "replay_capacity", 25_000)
     gae_lambda = getattr(args, "gae_lambda", 1.0)
+    garbage_traces = getattr(args, "garbage_traces", None)
+    trace_free_envs = getattr(args, "trace_free_envs", 2)
+    trace_harvest_cap = getattr(args, "trace_harvest_cap", 256)
+
+    trace_pools = _load_trace_pools(garbage_traces) if garbage_traces else None
 
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
@@ -197,6 +252,8 @@ def main(args):
         learning_rate=learning_rate,
         replay_capacity=replay_capacity,
         gae_lambda=gae_lambda,
+        garbage_traces=garbage_traces,
+        trace_free_envs=trace_free_envs,
     )
 
     net = PlacementPolicyValueNet(
@@ -253,6 +310,7 @@ def main(args):
         max_steps=None,  # a cap counts truncations as deaths and cuts the bootstrap
         max_len=max_len,
         args=args,
+        trace_pools=trace_pools,
     )
     mcts = PlacementMCTS(net, cfg)
     searcher = (
@@ -317,6 +375,11 @@ def main(args):
         dones = np.zeros((horizon, num_games), dtype=np.float32)
         storable = np.zeros((horizon, num_games), dtype=bool)
         visits = np.zeros((horizon, num_games), dtype=np.float32)
+
+        garb_before = [
+            (e._garbage_spawned_rows, e._garbage_spawned_events, e._garbage_pushed_rows)
+            for e in envs
+        ]
 
         scale = float(return_scale)
         for t in range(horizon):
@@ -463,6 +526,23 @@ def main(args):
         deaths_per_game = dones.sum(axis=0)
         b2b_series = bcg[..., 0][storable]
         combo_series = bcg[..., 1][storable]
+
+        # Incoming-garbage telemetry from the env counters (per-gen deltas).
+        # cancel_frac is approximate per gen: pending-queue carryover and reset-dropped
+        # entries land on the "cancelled" side; accurate in the long run.
+        g_rows = sum(e._garbage_spawned_rows for e in envs) - sum(
+            b[0] for b in garb_before
+        )
+        g_events = sum(e._garbage_spawned_events for e in envs) - sum(
+            b[1] for b in garb_before
+        )
+        g_pushed = sum(e._garbage_pushed_rows for e in envs) - sum(
+            b[2] for b in garb_before
+        )
+        garbage_in_max = max(e._garbage_max_event for e in envs)
+        for e in envs:
+            e._garbage_max_event = 0
+        n_steps = horizon * num_games
         if gen % 1 == 0:
             log_step(
                 SingleAgentAZLog(
@@ -485,6 +565,14 @@ def main(args):
                     surge_rate=float((b2b_series >= 4).mean())
                     if b2b_series.size
                     else 0.0,
+                    garbage_in_app=g_rows / n_steps,
+                    garbage_in_rate=g_events / n_steps,
+                    garbage_in_chunk=g_rows / g_events if g_events else 0.0,
+                    garbage_in_max=float(garbage_in_max),
+                    garbage_cancel_frac=1.0 - g_pushed / g_rows if g_rows else 0.0,
+                    trace_pool_size=sum(len(p) for p in trace_pools.values())
+                    if trace_pools
+                    else 0,
                     avg_visits=float(visits[storable].mean())
                     if storable.any()
                     else 0.0,
@@ -503,6 +591,28 @@ def main(args):
                 f"Deaths: {float(deaths_per_game.mean()):1.2f} | Updates: {updates}",
                 flush=True,
             )
+        if trace_pools is not None:
+            # Rolling harvest: this gen's attack streams become future opponents.
+            # Timestamp prefix keeps eviction chronological across resumes.
+            recent = Path(garbage_traces) / "99_recent"
+            recent.mkdir(exist_ok=True)
+            stamp = int(time.time())
+            for i in range(num_games):
+                if attacks[:, i].any():
+                    np.save(recent / f"{stamp}_g{gen:06d}_e{i:02d}.npy", attacks[:, i])
+            files = sorted(recent.glob("*.npy"))
+            for f in files[: max(0, len(files) - trace_harvest_cap)]:
+                f.unlink()
+            if gen % 25 == 24:
+                trace_pools = _load_trace_pools(garbage_traces)
+                tier_map = _trace_tier_map(
+                    num_games, trace_free_envs, list(trace_pools)
+                )
+                for i, e in enumerate(envs):
+                    e._garbage_traces = (
+                        trace_pools.get(tier_map[i]) if tier_map.get(i) else None
+                    )
+
         if gen % 5 == 0:
             manager.save()
 

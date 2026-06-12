@@ -16,7 +16,7 @@ Hierarchy:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 from pydantic import BaseModel
@@ -217,6 +217,8 @@ class AlphaZeroTrainConfig(BaseModel):
     learning_rate: float
     replay_capacity: int
     gae_lambda: float
+    garbage_traces: Optional[str] = None
+    trace_free_envs: int = 0
 
 
 class SingleAgentAZLog(LogPayloadModel):
@@ -243,6 +245,13 @@ class SingleAgentAZLog(LogPayloadModel):
     avg_combo: float
     surge_rate: float
 
+    # Incoming garbage (trace-replay realism; counters from the env)
+    garbage_in_app: float
+    garbage_in_rate: float
+    garbage_in_chunk: float
+    garbage_in_max: float
+    garbage_cancel_frac: float
+
     # Search
     avg_visits: float
     dead_rate: float
@@ -250,6 +259,7 @@ class SingleAgentAZLog(LogPayloadModel):
     # Training progress
     updates: int
     buffer_size: int
+    trace_pool_size: int
 
     # Visualization (wrapped at log time)
     board: np.ndarray
@@ -273,7 +283,17 @@ class SingleAgentAZLog(LogPayloadModel):
             "avg_deaths",
             "avg_pieces",
         ),
-        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "gameplay": (
+            "avg_b2b",
+            "max_b2b",
+            "avg_combo",
+            "surge_rate",
+            "garbage_in_app",
+            "garbage_in_rate",
+            "garbage_in_chunk",
+            "garbage_in_max",
+            "garbage_cancel_frac",
+        ),
         "search": ("avg_visits", "dead_rate"),
-        "progress": ("updates", "buffer_size"),
+        "progress": ("updates", "buffer_size", "trace_pool_size"),
     }

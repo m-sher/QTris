@@ -127,6 +127,25 @@ def main() -> None:
         help="lambda for the value-target return (1.0 = MC return + horizon bootstrap).",
     )
     az.add_argument(
+        "--garbage-traces",
+        type=str,
+        default=None,
+        help="trace-replay garbage: dir of tier subdirs of .npy attack streams "
+        "(sorted tier name = difficulty). Replaces the chance sweep when set.",
+    )
+    az.add_argument(
+        "--trace-free-envs",
+        type=int,
+        default=2,
+        help="number of garbage-free envs when --garbage-traces is set.",
+    )
+    az.add_argument(
+        "--trace-harvest-cap",
+        type=int,
+        default=256,
+        help="max files kept in the rolling 99_recent harvest tier.",
+    )
+    az.add_argument(
         "--garbage-chance-min",
         type=float,
         default=0.0,
