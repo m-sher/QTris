@@ -109,13 +109,6 @@ def main() -> None:
         help="per-edge search reward weight on attack (also scales the realized return).",
     )
     az.add_argument(
-        "--w-b2b",
-        type=float,
-        default=1.0,
-        help="search leaf-bootstrap weight on max(0, b2b). 0 lets the learned value carry "
-        "b2b's worth instead of the unbounded hoard crutch.",
-    )
-    az.add_argument(
         "--w-death",
         type=float,
         default=100.0,

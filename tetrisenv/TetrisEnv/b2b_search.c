@@ -3186,10 +3186,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // The entire PUCT simulation loop runs in C on a compact bitboard+scalars node;
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
-// batched net eval (collect_leaves -> net -> apply_leaves). Reward = attack plus b2b
-// potential shaping: per-edge w_attack*attack + (gamma*Phi(child) - Phi(parent)) with
-// Phi(s)=w_b2b*max(0,b2b); death forfeits Phi (terminal Phi=0); leaf bootstrap is the
-// net value (= V_shaped). Dirichlet noise + final sampling stay in Python.
+// batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
+// w_attack*attack (clipped) with an unclipped -w_death on terminal edges; the leaf
+// bootstrap is the net value directly. Dirichlet noise + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -3220,7 +3219,7 @@ typedef struct {
 typedef struct {
     int board_height, queue_size, max_height, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
-    float c_puct, gamma, w_attack, w_b2b, w_death, return_scale;
+    float c_puct, gamma, w_attack, w_death, return_scale;
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -3479,11 +3478,6 @@ static float mcts_scale_reward(const MConfig* cfg, float reward) {
     return r;
 }
 
-// b2b potential for reward shaping: Phi(s) = w_b2b * max(0, b2b), raw attack units.
-static inline float mphi(const MConfig* cfg, int b2b) {
-    return cfg->w_b2b * (b2b > 0 ? (float)b2b : 0.0f);
-}
-
 // --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
 //     and their paths; terminal/dead leaves back up in-place; stops on collision or arena-full. ---
 static void mcts_collect_round(MTree* t, const MConfig* cfg) {
@@ -3516,18 +3510,13 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
-                    // Death is terminal (Phi=0): shaping forfeits the held potential,
-                    // so dying with a hoard costs -Phi(parent) on top of -w_death.
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
-                        - (cfg->w_death + mphi(cfg, node->st.b2b)) / (cfg->return_scale + 1e-8f);
+                        - cfg->w_death / (cfg->return_scale + 1e-8f);
                     mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
-                // Potential shaping: edge += gamma*Phi(child) - Phi(parent), unclipped.
-                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack)
-                    + (cfg->gamma * mphi(cfg, leaf->st.b2b) - mphi(cfg, node->st.b2b))
-                      / (cfg->return_scale + 1e-8f);
+                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3554,7 +3543,7 @@ static void msoftmax_into_prior(MNode* node, const float* logits) {
 
 void* mcts_create(int num_trees, int board_height, int queue_size, int max_height,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
-                  float c_puct, float gamma, float w_attack, float w_b2b, float w_death,
+                  float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
                   int leaves_per_round, float vloss) {
     b2b_init_pieces();
@@ -3584,7 +3573,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size, int max_heigh
     e->cfg.garbage_push_delay = garbage_push_delay;
     e->cfg.auto_push_garbage = auto_push_garbage; e->cfg.auto_fill_queue = auto_fill_queue;
     e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
-    e->cfg.w_attack = w_attack; e->cfg.w_b2b = w_b2b; e->cfg.w_death = w_death;
+    e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
     e->cfg.return_scale = return_scale;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;

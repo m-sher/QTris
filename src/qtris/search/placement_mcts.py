@@ -6,14 +6,11 @@ net stays in Python. Per move: build one C tree per game, evaluate the roots in 
 call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one net call ->
 `apply_leaves` until the budget is spent, and read out per-root visit counts.
 
-Reward is attack + b2b potential shaping: per-edge `w_attack * attack` (surge + combo already
-fold into `compute_attack`'s attack) plus `gamma*Phi(child) - Phi(parent)` with
-`Phi(s) = w_b2b * max(0, b2b)`. Death is terminal (`Phi = 0`) so dying forfeits the held
-potential on top of `-w_death`; the leaf bootstrap is the net value directly (the net learns
-`V_shaped = V_true - Phi`). PUCT uses Q in raw return_scale units (no per-tree min-max) so the
-death penalty isn't flattened to one normalized unit and `w_death` actually bites. The shaping
-is policy-invariant: it front-loads b2b credit so the search/value discover the surge payoff
-without distorting the realized attack-death objective. Dirichlet noise + sampling stay in Python.
+Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
+attack), clipped, with an unclipped `-w_death` on terminal edges; the leaf bootstrap is the
+net value directly. PUCT uses Q in raw return_scale units (no per-tree min-max) so the death
+penalty isn't flattened to one normalized unit and `w_death` actually bites. Dirichlet noise
++ sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -34,7 +31,6 @@ class MCTSConfig:
     gamma: float = 0.99
     temp_moves: int = 12  # moves played at temperature 1 before switching to greedy
     w_attack: float = 1.0  # per-edge reward weight on attack
-    w_b2b: float = 1.0  # b2b potential-shaping weight: Phi(s) = w_b2b * max(0, b2b)
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
@@ -111,7 +107,6 @@ class PlacementMCTS:
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,
-            w_b2b=self.cfg.w_b2b,
             w_death=self.cfg.w_death,
             return_scale=float(return_scale),
             max_len=e0._max_len,
@@ -200,7 +195,6 @@ class PlacementMCTS:
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,
-            w_b2b=self.cfg.w_b2b,
             w_death=self.cfg.w_death,
             return_scale=1.0,
             max_len=e0._max_len,
