@@ -226,6 +226,8 @@ class SingleAgentAZLog(LogPayloadModel):
     policy_loss: float
     value_loss: float
     entropy: float
+    policy_kl: float
+    update_kl: float
     explained_var: float
     value_mean: float
     return_var: float
@@ -258,6 +260,8 @@ class SingleAgentAZLog(LogPayloadModel):
             "policy_loss",
             "value_loss",
             "entropy",
+            "policy_kl",
+            "update_kl",
             "explained_var",
             "value_mean",
             "return_var",
