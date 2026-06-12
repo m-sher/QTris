@@ -41,6 +41,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         b2b_extend_flat: float = 1.5,
         b2b_extend_scale: float = 1.0,
         placement_candidates: bool = False,
+        garbage_traces: Optional[list] = None,
+        garbage_trace_cap: int = 10,
     ) -> None:
         self._attack_reward = 1.0
         self._b2b_coef = 2.0
@@ -65,6 +67,22 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._garbage_min = garbage_min
         self._garbage_max = garbage_max
         self._garbage_push_delay = garbage_push_delay
+
+        # Trace-replay garbage: when set, incoming garbage replays a recorded
+        # per-step attack stream (rows per step) instead of the chance model.
+        if garbage_traces is not None:
+            garbage_traces = [t for t in garbage_traces if len(t) > 0]
+        self._garbage_traces = garbage_traces or None
+        self._garbage_trace_cap = garbage_trace_cap
+        self._garbage_trace: Optional[np.ndarray] = None
+        self._garbage_trace_pos = 0
+
+        # Cumulative garbage telemetry (both modes); _garbage_max_event is
+        # read-and-reset by the trainer per logging window.
+        self._garbage_spawned_rows = 0
+        self._garbage_spawned_events = 0
+        self._garbage_pushed_rows = 0
+        self._garbage_max_event = 0
 
         self._gamma = gamma
         self._auto_push_garbage = auto_push_garbage
@@ -222,6 +240,15 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         # Reset garbage queue
         self._garbage_queue = []
+
+        # Trace-replay: draw a fresh trace + start offset for this episode.
+        if self._garbage_traces:
+            self._garbage_trace = self._garbage_traces[
+                self._random.randrange(len(self._garbage_traces))
+            ]
+            self._garbage_trace_pos = self._random.randrange(len(self._garbage_trace))
+        else:
+            self._garbage_trace = None
 
         self._episode_ended = False
 
@@ -658,24 +685,43 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         return board, vis_board, clears
 
     def _add_to_garbage_queue(self) -> None:
-        """Generate garbage and add it to the garbage queue based on chance."""
-        if self._garbage_chance <= 0.0 or self._garbage_max <= 0:
-            return
-
-        if self._random.random() > self._garbage_chance:
-            return
-
-        if self._garbage_min == self._garbage_max:
-            num_garbage_rows = self._garbage_min
-        else:
-            num_garbage_rows = self._random.randint(
-                self._garbage_min, self._garbage_max
+        """Generate garbage and add it to the garbage queue: replay the assigned
+        attack trace when one is set, else roll the chance model."""
+        if self._garbage_trace is not None:
+            num_garbage_rows = int(
+                min(
+                    self._garbage_trace[
+                        self._garbage_trace_pos % len(self._garbage_trace)
+                    ],
+                    self._garbage_trace_cap,
+                )
             )
+            self._garbage_trace_pos += 1
+            if num_garbage_rows <= 0:
+                return
+        else:
+            if self._garbage_chance <= 0.0 or self._garbage_max <= 0:
+                return
 
-        if num_garbage_rows <= 0:
-            return
+            if self._random.random() > self._garbage_chance:
+                return
+
+            if self._garbage_min == self._garbage_max:
+                num_garbage_rows = self._garbage_min
+            else:
+                num_garbage_rows = self._random.randint(
+                    self._garbage_min, self._garbage_max
+                )
+
+            if num_garbage_rows <= 0:
+                return
 
         empty_column = self._random.randint(0, 9)
+
+        self._garbage_spawned_rows += num_garbage_rows
+        self._garbage_spawned_events += 1
+        if num_garbage_rows > self._garbage_max_event:
+            self._garbage_max_event = num_garbage_rows
 
         # Add garbage instance to queue with push delay timer
         self._garbage_queue.append((num_garbage_rows, empty_column, self._garbage_push_delay))
@@ -699,6 +745,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             return board, vis_board, False
 
         num_garbage_rows, empty_column, _ = self._garbage_queue.pop(0)
+        self._garbage_pushed_rows += num_garbage_rows
 
         garbage_rows = np.ones((num_garbage_rows, 10), dtype=np.float32)
         garbage_rows[:, empty_column] = 0.0
