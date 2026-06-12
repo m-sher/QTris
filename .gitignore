@@ -9,3 +9,4 @@ build/
 *.egg-info/
 *.so
 tetrio/
+garbage_traces/
