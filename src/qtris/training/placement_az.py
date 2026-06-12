@@ -121,11 +121,10 @@ def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len
 
 
 def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_envs):
-    """Pre-training estimate of the discounted-return variance to seed return_scale.
-    The EMA on return_var is slow (0.01), so a fresh warm-start would sit mis-scaled for many
-    generations - giving the value head a huge initial loss and badly-scaled targets. One short
-    self-play rollout with the warm-started net, over the same attack-only return the value head
-    regresses (pure MC, no bootstrap), gives a calibrated starting scale."""
+    """Pre-training estimate of the discounted-return variance to seed return_scale, which is
+    then FROZEN for the whole run. One short self-play rollout with the warm-started net, over
+    the same attack-only return the value head regresses (pure MC, no bootstrap), gives a
+    calibrated scale; without it a fresh start would sit at 1.0 with wildly mis-scaled targets."""
     rewards = np.zeros((horizon, num_envs), dtype=np.float32)
     dones = np.zeros((horizon, num_envs), dtype=np.float32)
     for env in envs:
@@ -272,17 +271,21 @@ def main(args):
         config=config,
         wandb_mirror=getattr(args, "wandb", False),
     )
-    return_var = float(return_scale) ** 2
-
     # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
-    # whose return_scale was restored above). Avoids the slow-EMA cold-start mis-scaling.
+    # whose return_scale was restored above), then FROZEN: AZ normalizes nothing (bounded
+    # z target) and MuZero min-max normalizes Q in-tree; a running return-variance EMA is a
+    # PPO-style trick, and its loosening (variance up -> scale up -> death penalty down)
+    # amplified every collapse.
     if not manager.latest_checkpoint:
-        return_var = _estimate_return_var(
-            mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
+        return_scale.assign(
+            tf.sqrt(
+                _estimate_return_var(
+                    mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
+                )
+            )
         )
-        return_scale.assign(tf.sqrt(return_var))
         print(
-            f"Seeded return_scale={float(return_scale):.3f} from warm-start.",
+            f"Seeded return_scale={float(return_scale):.3f} from warm-start (frozen).",
             flush=True,
         )
         for env in envs:
@@ -315,7 +318,7 @@ def main(args):
         storable = np.zeros((horizon, num_games), dtype=bool)
         visits = np.zeros((horizon, num_games), dtype=np.float32)
 
-        scale = float(np.sqrt(return_var))
+        scale = float(return_scale)
         for t in range(horizon):
             temps = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(np.float32)
             results = mcts.search(envs, scale, temps)
@@ -385,15 +388,12 @@ def main(args):
         )
         value_tgt = returns.numpy()[..., 0] / (scale + 1e-8)
 
-        # EMA the return variance for the next generation's return_scale (search normalizer +
-        # value-target units). Updated before the skip checks so the scale evolves every gen.
+        # Measured per-gen return variance: DIAGNOSTIC ONLY (a rise preceding a reward fall
+        # is the collapse fingerprint). return_scale stays frozen at its seed.
         raw_returns = compute_raw_returns(
             rewards[..., None], dones[..., None], cfg.gamma, horizon, num_games
         )
-        return_var = 0.99 * return_var + 0.01 * float(
-            tf.math.reduce_variance(raw_returns)
-        )
-        return_scale.assign(tf.sqrt(return_var))
+        gen_return_var = float(tf.math.reduce_variance(raw_returns))
 
         # Append this generation's storable positions to the replay buffer; evict oldest gens
         # once total positions exceed replay_capacity.
@@ -473,7 +473,7 @@ def main(args):
                     update_kl=update_kl,
                     explained_var=step_out["explained_var"],
                     value_mean=step_out["value_mean"],
-                    return_var=return_var,
+                    return_var=gen_return_var,
                     avg_total_reward=float(rewards.sum(axis=0).mean()),
                     avg_attacks=float(attacks.sum(axis=0).mean()),
                     avg_clears=float(clears.sum(axis=0).mean()),
