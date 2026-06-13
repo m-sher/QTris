@@ -113,6 +113,80 @@ lands in the TB config text; `return_scale` logged per gen (optimization group).
 - policy_kl retrodiction: see run table column — H-B's D2 prediction FAILED retrodictively
   (no group separation); update_kl column unchanged (splits, exception 225557).
 
+### 2026-06-12 E0 — seed probe results (8 × num-generations 0, full run config, no np-seed)
+
+- ladder_v1 traces: 47.71, 48.68, 49.61, 47.71 → mean 48.43, sd 0.90 (1.9%).
+- chance sweep: 27.65, 37.00, 28.17, 35.17 → mean 32.00, sd 4.78 (14.9%).
+- The seed is near-DETERMINISTIC given the garbage mode/library: trace ladder ⇒ ~48.4
+  (collapsed 132438's 48.97 in-cluster); sweep ⇒ ~32 (healthy lineage's 32.38 in-cluster).
+  "Lottery" reframed: a mode/library shift (+50% under trace ladder) plus moderate sweep noise.
+- Open: improving trace run 233025's inferred ≈33 is NOT reachable by trace-mode noise
+  (cluster 48.4±0.9). Its library had a 5th tier — weak-ghost 99_recent from 225557's
+  harvest. e0_extra probe (ladder + quarantined weak 99_recent as 5th tier) tests whether a
+  weak 5th tier pulls the seed down; alternative: the vloss-ratio inference was biased.
+- e0_ghost result: 5-tier ladder+weak-ghost seeds at **48.31** — in-cluster. A weak 5th tier
+  does NOT lower the seed (only 2/14 envs re-map to 99_recent). ⇒ 233025 most likely also ran
+  at ≈48; the vloss-ratio inference for it is judged biased and withdrawn. Consequence: an
+  improving 90-gen trace run existed at scale ≈48 ⇒ scale ≈48 is not sufficient for collapse;
+  whether it is necessary/contributory is exactly Phase 1's question (T1 vs T2).
+
+### 2026-06-12 Phase 1 — T1 ladder_v1 @ scale 32.4 (23 gens, run 184213-t1-ladder-s32)
+
+HEALTHY / improving. entropy 2.44→1.97 (D5 −0.04, no spiral); deaths g15+ 0.58; attacks
+74→113 (≈0.88 APP); reward g18-22 mean 39, trending up. update_kl g1-14 = **0.0166** —
+BELOW the pre-registered "healthy ≥.030" line yet clearly improving. ⇒ update_kl is NOT a
+reliable health discriminator at forced scale / no-harvest; demote D1 to observational, rely
+on entropy slope (D5) + deaths (D3) + reward/attacks trend. Key: ladder difficulty (incoming
+≈0.48 APP, same as the collapsed runs) does NOT collapse at scale 32.4 in 23 gens.
+
+### 2026-06-12 Phase 1 — T2 ladder_v1 @ scale 49.0 (23 gens, run 190149-t2-ladder-s49)
+
+HEALTHY / improving. entropy 2.59→2.19 (D5 −0.05, no spiral); deaths g15+ 0.59; attacks
+64→99 (≈0.77 APP); reward −80→ ~50-65 late, improving. vloss 1.5→0.74 (lower than T1, ∝
+1/scale²). update_kl g1-14 0.0164 ≈ T1. ⇒ **scale 49 does NOT collapse in 23 gens under
+clean conditions** — contradicts the simple H-B "scale 49 → collapse". Both scale arms
+healthy; T2 slightly higher entropy / lower reward than T1 (weaker Q signal, as predicted),
+but stable.
+
+CRITICAL inference: harvest rescan fires only at `gen % 25 == 24`, so for gens 0-23 a
+no-harvest run is training-identical to a harvest-on run (bar disk writes). Historical 132438
+(ladder-ish @ ~49, harvest on) collapsed by gen 17; T2 (seed 7) did not. 132438's launch
+99_recent held 102532's collapse-era (WEAK) traces ⇒ T2 (4-tier, hardest envs face 03) was
+if anything HARDER. So difficulty is not the discriminator either. Remaining uncontrolled
+variable: **RNG seed / stochastic instability**. Same nominal config (vc 0.1, 256 sims,
+traces, scale ~48) historically gave improve-90 (233025), collapse-108 (102532),
+collapse-17 (132438) — large run-to-run variance ⇒ collapse looks stochastic/seed-gated,
+pointing at H-D (no stabilization) over H-B. Next: T3/T4 (difficulty arm), then a SEED SWEEP
+at ladder@49 to measure collapse frequency, then extend a survivor past gen 24.
+
+### 2026-06-12 Phase 1 — T3/T4 weak_v1 (23 gens each) + 2×2 verdict
+
+- T3 weak @ 32.4 (run 192126): HEALTHY. reward g18+ 90.1, deaths g15+ 0.12, entropy +0.05
+  (no spiral), attacks 74→101-107.
+- T4 weak @ 49.0 (run 194143): HEALTHY. reward g18+ 84.5, deaths g15+ 0.16, entropy +0.01,
+  attacks 62→100.
+
+2×2 summary (reward g18+ / deaths g15+): T1 39/0.58, T2 36/0.59, T3 90/0.12, T4 85/0.16.
+ALL FOUR HEALTHY → **branch D**. Difficulty is the dominant factor (weak ≫ ladder: ~2.3×
+reward, ~4× fewer deaths); scale 32 vs 49 within-noise at both difficulties (no collapse at
+49). update_kl uniformly 0.013-0.017 across all arms incl. the improving ones — confirms it
+is NOT a health discriminator here. No arm reached the historical 124.7 peak in 23 gens but
+all climbing (T3 hit reward 106.8 @gen 12).
+
+**Conclusion of the causal test**: under clean conditions (static library, np-seed 7,
+no-harvest) the warm-started policy does NOT collapse in 23 gens at any (scale, difficulty)
+in the 2×2. Since harvest rescan first fires at gen 24, gens 0-23 are training-identical to
+the historical harvest-on runs; 132438 (ladder-ish @49) collapsed by gen 17 with a launch
+99_recent that was WEAKER than ladder_v1 ⇒ the collapse is NOT a deterministic function of
+(scale, difficulty). Remaining live causes: (i) RNG-seed stochastic instability (H-D), (ii)
+the harvest/library dynamic at gen 24+ (H-C), (iii) a slow >23-gen mode (102532 @ gen 108).
+
+H-B (scale lottery) DEMOTED: scale 49 trains fine in isolation. H-A DEMOTED to "difficulty
+modulates death rate" (not a collapse trigger by itself at these levels). Next: seed sweep
+(ladder@49, 128 sims, 20 gens, seeds 11/17/23/29/41) to test H-D; then chain a trial past
+gen 24 with harvest to test H-C; then a long single-config run for the slow mode.
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
+- 06d1233 Collapse campaign: living plan + trial dir hygiene
