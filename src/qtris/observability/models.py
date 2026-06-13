@@ -219,6 +219,13 @@ class AlphaZeroTrainConfig(BaseModel):
     gae_lambda: float
     garbage_traces: Optional[str] = None
     trace_free_envs: int = 0
+    return_scale: float = 0.0
+    resumed: bool = False
+    checkpoint_dir: str = "checkpoints/placement_az"
+    run_name: Optional[str] = None
+    harvest: bool = True
+    trace_tiers: Optional[str] = None
+    np_seed: Optional[int] = None
 
 
 class SingleAgentAZLog(LogPayloadModel):
@@ -233,6 +240,7 @@ class SingleAgentAZLog(LogPayloadModel):
     explained_var: float
     value_mean: float
     return_var: float
+    return_scale: float
 
     # Reward / gameplay channels
     avg_total_reward: float
@@ -275,6 +283,7 @@ class SingleAgentAZLog(LogPayloadModel):
             "explained_var",
             "value_mean",
             "return_var",
+            "return_scale",
         ),
         "rewards": (
             "avg_total_reward",

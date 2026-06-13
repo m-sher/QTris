@@ -219,8 +219,23 @@ def main(args):
     garbage_traces = getattr(args, "garbage_traces", None)
     trace_free_envs = getattr(args, "trace_free_envs", 2)
     trace_harvest_cap = getattr(args, "trace_harvest_cap", 256)
+    return_scale_override = getattr(args, "return_scale", None)
+    checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
+    run_name = getattr(args, "run_name", None)
+    no_harvest = getattr(args, "no_harvest", False)
+    trace_tiers = getattr(args, "trace_tiers", None)
+    np_seed = getattr(args, "np_seed", None)
+
+    if np_seed is not None:
+        np.random.seed(np_seed)
 
     trace_pools = _load_trace_pools(garbage_traces) if garbage_traces else None
+    if trace_pools is not None and trace_tiers:
+        keep = trace_tiers.split(",")
+        missing = [t for t in keep if t not in trace_pools]
+        if missing:
+            raise SystemExit(f"--trace-tiers: unknown tiers {missing}.")
+        trace_pools = {t: trace_pools[t] for t in sorted(keep)}
 
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
@@ -233,27 +248,6 @@ def main(args):
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
-    )
-
-    config = AlphaZeroTrainConfig(
-        num_games=num_games,
-        horizon=horizon,
-        num_simulations=cfg.num_simulations,
-        c_puct=cfg.c_puct,
-        gamma=cfg.gamma,
-        dirichlet_alpha=cfg.dirichlet_alpha,
-        dirichlet_eps=cfg.dirichlet_eps,
-        temp_moves=cfg.temp_moves,
-        w_attack=cfg.w_attack,
-        w_death=cfg.w_death,
-        mini_batch_size=mini_batch_size,
-        num_epochs=num_epochs,
-        value_coef=value_coef,
-        learning_rate=learning_rate,
-        replay_capacity=replay_capacity,
-        gae_lambda=gae_lambda,
-        garbage_traces=garbage_traces,
-        trace_free_envs=trace_free_envs,
     )
 
     net = PlacementPolicyValueNet(
@@ -287,9 +281,7 @@ def main(args):
         optimizer=optimizer,
         return_scale=return_scale,
     )
-    manager = tf.train.CheckpointManager(
-        checkpoint, "checkpoints/placement_az", max_to_keep=3
-    )
+    manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=3)
     if manager.latest_checkpoint:
         checkpoint.restore(manager.latest_checkpoint).expect_partial()
         print(f"Resumed AZ checkpoint {manager.latest_checkpoint}.", flush=True)
@@ -324,31 +316,73 @@ def main(args):
         env._reset()
     move_count = np.zeros(num_games, dtype=np.int64)
 
+    # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
+    # whose return_scale was restored above, or when --return-scale forces it), then FROZEN:
+    # AZ normalizes nothing (bounded z target) and MuZero min-max normalizes Q in-tree; a
+    # running return-variance EMA is a PPO-style trick, and its loosening (variance up ->
+    # scale up -> death penalty down) amplified every collapse.
+    resumed = manager.latest_checkpoint is not None
+    if not resumed:
+        if return_scale_override is not None:
+            return_scale.assign(return_scale_override)
+            print(
+                f"Forced return_scale={float(return_scale):.3f} (frozen).", flush=True
+            )
+        else:
+            return_scale.assign(
+                tf.sqrt(
+                    _estimate_return_var(
+                        mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
+                    )
+                )
+            )
+            print(
+                f"Seeded return_scale={float(return_scale):.3f} from warm-start (frozen).",
+                flush=True,
+            )
+            for env in envs:
+                env._reset()
+            move_count = np.zeros(num_games, dtype=np.int64)
+    elif return_scale_override is not None:
+        print(
+            f"--return-scale {return_scale_override} ignored: resumed ckpt keeps "
+            f"return_scale={float(return_scale):.3f}.",
+            flush=True,
+        )
+
+    config = AlphaZeroTrainConfig(
+        num_games=num_games,
+        horizon=horizon,
+        num_simulations=cfg.num_simulations,
+        c_puct=cfg.c_puct,
+        gamma=cfg.gamma,
+        dirichlet_alpha=cfg.dirichlet_alpha,
+        dirichlet_eps=cfg.dirichlet_eps,
+        temp_moves=cfg.temp_moves,
+        w_attack=cfg.w_attack,
+        w_death=cfg.w_death,
+        mini_batch_size=mini_batch_size,
+        num_epochs=num_epochs,
+        value_coef=value_coef,
+        learning_rate=learning_rate,
+        replay_capacity=replay_capacity,
+        gae_lambda=gae_lambda,
+        garbage_traces=garbage_traces,
+        trace_free_envs=trace_free_envs,
+        return_scale=float(return_scale),
+        resumed=resumed,
+        checkpoint_dir=checkpoint_dir,
+        run_name=run_name,
+        harvest=not no_harvest,
+        trace_tiers=trace_tiers,
+        np_seed=np_seed,
+    )
     run = init_run(
         project="Tetris",
         config=config,
         wandb_mirror=getattr(args, "wandb", False),
+        run_name=run_name,
     )
-    # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
-    # whose return_scale was restored above), then FROZEN: AZ normalizes nothing (bounded
-    # z target) and MuZero min-max normalizes Q in-tree; a running return-variance EMA is a
-    # PPO-style trick, and its loosening (variance up -> scale up -> death penalty down)
-    # amplified every collapse.
-    if not manager.latest_checkpoint:
-        return_scale.assign(
-            tf.sqrt(
-                _estimate_return_var(
-                    mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
-                )
-            )
-        )
-        print(
-            f"Seeded return_scale={float(return_scale):.3f} from warm-start (frozen).",
-            flush=True,
-        )
-        for env in envs:
-            env._reset()
-        move_count = np.zeros(num_games, dtype=np.int64)
 
     # Multi-generation replay of storable positions (decorrelates the tiny on-policy batches
     # and resists drift off the pretrained init). Each entry is one generation's numpy arrays;
@@ -554,6 +588,7 @@ def main(args):
                     explained_var=step_out["explained_var"],
                     value_mean=step_out["value_mean"],
                     return_var=gen_return_var,
+                    return_scale=scale,
                     avg_total_reward=float(rewards.sum(axis=0).mean()),
                     avg_attacks=float(attacks.sum(axis=0).mean()),
                     avg_clears=float(clears.sum(axis=0).mean()),
@@ -591,7 +626,7 @@ def main(args):
                 f"Deaths: {float(deaths_per_game.mean()):1.2f} | Updates: {updates}",
                 flush=True,
             )
-        if trace_pools is not None:
+        if trace_pools is not None and not no_harvest:
             # Rolling harvest: this gen's attack streams become future opponents.
             # Timestamp prefix keeps eviction chronological across resumes.
             recent = Path(garbage_traces) / "99_recent"

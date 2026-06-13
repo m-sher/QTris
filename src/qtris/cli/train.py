@@ -146,6 +146,40 @@ def main() -> None:
         help="max files kept in the rolling 99_recent harvest tier.",
     )
     az.add_argument(
+        "--return-scale",
+        type=float,
+        default=None,
+        help="force the frozen return_scale (skips the warm-start seeding rollout; "
+        "ignored when resuming a checkpoint).",
+    )
+    az.add_argument(
+        "--checkpoint-dir",
+        default="checkpoints/placement_az",
+        help="AZ checkpoint directory (a non-empty dir silently resumes).",
+    )
+    az.add_argument(
+        "--run-name",
+        default=None,
+        help="suffix for the TensorBoard run dir.",
+    )
+    az.add_argument(
+        "--no-harvest",
+        action="store_true",
+        help="trace mode: don't write this run's attacks into 99_recent and don't "
+        "rescan the library (static pools for the whole run).",
+    )
+    az.add_argument(
+        "--trace-tiers",
+        default=None,
+        help="comma-separated tier subdirs to load from --garbage-traces (default: all).",
+    )
+    az.add_argument(
+        "--np-seed",
+        type=int,
+        default=None,
+        help="seed the numpy RNG (Dirichlet noise, temperature sampling).",
+    )
+    az.add_argument(
         "--garbage-chance-min",
         type=float,
         default=0.0,
