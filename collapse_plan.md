@@ -224,6 +224,24 @@ sims/ladder@49/seed 11 collapses by gen 5 (~2 min) — fast fix-iteration loop.
 Next: finish sweep (frequency) → long_control 128/seed7 (isolate sims vs seed; 256/seed7 was
 healthy) → implement min-max Q norm → re-run the collapse testbed.
 
+### 2026-06-12 c_puct sweep on the 128-sim collapse testbed (ladder@49, seed 11)
+
+c_puct ∈ {0.5, 1.0, 1.5(baseline), 3.0}, all 128 sims, 15 gens: **ALL collapsed.**
+Entropy rise vs g0-4: 0.5→+0.27, 1.0→+0.42, 1.5→(spiral), 3.0→+0.61. Higher c_puct → bigger
+entropy spiral, but reward/deaths cascade at EVERY c_puct (e.g. 0.5 ended reward −367, deaths
+4.1). ⇒ **c_puct is NOT the axis** — collapse is invariant to PUCT exploration/exploitation
+balance. Lower c_puct damps the entropy rise slightly but does not prevent the death cascade.
+
+Mechanistic update: concentrating harder on Q (low c_puct) does not help ⇒ the problem is not
+flat-targets-from-exploration; **Q is uninformative/corrupted at low sims**. Leading
+mechanism: warm-started policy can't survive bursty garbage → messy near-death boards → weak
+128-sim search finds no clearly-good move → flat π targets + noisy death-laden value targets →
+entropy/deaths spiral. 256 sims digs deep enough to find survival lines (targets stay sharp).
+PREDICTS min-max Q norm also won't help (same "amplify Q" axis as low c_puct). Fix axis =
+search quality (sims) and/or difficulty. Next tests: (a) 256-robustness at the bad seeds
+(is "use 256" a real fix or lucky seed 7?); (b) weak garbage @ 128 sims (does easier garbage
+rescue weak search → curriculum fix?).
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
