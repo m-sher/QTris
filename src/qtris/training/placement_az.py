@@ -121,6 +121,32 @@ def _trace_tier_map(num_games, trace_free_envs, tiers):
     return mapping
 
 
+# Difficulty-curriculum controller: keep per-game deaths inside [LO, HI] by ramping a
+# continuous difficulty index. Asymmetric (back off faster than ramp up) so a hard generation
+# is corrected before the spiral that weak search + over-hard garbage produces (the collapse
+# mechanism: difficulty above what competence + sims can survive).
+CUR_DEATH_LO, CUR_DEATH_HI = 0.4, 1.0
+CUR_STEP_UP, CUR_STEP_DOWN = 0.15, 0.40
+
+
+def _curriculum_tier_map(num_games, trace_free_envs, tiers, difficulty):
+    """env index -> tier name under the feedback curriculum. Trace envs face a spread of tiers
+    from the weakest up to the current difficulty ceiling, so the policy always keeps some
+    survivable envs to learn from plus harder ones to push competence. difficulty is a
+    continuous index in [0, len(tiers)-1]."""
+    mapping = {}
+    n_trace = max(num_games - trace_free_envs, 1)
+    top = max(len(tiers) - 1, 0)
+    for i in range(num_games):
+        if i < trace_free_envs or not tiers:
+            mapping[i] = None
+        else:
+            j = i - trace_free_envs
+            idx = round(difficulty * j / max(n_trace - 1, 1))
+            mapping[i] = tiers[min(max(idx, 0), top)]
+    return mapping
+
+
 def _build_envs(
     num_games,
     queue_size,
@@ -225,6 +251,8 @@ def main(args):
     no_harvest = getattr(args, "no_harvest", False)
     trace_tiers = getattr(args, "trace_tiers", None)
     np_seed = getattr(args, "np_seed", None)
+    curriculum = getattr(args, "curriculum", False)
+    cur_d = float(getattr(args, "curriculum_start", 0.0))
 
     if np_seed is not None:
         np.random.seed(np_seed)
@@ -376,6 +404,8 @@ def main(args):
         harvest=not no_harvest,
         trace_tiers=trace_tiers,
         np_seed=np_seed,
+        curriculum=curriculum,
+        curriculum_start=cur_d,
     )
     run = init_run(
         project="Tetris",
@@ -383,6 +413,15 @@ def main(args):
         wandb_mirror=getattr(args, "wandb", False),
         run_name=run_name,
     )
+
+    # Difficulty curriculum: start the trace envs at the configured difficulty floor (the fixed
+    # spread in _build_envs is the d=full assignment); the per-gen controller ramps from here.
+    if curriculum and trace_pools:
+        cmap = _curriculum_tier_map(
+            num_games, trace_free_envs, list(trace_pools), cur_d
+        )
+        for i, e in enumerate(envs):
+            e._garbage_traces = trace_pools.get(cmap[i]) if cmap.get(i) else None
 
     # Multi-generation replay of storable positions (decorrelates the tiny on-policy batches
     # and resists drift off the pretrained init). Each entry is one generation's numpy arrays;
@@ -561,6 +600,19 @@ def main(args):
         b2b_series = bcg[..., 0][storable]
         combo_series = bcg[..., 1][storable]
 
+        # Feedback curriculum: ramp difficulty toward the deaths deadband, reassign env tiers.
+        if curriculum and trace_pools:
+            ad = float(deaths_per_game.mean())
+            if ad < CUR_DEATH_LO:
+                cur_d = min(cur_d + CUR_STEP_UP, len(trace_pools) - 1)
+            elif ad > CUR_DEATH_HI:
+                cur_d = max(cur_d - CUR_STEP_DOWN, 0.0)
+            cmap = _curriculum_tier_map(
+                num_games, trace_free_envs, list(trace_pools), cur_d
+            )
+            for i, e in enumerate(envs):
+                e._garbage_traces = trace_pools.get(cmap[i]) if cmap.get(i) else None
+
         # Incoming-garbage telemetry from the env counters (per-gen deltas).
         # cancel_frac is approximate per gen: pending-queue carryover and reset-dropped
         # entries land on the "cancelled" side; accurate in the long run.
@@ -608,6 +660,7 @@ def main(args):
                     trace_pool_size=sum(len(p) for p in trace_pools.values())
                     if trace_pools
                     else 0,
+                    curriculum_d=cur_d if curriculum else 0.0,
                     avg_visits=float(visits[storable].mean())
                     if storable.any()
                     else 0.0,
@@ -638,7 +691,7 @@ def main(args):
             files = sorted(recent.glob("*.npy"))
             for f in files[: max(0, len(files) - trace_harvest_cap)]:
                 f.unlink()
-            if gen % 25 == 24:
+            if gen % 25 == 24 and not curriculum:
                 trace_pools = _load_trace_pools(garbage_traces)
                 tier_map = _trace_tier_map(
                     num_games, trace_free_envs, list(trace_pools)

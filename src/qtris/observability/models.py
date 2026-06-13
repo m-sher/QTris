@@ -226,6 +226,8 @@ class AlphaZeroTrainConfig(BaseModel):
     harvest: bool = True
     trace_tiers: Optional[str] = None
     np_seed: Optional[int] = None
+    curriculum: bool = False
+    curriculum_start: float = 0.0
 
 
 class SingleAgentAZLog(LogPayloadModel):
@@ -268,6 +270,7 @@ class SingleAgentAZLog(LogPayloadModel):
     updates: int
     buffer_size: int
     trace_pool_size: int
+    curriculum_d: float
 
     # Visualization (wrapped at log time)
     board: np.ndarray
@@ -304,5 +307,5 @@ class SingleAgentAZLog(LogPayloadModel):
             "garbage_cancel_frac",
         ),
         "search": ("avg_visits", "dead_rate"),
-        "progress": ("updates", "buffer_size", "trace_pool_size"),
+        "progress": ("updates", "buffer_size", "trace_pool_size", "curriculum_d"),
     }

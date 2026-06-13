@@ -180,6 +180,19 @@ def main() -> None:
         help="seed the numpy RNG (Dirichlet noise, temperature sampling).",
     )
     az.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="trace mode: feedback difficulty curriculum (ramp trace tiers toward a deaths "
+        "deadband) instead of the fixed even tier split.",
+    )
+    az.add_argument(
+        "--curriculum-start",
+        type=float,
+        default=0.0,
+        help="--curriculum: starting difficulty index (0 = weakest tier; pass the last value "
+        "when resuming a chained run).",
+    )
+    az.add_argument(
         "--garbage-chance-min",
         type=float,
         default=0.0,
