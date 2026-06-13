@@ -186,6 +186,44 @@ modulates death rate" (not a collapse trigger by itself at these levels). Next: 
 (ladder@49, 128 sims, 20 gens, seeds 11/17/23/29/41) to test H-D; then chain a trial past
 gen 24 with harvest to test H-C; then a long single-config run for the slow mode.
 
+### 2026-06-12 Seed sweep — COLLAPSE REPRODUCED in clean conditions (128 sims)
+
+ladder_v1 @ forced scale 49.0, no-harvest, 128 sims, 20 gens, varying only np-seed:
+- seed 11 (run sweep-s11): COLLAPSED. onset ~gen 5; gen 19 reward −255, deaths 3.0,
+  entropy 3.37, update_kl ~0.003.
+- seed 17 (run sweep-s17): COLLAPSED. onset ~gen 1; gen 19 reward −300, deaths 3.4,
+  entropy 3.56.
+- seed 23 (sweep-s23): COLLAPSED (gen 19 reward −318, deaths 3.6, entropy 3.6).
+- seed 29 (sweep-s29): COLLAPSED (gen 19 reward −244, deaths 2.9, entropy 3.5).
+- seed 41 (sweep-s41): COLLAPSED (gen 19 reward −245, deaths 2.9, entropy 3.4).
+- **5/5 seeds collapsed at 128 sims.** vs 4/4 healthy at 256 sims (seed 7). Collapse is
+  reliable at 128 sims, independent of seed ⇒ NOT seed-stochastic; SIMULATION BUDGET is the
+  determinant. Onset gen 1-5 every time (~2 min/run = fast fix testbed).
+
+DECISIVE: T2 was the identical (ladder, scale 49) cell and stayed HEALTHY — the only deltas
+are **128 vs 256 sims** and **seed**. Two 128-sim seeds collapse; four 256-sim cells (seed 7)
+are healthy. Historical 093015 (128 sims) also collapsed fastest. ⇒ collapse is reproducible
+without harvest and without a live library. H-C (harvest ratchet) and the "harvest required"
+idea are FALSIFIED for the fast mode.
+
+**New leading hypothesis H-E (improvement-operator strength)**: MCTS at 128 sims is too weak
+to re-rank the policy off its prior; visit targets ≈ prior, the value head can't anchor
+against rising garbage deaths, entropy spirals. PUCT mechanics support this: u =
+c_puct·prior·√N/(1+n) ≈ 1.65 at n=0 vs Q ≈ attack/scale ≈ 0.02-0.4; Q only bites after a
+node accrues visits, and 128 sims over ~10-40 legal moves gives too few visits/move for Q to
+matter. Higher scale shrinks Q further → sims×scale interaction (explains why clean 256 was
+fine but historical 256 + unlucky seed/harvest collapsed). Connects to the prior b2b-era note
+("improvement operator too weak to re-rank a sharp prior; raise sims and/or c_puct").
+
+Fix candidates this implicates, in order: (1) **min-max Q normalization in-tree** (MuZero) —
+makes Q ~O(1) and comparable to u regardless of scale/sims → operator strong even at low
+sims, scale-invariant; (2) higher c_puct (cheap, but doesn't fix Q-too-small); (3) more sims
+(expensive, and historical 256 still collapsed sometimes). Testbed now available: 128
+sims/ladder@49/seed 11 collapses by gen 5 (~2 min) — fast fix-iteration loop.
+
+Next: finish sweep (frequency) → long_control 128/seed7 (isolate sims vs seed; 256/seed7 was
+healthy) → implement min-max Q norm → re-run the collapse testbed.
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
