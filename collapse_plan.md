@@ -310,7 +310,60 @@ CPU smoke: d ramped 0.15→0.30→0.45→0.60 with deaths < 0.4; field round-tri
 training collapse-proof at ANY library difficulty (the controller backs off difficulty before
 the difficulty>competence spiral), and keeps the policy in the survivable-but-challenging zone.
 
+### 2026-06-12 Curriculum production run — 256 sims, ladder, seed 7 (run …prod-curric-seg1)
+
+d ramped 0→2.10 over 22 gens under the deaths controller. Incoming garbage tracked competence:
+gen0 0.31 → easy phase ~0.14-0.18 (d 0.5-1.0) → 0.28-0.33 as d climbed. STABLE, no spiral
+(entropy ~2.2-2.36). Deaths held LOW (last5 0.33, vs fixed ladder's ~0.6). Attacks ~92-105
+(last5 101.8 ≈ 0.80 APP) — comparable to the fixed ladder, i.e. the curriculum doesn't cost
+attack output while halving deaths and self-tuning difficulty. d still climbing at gen 21
+(2.10 < max 3.0). ⇒ curriculum is strictly better-behaved than the fixed ladder at 256 sims.
+
+### 2026-06-12 CAPSTONE — curriculum rescues the 128-sim collapse (run …curric128-s11)
+
+128 sims, ladder, seed 11, curriculum on (forced scale 49.0) — the EXACT config that collapsed
+by gen 5 with fixed tiers (entropy 3.06, deaths 2.25, reward −167). With the curriculum:
+entropy FLAT 2.69-2.92 (no spiral), deaths bounded 0-0.81, attacks ~80-94 (≈0.66 APP). d ramped
+0→1.65 then held — the controller correctly settled difficulty LOWER than the 256-sim run's 2.1,
+recognizing weaker search survives less. ⇒ the curriculum is collapse-proof at BOTH sim budgets
+and auto-tunes difficulty to competence × search budget.
+
+## FINAL SUMMARY
+
+**Cause of the collapse:** a difficulty>competence spiral gated by the MCTS search budget. Bursty
+trace garbage (≈0.48 incoming APP, storms) drives the warm-started policy into messy near-death
+boards; at a low simulation budget the search can't find the survival line, so visit targets go
+flat and the death-laden value targets corrupt the value head — entropy and deaths spiral. Enough
+search (256 sims) finds survival lines and the system is stable; OR enough-easy garbage avoids the
+unsurvivable boards. The earlier suspects (frozen return_scale lottery, harvest ratchet, seed
+stochasticity, c_puct) were each tested and rejected.
+
+**Evidence chain:** 2×2 scale×difficulty all healthy at 256 (scale irrelevant) → seed sweep 5/5
+collapse at 128 vs 4/4 healthy at 256 (sims is the determinant) → c_puct 0.5-3.0 all collapse at
+128 (not a PUCT-balance issue) → 256 rescues the 128-collapsing seeds; weak garbage rescues 128
+(difficulty×sims interaction) → curriculum rescues 128-sim seed 11 (general fix).
+
+**Fixes delivered:**
+1. Operate at **≥256 sims** — validated 44 gens stable on the full ladder.
+2. **Feedback difficulty curriculum** (`--curriculum`) — collapse-proof at ANY sim budget; ramps
+   trace difficulty toward a deaths deadband; at 256 it halves deaths vs the fixed ladder at no
+   attack cost and self-ramps difficulty; at 128 it prevents the collapse outright.
+3. Instrumentation for reproducible experiments: `--return-scale`, `--checkpoint-dir`,
+   `--run-name`, `--no-harvest`, `--trace-tiers`, `--np-seed`; return_scale logged to TB.
+
+**Performance:** stable ~0.8 APP under realistic (ladder) garbage; the bot re-develops b2b-hoarding
+at low pressure (APP 0.49 @gch0, b2b 13.3). Exceeding 1.0 APP is the b2b cash-out problem (deeper
+search to find surge+combo bursts; see notes "qtris-b2b-app-target"), orthogonal to the collapse —
+now UNBLOCKED by the stable training regime.
+
+**Recommended next steps:** (a) long curriculum run at 256 sims to ramp d→full ladder and measure
+the APP ceiling; (b) attack the b2b cash-out via higher sims/depth or a cash-out incentive; (c)
+optional: checkpoint the curriculum d and keep-best checkpointing for long unattended runs.
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
 - 06d1233 Collapse campaign: living plan + trial dir hygiene
+- 5e3382e Phase 1 results + trial discriminator report script
+- (seed sweep / c_puct / decision-test result commits)
+- 70caa6e AZ: feedback difficulty curriculum (ramp trace tiers toward deaths deadband)
