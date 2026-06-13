@@ -17,6 +17,9 @@ from typing import List, Dict, Tuple, Optional
 # Dense placement action space: is_hold(2) * rot(4) * col(10) * spin(4).
 NUM_PLACEMENT_ACTIONS = 320
 
+# Trace garbage above this many rows is treated as a surge and delivered in 3 waves.
+TRACE_SURGE_THRESHOLD = 6
+
 
 class PyTetrisEnv(py_environment.PyEnvironment):
     def __init__(
@@ -98,7 +101,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._vis_board = np.zeros((24, 10), dtype=np.int32)
 
         self._rotation_system = RotationSystem()
-        self._key_sequence_finder = CKeySequenceFinder(self._rotation_system, num_row_tiers=num_row_tiers)
+        self._key_sequence_finder = CKeySequenceFinder(
+            self._rotation_system, num_row_tiers=num_row_tiers
+        )
         self._hole_finder = CHoleFinder()
         self._scorer = Scorer()
 
@@ -161,7 +166,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
                 shape=(NUM_PLACEMENT_ACTIONS,), dtype=np.int32, name="cand_landing_rows"
             )
             self._observation_spec["cand_sequences"] = array_spec.ArraySpec(
-                shape=(NUM_PLACEMENT_ACTIONS, max_len), dtype=np.int64, name="cand_sequences"
+                shape=(NUM_PLACEMENT_ACTIONS, max_len),
+                dtype=np.int64,
+                name="cand_sequences",
             )
 
         self._action_spec = array_spec.BoundedArraySpec(
@@ -193,25 +200,37 @@ class PyTetrisEnv(py_environment.PyEnvironment):
     def reward_spec(self) -> Dict[str, array_spec.ArraySpec]:
         return self._reward_spec
 
-    def _calculate_potential(self, b2b: int, combo: int, height: float, holes: float, skyline: float, bumpiness: float) -> float:
-        
+    def _calculate_potential(
+        self,
+        b2b: int,
+        combo: int,
+        height: float,
+        holes: float,
+        skyline: float,
+        bumpiness: float,
+    ) -> float:
+
         b2b_level = max(0.0, b2b)
         surge_lines = b2b_level if b2b_level >= 4 else 0
         combo_level = max(0.0, combo)
 
         # Main goal (is to blow up and act like I don't know nobody ackackackackack)
         phi_target = (
-            (self._b2b_coef * np.log(1 + b2b_level)) +
-            (self._surge_coef * (1.15 ** surge_lines - 1)) +
-            (self._combo_coef * np.log(1 + combo_level))
+            (self._b2b_coef * np.log(1 + b2b_level))
+            + (self._surge_coef * (1.15**surge_lines - 1))
+            + (self._combo_coef * np.log(1 + combo_level))
         )
 
         # Survival
         height_norm = height / self._max_height
-        phi_safety = self._safety_coef * (height_norm ** 2)
+        phi_safety = self._safety_coef * (height_norm**2)
 
         # Cleanliness
-        phi_clean = (self._hole_coef * holes) + (self._skyline_coef * skyline) + (self._bumpy_coef * bumpiness)
+        phi_clean = (
+            (self._hole_coef * holes)
+            + (self._skyline_coef * skyline)
+            + (self._bumpy_coef * bumpiness)
+        )
 
         return phi_target - phi_safety - phi_clean
 
@@ -294,7 +313,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         garbage_pushed = False
         if self._auto_push_garbage and clear == 0:  # No lines were cleared
             self._tick_garbage_timers()
-            board, vis_board, garbage_pushed = self._push_garbage_to_board(board, vis_board)
+            board, vis_board, garbage_pushed = self._push_garbage_to_board(
+                board, vis_board
+            )
 
         # Check if new garbage should be added to queue
         self._add_to_garbage_queue()
@@ -316,7 +337,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         attack_reward = self._attack_reward * attack
 
         if self._use_shaping:
-            current_phi = self._calculate_potential(b2b_val, combo_val, height_val, holes_val, skyline_val, bumpy_val)
+            current_phi = self._calculate_potential(
+                b2b_val, combo_val, height_val, holes_val, skyline_val, bumpy_val
+            )
             shaping_reward = (self._gamma * current_phi) - self._last_phi
         else:
             current_phi = 0.0
@@ -325,7 +348,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         # Bonus for b2b-maintaining clears (spin/Tetris/PC). Fires only on
         # extension events so it can't be farmed by stalling without clearing.
         if b2b_val > pre_b2b:
-            extension_bonus = self._b2b_extend_flat + self._b2b_extend_scale * max(0, b2b_val)
+            extension_bonus = self._b2b_extend_flat + self._b2b_extend_scale * max(
+                0, b2b_val
+            )
         else:
             extension_bonus = 0.0
 
@@ -338,7 +363,12 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         died = top_out or exceeded_holes or garbage_top_out
 
-        total_reward = attack_reward + shaping_reward + extension_bonus + (self._death_penalty if died else 0.0)
+        total_reward = (
+            attack_reward
+            + shaping_reward
+            + extension_bonus
+            + (self._death_penalty if died else 0.0)
+        )
 
         if self._auto_fill_queue:
             queue = self._fill_queue(queue)
@@ -415,7 +445,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
                         self._lock_piece(active_piece, board, vis_board, queue)
                     )
 
-                    attack, is_spin = self._scorer.judge(active_piece, board, next_board, clear)
+                    attack, is_spin = self._scorer.judge(
+                        active_piece, board, next_board, clear
+                    )
 
         return (
             top_out,
@@ -442,7 +474,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         pieces = np.array([piece.value for piece in pieces], dtype=np.int64)
 
         total_garbage = self._get_total_garbage()
-        stats = np.array([self._scorer._b2b, self._scorer._combo, total_garbage], dtype=np.float32)
+        stats = np.array(
+            [self._scorer._b2b, self._scorer._combo, total_garbage], dtype=np.float32
+        )
 
         if self._pathfinding:
             non_hold_sequences = self._key_sequence_finder.find_all(
@@ -465,7 +499,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
             sequences = np.concatenate([non_hold_sequences, hold_sequences], axis=0)
         else:
-            sequences = np.zeros((160 * self._num_row_tiers, self._max_len), dtype=np.int64)
+            sequences = np.zeros(
+                (160 * self._num_row_tiers, self._max_len), dtype=np.int64
+            )
 
         observation = {
             "board": self._board[..., None],
@@ -483,7 +519,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         return observation
 
-    def _enumerate_placement_candidates(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _enumerate_placement_candidates(
+        self,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Dense-320 placement candidates from pathfinding (the full legal set, no death-pruning
         — death is this env's termination, not a filter, so a spawnable board never yields an
         empty set). cand_scores is a validity sentinel (0.0 valid / -1e30 empty); the net ranks
@@ -497,7 +535,10 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             if self._hold_piece != PieceType.N
             else self._spawn_piece(self._queue[0])
         )
-        for offset, is_hold, piece in ((0, False, self._active_piece), (160, True, hold_piece)):
+        for offset, is_hold, piece in (
+            (0, False, self._active_piece),
+            (160, True, hold_piece),
+        ):
             sq, lr = self._key_sequence_finder.find_placement_candidates(
                 board=self._board, piece=piece, max_len=self._max_len, is_hold=is_hold
             )
@@ -723,8 +764,17 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         if num_garbage_rows > self._garbage_max_event:
             self._garbage_max_event = num_garbage_rows
 
-        # Add garbage instance to queue with push delay timer
-        self._garbage_queue.append((num_garbage_rows, empty_column, self._garbage_push_delay))
+        # Trace surges (>6 rows) arrive as 3 even waves instead of one slab: split into 3
+        # segments with earlier segments carrying the remainder (e.g. 7 -> 3,2,2), sharing the
+        # hole column and push timer. Each push event pops the next wave, so the larger first
+        # segment lands before the smaller ones. Chance-model garbage is unaffected.
+        if self._garbage_trace is not None and num_garbage_rows > TRACE_SURGE_THRESHOLD:
+            base, rem = divmod(num_garbage_rows, 3)
+            segments = [base + (1 if i < rem else 0) for i in range(3)]
+        else:
+            segments = [num_garbage_rows]
+        for seg in segments:
+            self._garbage_queue.append((seg, empty_column, self._garbage_push_delay))
 
     def _tick_garbage_timers(self) -> None:
         """Decrement push_timer on all queued garbage (called on non-clear steps)."""
@@ -770,7 +820,11 @@ class PyTetrisEnv(py_environment.PyEnvironment):
                 self._garbage_queue.pop(0)
             else:
                 # Partially reduce garbage instance
-                self._garbage_queue[0] = (num_garbage_rows - lines_to_remove, empty_column, timer)
+                self._garbage_queue[0] = (
+                    num_garbage_rows - lines_to_remove,
+                    empty_column,
+                    timer,
+                )
                 lines_to_remove = 0
 
     def _get_total_garbage(self) -> int:
