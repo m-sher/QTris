@@ -283,6 +283,33 @@ the weak-garbage health result directly supports.
    difficulty curriculum (ramp env→tier with rolling APP) and re-validate.
 3. Phase 4 long validation + Phase 5 exceed-1.0 as in the original plan.
 
+### 2026-06-12 Fix validation — 256-sim ladder long run (chained, scale 32.4, seed 7)
+
+- seg1 (run …-seg1, gens 0-21): STABLE+improving. entropy 2.46→1.97 (D5 −0.13), deaths
+  0.31-0.7, attacks 74→~105 (≈0.82 APP), reward noisy mean ~40, peak 77.
+- seg2 (resume, gens 22-43): STABLE, no spiral. entropy flat ~1.85-2.0 (D5 +0.07), deaths
+  0.5-1.0, attacks ~97-105, reward oscillating −11..+99 mean ~38. Late dips within the run's
+  normal death-driven variance (gen 6/12 also dipped), entropy did not spiral.
+- **44 gens at 256 sims on the full ladder without collapse** ⇒ the 256-sim fix holds over a
+  long chained run. (Resume does not restore the replay buffer; no adverse transient observed.)
+
+APP eval of the seg1 checkpoint (greedy, 256 sims, measure_attack_dist):
+  gch 0.00 → APP 0.487, b2b 13.3 (HOARDS at zero pressure); gch 0.10 → 0.720; gch 0.20 →
+  0.833. The bot re-developed b2b-hoarding at low pressure (known project failure mode, see
+  notes "qtris-b2b-app-target"). Under realistic trace pressure (~0.48 incoming) in-training
+  attacks ≈105/128 ≈ 0.82 APP. ⇒ the full ladder caps attack output ~0.8 APP; exceeding 1.0
+  is the b2b cash-out problem (orthogonal to the collapse), not a collapse issue.
+
+### 2026-06-12 Curriculum implemented (commit 70caa6e)
+
+Feedback controller: difficulty index d∈[0, n_tiers-1] ramps toward a per-game-deaths deadband
+[0.4, 1.0] (up 0.15 when deaths < 0.4, down 0.40 when > 1.0); `_curriculum_tier_map` spreads
+trace envs from the weakest tier up to ⌈d⌉ so the policy always keeps survivable envs +
+challenge envs. Flags `--curriculum`, `--curriculum-start`; logs `progress/curriculum_d`.
+CPU smoke: d ramped 0.15→0.30→0.45→0.60 with deaths < 0.4; field round-trips. Rationale: makes
+training collapse-proof at ANY library difficulty (the controller backs off difficulty before
+the difficulty>competence spiral), and keeps the policy in the survivable-but-challenging zone.
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
