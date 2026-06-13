@@ -10,3 +10,6 @@ build/
 *.so
 tetrio/
 garbage_traces/
+garbage_traces_snapshots/
+garbage_traces_archive/
+trials/
