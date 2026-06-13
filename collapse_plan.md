@@ -242,6 +242,47 @@ search quality (sims) and/or difficulty. Next tests: (a) 256-robustness at the b
 (is "use 256" a real fix or lucky seed 7?); (b) weak garbage @ 128 sims (does easier garbage
 rescue weak search → curriculum fix?).
 
+### 2026-06-12 Decision tests — DIFFICULTY × SIMS interaction (the mechanism, confirmed)
+
+| run | sims | garbage | seed | entropy slope | deaths g15+ | reward g15-17 | verdict |
+|---|---|---|---|---|---|---|---|
+| r256-s11 | 256 | ladder | 11 | −0.04 | 0.56 | ~40 | HEALTHY (was hard-collapse @128) |
+| r256-s17 | 256 | ladder | 17 | −0.03 | 1.06 | ~−18 | non-collapsed, MARGINAL (no spiral) |
+| weak128-s11 | 128 | weak | 11 | +0.02 | 0.38 | ~56 | HEALTHY (was hard-collapse @128 on ladder) |
+
+The 2×2 of {128,256} × {weak,ladder} now reads: 128+ladder→COLLAPSE; 128+weak→healthy;
+256+ladder→healthy (marginal for the hard seed); 256+weak→healthy (T3/T4). **Collapse needs
+BOTH weak search AND hard garbage.** Either more sims OR easier garbage prevents it. This is
+the confirmed mechanism: the warm-started policy spirals when garbage difficulty exceeds what
+its competence + per-move search budget can survive — weak search finds no survival line in
+the messy boards garbage creates → flat π targets + death-laden value targets → entropy/deaths
+spiral. 256 sims digs deep enough to find survival; weak garbage avoids the unsurvivable boards.
+
+**Collapse FIX = 256 sims** (decisive: rescues both seeds that hard-collapsed at 128; no
+clean 256-sim run has spiraled). Marginal hard-seed performance (s17 reward ~0) ⇒ the full
+ladder at 256 is survivable but not yet strong; reaching/exceeding 1.0 APP points to a
+**difficulty curriculum** (start at survivable garbage, ramp tiers with measured APP), which
+the weak-garbage health result directly supports.
+
+### Hypothesis status (final for diagnosis phase)
+- **H-E (search/competence vs difficulty) — CONFIRMED.** Primary cause.
+- H-B (scale lottery) — REJECTED (scale 32 & 49 both healthy at 256; collapse invariant).
+- H-A (difficulty alone) — PARTIAL: difficulty is a co-factor only in conjunction with weak
+  search; not a trigger by itself at 256 sims.
+- H-C (harvest ratchet) — REJECTED for the fast mode (clean no-harvest collapses; harvest
+  rescan first fires gen 24, after onset).
+- H-D (no stabilization) — SUBSUMED: the spiral is real but its trigger is H-E, not seed noise
+  (5/5 seeds collapse at 128, so it's not a rare unlucky draw).
+- c_puct — NOT an axis (collapse at 0.5–3.0).
+
+### Plan from here
+1. Validate the collapse fix at scale: long 256-sim run on the full ladder (scale 32.4 — best
+   in the 2×2; chained ≤22-gen segments via resume), eval APP per segment. Tests whether
+   256+ladder reaches high APP or plateaus/struggles (s17 suggests marginal).
+2. If it plateaus below ~1.0 APP or hard-tier envs keep dying: implement a competence-coupled
+   difficulty curriculum (ramp env→tier with rolling APP) and re-validate.
+3. Phase 4 long validation + Phase 5 exceed-1.0 as in the original plan.
+
 ## Change log
 
 - f3204ab AZ: trial isolation flags + return_scale logging/override
