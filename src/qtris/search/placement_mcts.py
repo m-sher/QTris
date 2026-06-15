@@ -34,6 +34,7 @@ class MCTSConfig:
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
+    w_b2b: float = 0.0  # potential-based b2b-build shaping; Phi=min(b2b,12), 0=off
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -113,6 +114,7 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
+            w_b2b=self.cfg.w_b2b,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -201,6 +203,7 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
+            w_b2b=self.cfg.w_b2b,
         )
         out = np.zeros(n, dtype=np.float32)
         try:
