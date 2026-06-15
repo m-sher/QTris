@@ -17,8 +17,21 @@ from typing import List, Dict, Tuple, Optional
 # Dense placement action space: is_hold(2) * rot(4) * col(10) * spin(4).
 NUM_PLACEMENT_ACTIONS = 320
 
-# Trace garbage above this many rows is treated as a surge and delivered in 3 waves.
+# Trace garbage above this many rows is treated as a surge (a recorded trace carries no b2b
+# state, so row count is the only available surge signal; live 1v1 attacks use the real flag).
 TRACE_SURGE_THRESHOLD = 6
+
+
+def _split_into_waves(num_rows: int) -> list:
+    """Even 3-wave split with earlier waves carrying the remainder (7 -> 3,2,2), so the larger
+    wave lands first."""
+    base, rem = divmod(num_rows, 3)
+    return [base + (1 if i < rem else 0) for i in range(3)]
+
+
+def _surge_segments(num_rows: int) -> list:
+    """Trace garbage: 3 waves when the row count alone marks a surge (>6), else one slab."""
+    return _split_into_waves(num_rows) if num_rows > TRACE_SURGE_THRESHOLD else [num_rows]
 
 
 class PyTetrisEnv(py_environment.PyEnvironment):
@@ -764,15 +777,24 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         if num_garbage_rows > self._garbage_max_event:
             self._garbage_max_event = num_garbage_rows
 
-        # Trace surges (>6 rows) arrive as 3 even waves instead of one slab: split into 3
-        # segments with earlier segments carrying the remainder (e.g. 7 -> 3,2,2), sharing the
-        # hole column and push timer. Each push event pops the next wave, so the larger first
-        # segment lands before the smaller ones. Chance-model garbage is unaffected.
-        if self._garbage_trace is not None and num_garbage_rows > TRACE_SURGE_THRESHOLD:
-            base, rem = divmod(num_garbage_rows, 3)
-            segments = [base + (1 if i < rem else 0) for i in range(3)]
-        else:
-            segments = [num_garbage_rows]
+        # Trace surges (>6 rows) arrive as 3 even waves instead of one slab (see
+        # _surge_segments); chance-model garbage is never split.
+        segments = (
+            _surge_segments(num_garbage_rows)
+            if self._garbage_trace is not None
+            else [num_garbage_rows]
+        )
+        for seg in segments:
+            self._garbage_queue.append((seg, empty_column, self._garbage_push_delay))
+
+    def _receive_attack(self, num_rows: int, empty_column: int, is_surge: bool) -> None:
+        """Queue an incoming 1v1 attack. An actual b2b surge (the sender's >=4 chain breaking,
+        per Scorer.judge) arrives as 3 even waves (larger first) sharing the hole column + push
+        timer; any other attack lands as one slab. Surge is classified from the sender's clear,
+        not the row count."""
+        if num_rows <= 0:
+            return
+        segments = _split_into_waves(num_rows) if is_surge else [num_rows]
         for seg in segments:
             self._garbage_queue.append((seg, empty_column, self._garbage_push_delay))
 
