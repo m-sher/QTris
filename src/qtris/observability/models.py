@@ -230,6 +230,100 @@ class AlphaZeroTrainConfig(BaseModel):
     curriculum_start: float = 0.0
 
 
+class OneVsOnePlacementAZConfig(BaseModel):
+    """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
+
+    Outcome value target (z in {-1,0,+1}); search shaping w_attack=0.05, w_b2b=0.06;
+    w_death=1, gamma=1, return_scale=1. The learner duels frozen snapshots sampled from a
+    disk pool; both players' trajectories are trained (each labeled with its own outcome)."""
+
+    num_games: int
+    horizon: int
+    max_game_steps: int
+    num_simulations: int
+    c_puct: float
+    dirichlet_alpha: float
+    dirichlet_eps: float
+    temp_moves: int
+    w_b2b: float = 0.0
+    mini_batch_size: int
+    num_epochs: int
+    value_coef: float
+    learning_rate: float
+    replay_capacity: int
+    max_pool_size: int = 30
+    pool_interval: int = 10
+    pool_wr_gate: float = 0.55
+    eval_interval: int = 10
+    eval_games: int = 8
+    resumed: bool = False
+    checkpoint_dir: str = "checkpoints/1v1_placement_az"
+    run_name: Optional[str] = None
+    np_seed: Optional[int] = None
+
+
+class OneVsOneAZLog(LogPayloadModel):
+    """1v1 opponent-pool AlphaZero per-generation metrics."""
+
+    # Optimization
+    policy_loss: float
+    value_loss: float
+    entropy: float
+    policy_kl: float
+    update_kl: float
+    explained_var: float
+    value_mean: float
+
+    # Outcomes / gameplay (over games that completed this generation)
+    avg_game_len: float
+    win_rate: float  # learner's decisive WR vs the sampled pool opponent
+    win_rate_vs_ref: float  # learner's decisive WR vs the frozen gen_0 reference
+    draw_rate: float
+    app: float
+    value_calibration: float
+    avg_b2b: float
+    max_b2b: float
+    avg_combo: float
+    surge_rate: float
+
+    # Search
+    avg_visits: float
+    dead_rate: float
+
+    # Training progress
+    updates: int
+    buffer_size: int
+    completed_games: int
+    pool_size: int
+
+    # Visualization (wrapped at log time)
+    board: np.ndarray
+
+    _image_fields: tuple[str, ...] = ("board",)
+    _tag_groups: dict[str, tuple[str, ...]] = {
+        "optimization": (
+            "policy_loss",
+            "value_loss",
+            "entropy",
+            "policy_kl",
+            "update_kl",
+            "explained_var",
+            "value_mean",
+        ),
+        "outcomes": (
+            "avg_game_len",
+            "win_rate",
+            "win_rate_vs_ref",
+            "draw_rate",
+            "app",
+            "value_calibration",
+        ),
+        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "search": ("avg_visits", "dead_rate"),
+        "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
+    }
+
+
 class SingleAgentAZLog(LogPayloadModel):
     """Single-player AlphaZero per-generation metrics."""
 

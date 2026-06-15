@@ -41,6 +41,43 @@ def main() -> None:
         help="moves collected per game per generation.",
     )
     az.add_argument(
+        "--max-game-steps",
+        type=int,
+        default=512,
+        help="placement 1v1 only: hard per-game placement cap; a game still alive at the "
+        "cap is flushed as a draw.",
+    )
+    az.add_argument(
+        "--max-pool-size",
+        type=int,
+        default=30,
+        help="placement 1v1 only: max opponent-pool snapshots kept on disk (gen_0 pinned).",
+    )
+    az.add_argument(
+        "--pool-interval",
+        type=int,
+        default=10,
+        help="placement 1v1 only: generations between gated opponent-pool snapshots.",
+    )
+    az.add_argument(
+        "--pool-wr-gate",
+        type=float,
+        default=0.55,
+        help="placement 1v1 only: decisive-WR EMA the learner must beat to add a snapshot.",
+    )
+    az.add_argument(
+        "--eval-interval",
+        type=int,
+        default=10,
+        help="placement 1v1 only: generations between win_rate_vs_ref evals (vs frozen gen_0).",
+    )
+    az.add_argument(
+        "--eval-games",
+        type=int,
+        default=8,
+        help="placement 1v1 only: games per win_rate_vs_ref eval.",
+    )
+    az.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(
@@ -113,6 +150,13 @@ def main() -> None:
         type=float,
         default=100.0,
         help="terminal-edge death penalty (raw attack units; also the realized death reward).",
+    )
+    az.add_argument(
+        "--w-b2b",
+        type=float,
+        default=0.06,
+        help="placement 1v1 only: potential-based b2b-build search shaping "
+        "(Phi=min(b2b,12); builds toward surges instead of cashing out; 0=off).",
     )
     az.add_argument(
         "--replay-capacity",
@@ -213,13 +257,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.algo == "az" and (args.family != "placement" or args.mode != "single"):
-        parser.error("--algo az is only supported for `train placement` (single mode).")
+    if args.algo == "az" and args.family != "placement":
+        parser.error("--algo az is only supported for `train placement`.")
 
     if args.mode == "1v1":
         if args.family == "placement":
-            parser.error("placement 1v1 not supported; use `train placement` (single).")
-        from qtris.training._1v1 import main as run
+            if args.algo != "az":
+                parser.error(
+                    "placement 1v1 supports only --algo az (opponent-pool AlphaZero)."
+                )
+            from qtris.training._1v1_placement_az import main as run
+        else:
+            from qtris.training._1v1 import main as run
     elif args.family == "ar":
         from qtris.training.ar import main as run
     elif args.family == "placement":
