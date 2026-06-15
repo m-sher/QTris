@@ -133,6 +133,10 @@ def main(args):
                 c_puct=args.mcts_cpuct,
                 dirichlet_eps=0.0,
                 leaves_per_round=getattr(args, "mcts_leaves", 4),
+                gamma=1.0,
+                w_attack=0.05,
+                w_death=1.0,
+                w_b2b=0.06,
             ),
         )
         if getattr(args, "mcts_sims", 0) > 0
