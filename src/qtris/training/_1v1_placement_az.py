@@ -139,7 +139,9 @@ def _episode(pend, p1_died, p2_died):
         z1, z2 = 1.0, -1.0
     else:
         z1, z2 = 0.0, 0.0
-    rows = [(p, z1) for p in pend["p1"]] + [(p, z2) for p in pend["p2"]]
+    # Third element is the policy mask: the learner's (p1) positions train the policy;
+    # the opponent's (p2) positions train the value only (avoids distilling a frozen policy).
+    rows = [(p, z1, 1.0) for p in pend["p1"]] + [(p, z2, 0.0) for p in pend["p2"]]
     return rows, glen, z1 > 0.0, z1 == 0.0
 
 
@@ -430,17 +432,18 @@ def main(args):
             print(f"Gen {gen}: no games completed; skipping update.", flush=True)
             continue
 
-        boards = np.stack([p["board"] for p, _z in gen_pos]).astype(np.float32)
-        pieces = np.stack([p["pieces"] for p, _z in gen_pos]).astype(np.int64)
-        bcg = np.stack([p["bcg"] for p, _z in gen_pos]).astype(np.float32)
-        cand_pl = np.stack([p["cand_placements"] for p, _z in gen_pos]).astype(
+        boards = np.stack([p["board"] for p, _z, _m in gen_pos]).astype(np.float32)
+        pieces = np.stack([p["pieces"] for p, _z, _m in gen_pos]).astype(np.int64)
+        bcg = np.stack([p["bcg"] for p, _z, _m in gen_pos]).astype(np.float32)
+        cand_pl = np.stack([p["cand_placements"] for p, _z, _m in gen_pos]).astype(
             np.float32
         )
-        cand_mk = np.stack([p["cand_mask"] for p, _z in gen_pos]).astype(bool)
-        pi_tgt = np.stack([p["pi"] for p, _z in gen_pos]).astype(np.float32)
-        value_tgt = np.array([z for _p, z in gen_pos], dtype=np.float32)
-        v_root = np.array([p["v_root"] for p, _z in gen_pos], dtype=np.float32)
-        visits = np.array([p["visits"] for p, _z in gen_pos], dtype=np.float32)
+        cand_mk = np.stack([p["cand_mask"] for p, _z, _m in gen_pos]).astype(bool)
+        pi_tgt = np.stack([p["pi"] for p, _z, _m in gen_pos]).astype(np.float32)
+        value_tgt = np.array([z for _p, z, _m in gen_pos], dtype=np.float32)
+        policy_mask = np.array([m for _p, _z, m in gen_pos], dtype=np.float32)
+        v_root = np.array([p["v_root"] for p, _z, _m in gen_pos], dtype=np.float32)
+        visits = np.array([p["visits"] for p, _z, _m in gen_pos], dtype=np.float32)
 
         replay.append(
             {
@@ -451,6 +454,7 @@ def main(args):
                 "cand_mask": cand_mk,
                 "pi_target": pi_tgt,
                 "value_target": value_tgt,
+                "policy_mask": policy_mask,
             }
         )
         replay_size += n_new
@@ -475,15 +479,16 @@ def main(args):
             .prefetch(tf.data.AUTOTUNE)
         )
 
-        # update_kl over a fixed-size slice of this gen's new positions (one trace).
-        measure_kl = n_new >= mini_batch_size
+        # update_kl over a fixed-size slice of this gen's new LEARNER positions (one trace).
+        learner_idx = np.flatnonzero(policy_mask == 1.0)[:mini_batch_size]
+        measure_kl = len(learner_idx) >= mini_batch_size
         if measure_kl:
             gi = (
-                tf.constant(boards[:mini_batch_size]),
-                tf.constant(pieces[:mini_batch_size]),
-                tf.constant(bcg[:mini_batch_size]),
-                tf.constant(cand_pl[:mini_batch_size]),
-                tf.constant(cand_mk[:mini_batch_size]),
+                tf.constant(boards[learner_idx]),
+                tf.constant(pieces[learner_idx]),
+                tf.constant(bcg[learner_idx]),
+                tf.constant(cand_pl[learner_idx]),
+                tf.constant(cand_mk[learner_idx]),
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
 
@@ -509,7 +514,7 @@ def main(args):
         win_rate = float(np.mean(p1_wins)) if decisive else 0.0
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
-        dec = value_tgt != 0.0
+        dec = (value_tgt != 0.0) & (policy_mask == 1.0)  # learner positions only
         if (
             dec.sum() >= 2
             and np.std(v_root[dec]) > 1e-6
