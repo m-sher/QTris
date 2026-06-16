@@ -78,6 +78,13 @@ def main() -> None:
         help="placement 1v1 only: games per win_rate_vs_ref eval.",
     )
     az.add_argument(
+        "--td-lambda",
+        type=float,
+        default=0.9,
+        help="placement 1v1 only: TD(lambda) for the value target (1=raw outcome z on "
+        "every position; lower bootstraps toward near-term root value).",
+    )
+    az.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(

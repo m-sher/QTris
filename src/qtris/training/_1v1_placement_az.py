@@ -126,10 +126,25 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _episode(pend, p1_died, p2_died):
-    """Stamp each player's realized outcome z on its pending positions and return both
-    players' rows for training. Returns (rows[(pos, z)], game_len, p1_won, is_draw) keyed on
-    the learner's (player-1) outcome, or None if the game collected nothing."""
+def _td_lambda(values, z, lam):
+    """TD(lambda) value targets for one trajectory (gamma=1, no intermediate reward): the
+    terminal position gets the outcome z, each earlier position mixes the next position's
+    root value with the lambda-weighted future return. lam=1 recovers the raw outcome z on
+    every position (the Monte-Carlo target); lower lam bootstraps toward near-term value."""
+    n = len(values)
+    targets = [0.0] * n
+    g = z
+    targets[n - 1] = g
+    for t in range(n - 2, -1, -1):
+        g = (1.0 - lam) * values[t + 1] + lam * g
+        targets[t] = g
+    return targets
+
+
+def _episode(pend, p1_died, p2_died, lam):
+    """Stamp each player's TD(lambda) value targets on its pending positions and return both
+    players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
+    is_draw) keyed on the learner's (player-1) outcome, or None if nothing was collected."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -139,9 +154,14 @@ def _episode(pend, p1_died, p2_died):
         z1, z2 = 1.0, -1.0
     else:
         z1, z2 = 0.0, 0.0
-    # Third element is the policy mask: the learner's (p1) positions train the policy;
-    # the opponent's (p2) positions train the value only (avoids distilling a frozen policy).
-    rows = [(p, z1, 1.0) for p in pend["p1"]] + [(p, z2, 0.0) for p in pend["p2"]]
+    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions train
+    # the value only. Value targets are TD(lambda) bootstrapped from each root value.
+    rows = []
+    for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
+        if not positions:
+            continue
+        targets = _td_lambda([p["v_root"] for p in positions], z, lam)
+        rows += [(p, t, mask) for p, t in zip(positions, targets)]
     return rows, glen, z1 > 0.0, z1 == 0.0
 
 
@@ -264,6 +284,7 @@ def main(args):
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
+    td_lambda = getattr(args, "td_lambda", 0.9)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -342,6 +363,7 @@ def main(args):
         pool_wr_gate=pool_wr_gate,
         eval_interval=eval_interval,
         eval_games=eval_games,
+        td_lambda=td_lambda,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -399,7 +421,7 @@ def main(args):
                 e1, e2 = pairs[g]
 
                 if a["dead"] or b["dead"]:
-                    ep = _episode(pending[g], a["dead"], b["dead"])
+                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -412,7 +434,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died)
+                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
