@@ -177,7 +177,7 @@ def collect_dagger(
     return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
 
 
-def collect_dagger_placement(
+def rollout_placement_states(
     p_model,
     seed,
     num_steps,
@@ -193,15 +193,16 @@ def collect_dagger_placement(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    searcher,
     headless=False,
     log_every=1000,
 ):
-    """Roll the placement policy forward; label each visited state with the search
-    placement target.
-
-    The search is run once per state and serves both roles: its candidates feed the
-    policy's ranking (which drives the env - the DAgger invariant) and its scores
-    form the label (gen_placement's 128-slot target)."""
+    """Phase 1: roll the placement policy forward (the DAgger invariant) and record each
+    visited state. A state dict holds the net inputs (board/pieces/bcg) and the oracle search
+    inputs (board_occ/active/hold/queue/b2b/combo/total_garbage/push_delay), so phase 2 can be
+    labeled later from any source. The oracle is run here only to supply the candidate set the
+    policy ranks to drive the env; its output is cached on the state so phase 2 need not
+    re-search these states. Returns (states, stats)."""
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -221,9 +222,8 @@ def collect_dagger_placement(
     )
 
     time_step = env.reset()
-    searcher = CB2BSearch()
 
-    transitions = []
+    states = []
     beam_dead = 0
     deaths = 0
     max_b2b = 0
@@ -231,9 +231,7 @@ def collect_dagger_placement(
     total_attack = 0.0
     pieces_placed = 0
 
-    pbar = tqdm(
-        range(num_steps), disable=headless, desc="dagger placement", unit="step"
-    )
+    pbar = tqdm(range(num_steps), disable=headless, desc="dagger rollout", unit="step")
     for step in pbar:
         obs = time_step.observation
         board = obs["board"].astype(np.float32)
@@ -243,16 +241,22 @@ def collect_dagger_placement(
         active = env._active_piece.piece_type.value
         hold = env._hold_piece.value
         queue = np.array([p.value for p in env._queue], dtype=np.int32)
+        board_occ = env._board.copy()
+        b2b = int(env._scorer._b2b)
+        combo = int(env._scorer._combo)
+        total_garbage = int(env._get_total_garbage())
+        push_delay = env._garbage_push_delay
+
         best_action, best_seq, cand_actions, cand_scores, cand_seqs, cand_rows = (
             searcher.search_with_scores(
-                board=env._board,
+                board=board_occ,
                 active_piece=active,
                 hold_piece=hold,
                 queue=queue,
-                b2b=int(env._scorer._b2b),
-                combo=int(env._scorer._combo),
-                total_garbage=int(env._get_total_garbage()),
-                garbage_push_delay=env._garbage_push_delay,
+                b2b=b2b,
+                combo=combo,
+                total_garbage=total_garbage,
+                garbage_push_delay=push_delay,
                 search_depth=search_depth,
                 beam_width=beam_width,
                 max_len=max_len,
@@ -265,14 +269,27 @@ def collect_dagger_placement(
             time_step = env.reset()
             continue
 
-        row_norm = env._board.shape[0] - 1
-        # Label: the search's placement target for this state.
-        placements_t, scores_t = build_placement_target(
-            cand_actions, cand_scores, cand_rows, active, hold, int(queue[0]), row_norm
+        states.append(
+            {
+                "board": board,
+                "pieces": pieces,
+                "bcg": bcg,
+                "board_occ": board_occ,
+                "active": active,
+                "hold": hold,
+                "queue": queue,
+                "b2b": b2b,
+                "combo": combo,
+                "total_garbage": total_garbage,
+                "push_delay": push_delay,
+                "cand_actions": cand_actions,
+                "cand_scores": cand_scores,
+                "cand_rows": cand_rows,
+            }
         )
-        transitions.append((board, pieces, bcg, placements_t, scores_t))
 
-        # Policy ranks the same candidates; its choice drives the env.
+        # Policy ranks the same candidates; its choice drives the env (DAgger invariant).
+        row_norm = board_occ.shape[0] - 1
         infer_pl, infer_mask, infer_seqs = build_placement_inference(
             cand_actions,
             cand_scores,
@@ -313,7 +330,7 @@ def collect_dagger_placement(
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
             app = total_attack / max(pieces_placed, 1)
             stats = (
-                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"states={len(states)} beam_dead={beam_dead} "
                 f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
                 f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
@@ -323,7 +340,120 @@ def collect_dagger_placement(
                 pbar.set_postfix_str(stats)
 
     app = total_attack / max(pieces_placed, 1)
-    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
+    return states, {
+        "beam_dead": beam_dead,
+        "deaths": deaths,
+        "max_b2b": max_b2b,
+        "policy_disagrees": policy_disagrees,
+        "app": app,
+    }
+
+
+def label_placement_states(searcher, states, search_depth, beam_width, max_len):
+    """Phase 2: run the oracle on collected placement states and build the 128-slot target.
+
+    Source-agnostic - `states` may come from rollout_placement_states OR from AZ self-play
+    (saved with the same keys). Each state is a dict of the oracle search inputs (board_occ,
+    active, hold, queue, b2b, combo, total_garbage, push_delay) plus the net inputs (board,
+    pieces, bcg). A state that already carries the oracle output (cand_actions/cand_scores/
+    cand_rows, e.g. from a rollout) reuses it; otherwise the oracle is run here. Returns
+    (transitions, beam_dead); each transition is (board, pieces, bcg, placements_t, scores_t)."""
+    transitions = []
+    beam_dead = 0
+    for s in states:
+        cand_scores = s.get("cand_scores")
+        if cand_scores is not None:
+            cand_actions, cand_rows = s["cand_actions"], s["cand_rows"]
+        else:
+            best_action, _bseq, cand_actions, cand_scores, _cseq, cand_rows = (
+                searcher.search_with_scores(
+                    board=s["board_occ"],
+                    active_piece=s["active"],
+                    hold_piece=s["hold"],
+                    queue=s["queue"],
+                    b2b=s["b2b"],
+                    combo=s["combo"],
+                    total_garbage=s["total_garbage"],
+                    garbage_push_delay=s["push_delay"],
+                    search_depth=search_depth,
+                    beam_width=beam_width,
+                    max_len=max_len,
+                )
+            )
+            if best_action < 0:
+                beam_dead += 1
+                continue
+        if len(cand_scores) == 0:
+            beam_dead += 1
+            continue
+        row_norm = s["board_occ"].shape[0] - 1
+        placements_t, scores_t = build_placement_target(
+            cand_actions,
+            cand_scores,
+            cand_rows,
+            s["active"],
+            s["hold"],
+            int(s["queue"][0]),
+            row_norm,
+        )
+        transitions.append((s["board"], s["pieces"], s["bcg"], placements_t, scores_t))
+    return transitions, beam_dead
+
+
+def collect_dagger_placement(
+    p_model,
+    seed,
+    num_steps,
+    search_depth,
+    beam_width,
+    queue_size,
+    max_len,
+    max_height,
+    max_holes,
+    max_steps_env,
+    garbage_chance,
+    garbage_min,
+    garbage_max,
+    garbage_push_delay,
+    num_row_tiers,
+    headless=False,
+    log_every=1000,
+):
+    """Placement DAgger as the two phases composed: roll the policy to collect states, then
+    label them with the oracle. The same searcher is shared; rollout states carry their cached
+    oracle output so labeling does not re-search them."""
+    searcher = CB2BSearch()
+    states, stats = rollout_placement_states(
+        p_model,
+        seed,
+        num_steps,
+        search_depth,
+        beam_width,
+        queue_size,
+        max_len,
+        max_height,
+        max_holes,
+        max_steps_env,
+        garbage_chance,
+        garbage_min,
+        garbage_max,
+        garbage_push_delay,
+        num_row_tiers,
+        searcher,
+        headless=headless,
+        log_every=log_every,
+    )
+    transitions, label_beam_dead = label_placement_states(
+        searcher, states, search_depth, beam_width, max_len
+    )
+    return (
+        transitions,
+        stats["beam_dead"] + label_beam_dead,
+        stats["deaths"],
+        stats["max_b2b"],
+        stats["policy_disagrees"],
+        stats["app"],
+    )
 
 
 def _build_ar_model(args):
