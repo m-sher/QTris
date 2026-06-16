@@ -217,7 +217,7 @@ def _sample_pool(opp_net, pool_dir):
         return None
     weights = list(range(1, len(snaps) + 1))  # newest weighted highest
     chosen = random.choices(snaps, weights=weights, k=1)[0]
-    opp_net.load_weights(chosen)
+    opp_net.load_weights(chosen).expect_partial()
     return os.path.basename(chosen)
 
 
@@ -340,7 +340,7 @@ def main(args):
         print(f"Seeded opponent pool gen_0 at {pool_dir}.", flush=True)
     # Reference net = frozen gen_0, used by the win_rate_vs_ref eval.
     ref_prefix = os.path.join(pool_dir, "gen_0")
-    ref_net.load_weights(ref_prefix)
+    ref_net.load_weights(ref_prefix).expect_partial()
 
     resumed = manager.latest_checkpoint is not None
     config = OneVsOnePlacementAZConfig(
