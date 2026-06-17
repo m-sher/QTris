@@ -26,6 +26,7 @@ from tensorflow import keras
 
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from qtris.data.dagger import _state_record, save_states
 from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.backend import finish, init_run, log_step
@@ -291,6 +292,7 @@ def main(args):
     pool_dir = os.path.join(checkpoint_dir, "pool")
     run_name = getattr(args, "run_name", None)
     np_seed = getattr(args, "np_seed", None)
+    save_states_dir = getattr(args, "save_states", None)
 
     if np_seed is not None:
         np.random.seed(np_seed)
@@ -368,6 +370,7 @@ def main(args):
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
         np_seed=np_seed,
+        save_states=save_states_dir,
     )
     run = init_run(
         project="Tetris",
@@ -402,6 +405,7 @@ def main(args):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
         gen_pos = []  # (pos, z) for both players' positions whose game completed this gen
+        state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
         total_attack = total_placements = 0
@@ -425,6 +429,9 @@ def main(args):
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
+                    if save_states_dir:
+                        state_recs.append(_state_record(e1))
+                        state_recs.append(_state_record(e2))
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
@@ -448,6 +455,12 @@ def main(args):
                 e2._reset()
                 move_count[g] = 0
                 pending[g] = {"p1": [], "p2": []}
+
+        if save_states_dir and state_recs:
+            os.makedirs(save_states_dir, exist_ok=True)
+            shard = os.path.join(save_states_dir, f"shard_{gen}")
+            save_states(state_recs, shard)
+            print(f"Gen {gen}: saved {len(state_recs)} states to {shard}", flush=True)
 
         n_new = len(gen_pos)
         if n_new == 0:

@@ -261,6 +261,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
     np_seed: Optional[int] = None
+    save_states: Optional[str] = None
 
 
 class OneVsOneAZLog(LogPayloadModel):

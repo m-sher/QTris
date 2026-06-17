@@ -214,6 +214,12 @@ def main() -> None:
         help="suffix for the TensorBoard run dir.",
     )
     az.add_argument(
+        "--save-states",
+        default=None,
+        help="placement 1v1 only: dir to dump per-generation state shards (both players) for "
+        "offline oracle relabeling via `datagen placement --label-states`.",
+    )
+    az.add_argument(
         "--no-harvest",
         action="store_true",
         help="trace mode: don't write this run's attacks into 99_recent and don't "
