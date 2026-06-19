@@ -229,8 +229,8 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
             self._env1._receive_attack(int(net2), self._random.randint(0, 9), surge2)
 
         # --- Death checks ---
-        p1_died = top_out1 or np.any(self._env1._board[:24 - self._max_height] != 0.0)
-        p2_died = top_out2 or np.any(self._env2._board[:24 - self._max_height] != 0.0)
+        p1_died = top_out1 or self._env1._is_top_out(self._env1._board)
+        p2_died = top_out2 or self._env2._is_top_out(self._env2._board)
 
         h1, holes1, sky1, bump1 = self._env1._board_stats(self._env1._board)
         if self._max_holes is not None and holes1 > self._max_holes:
