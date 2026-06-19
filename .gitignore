@@ -10,8 +10,5 @@ build/
 *.so
 tetrio/
 garbage_traces/
-garbage_traces_snapshots/
-garbage_traces_archive/
-trials/
 notes.md
-garbage_traces_mut/
+data/
