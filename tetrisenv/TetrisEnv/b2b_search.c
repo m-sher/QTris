@@ -15,6 +15,15 @@
 #define VISIBLE_ROWS 20
 #define BOARD_COLS 10
 #define ROTATIONS 4
+
+// Spawn / top-out geometry (matches PyTetrisEnv): pieces spawn at row SPAWN_ROW just above the
+// 20-visible field; top-out = the piece-agnostic 7-cell spawn box (rows 17-18) is blocked OR a
+// column reaches DEATH_HEIGHT_CAP. HEIGHT_REF is the beam's height-gradient anchor (= death
+// height). NET_ROWS is the model-visible slice (bottom 24) emitted to the net.
+#define SPAWN_ROW 17
+#define DEATH_HEIGHT_CAP 35
+#define HEIGHT_REF 22
+#define NET_ROWS 24
 #define SPIN_STATES 2
 
 // Keys (same as pathfinder.c / Moves.py)
@@ -140,15 +149,31 @@ static inline void compute_col_heights_full(const uint16_t* board, int board_hei
     }
 }
 
-// Cheap pre-prune: a placement that would leave the effective height inside
-// the death zone is unconditionally worse than any alternative; skip it
-// before paying for the full compute_board_stats pass in evaluate_state.
+// Top-out, shared by the env/MCTS/beam: the piece-agnostic 7-cell spawn box is blocked
+// (row 17 cols 3-5 = 0x38, row 18 cols 3-6 = 0x78), or the tallest column hits the cap.
+static inline bool spawn_envelope_blocked_c(const uint16_t* board) {
+    return (board[SPAWN_ROW] & 0x38) || (board[SPAWN_ROW + 1] & 0x78);
+}
+
+static inline int max_stack_height_c(const uint16_t* board, int board_height) {
+    for (int r = 0; r < board_height; r++) if (board[r]) return board_height - r;
+    return 0;
+}
+
+static inline bool board_topped_out(const uint16_t* board, int board_height) {
+    return spawn_envelope_blocked_c(board)
+           || max_stack_height_c(board, board_height) >= DEATH_HEIGHT_CAP;
+}
+
+// Cheap pre-prune: a placement that tops out (spawn box blocked or a column at the cap) is
+// unconditionally worse than any alternative; skip it before paying for compute_board_stats.
 static inline bool placement_is_dead(const SearchState* s, int board_height) {
     int mh = 0;
     for (int c = 0; c < BOARD_COLS; c++) {
         if (s->col_heights[c] > mh) mh = s->col_heights[c];
     }
-    return (mh + s->garbage_remaining) >= (board_height - 4);
+    return spawn_envelope_blocked_c(s->board)
+           || (mh + s->garbage_remaining) >= DEATH_HEIGHT_CAP;
 }
 
 // ============================================================
@@ -881,8 +906,8 @@ static int find_placements(const uint16_t* board_rows, int board_height,
         meta[i].parent = -1;
     }
 
-    // Spawn position: row=0, col=3, rot=0
-    int start_r = 0, start_c = 3, start_rot = 0;
+    // Spawn position: row=SPAWN_ROW, col=3, rot=0 (just above the visible field)
+    int start_r = SPAWN_ROW, start_c = 3, start_rot = 0;
     int start_state = b2b_encode_state(start_r, start_c, start_rot, piece_type);
 
     if (start_state == -1 ||
@@ -900,7 +925,9 @@ static int find_placements(const uint16_t* board_rows, int board_height,
     meta[start_state].delta_col = 0;
 
     int num_placements = 0;
-    int visible_start = board_height - VISIBLE_ROWS;
+    // Emit every placement reachable from the spawn line down; evaluate_state's envelope/cap
+    // death prunes the topped-out ones (so no live placement is dropped for the oracle).
+    int visible_start = SPAWN_ROW;
 
     while (head != tail) {
         int curr_state = queue[head++];
@@ -1774,21 +1801,20 @@ static float evaluate_state(const SearchState* state, int board_height,
     BoardStats bs = compute_board_stats(state->board, board_height,
                                         upcoming, num_upcoming, state->col_heights);
 
-    int max_allowed = board_height - 4; // rows 0..3 are the death zone
     int effective_h = bs.max_height + state->garbage_remaining;
 
-    // Instant death - inviolable floor.
-    if (effective_h >= max_allowed) {
+    // Instant death - inviolable floor: spawn box blocked, or a column at the height cap.
+    if (spawn_envelope_blocked_c(state->board) || effective_h >= DEATH_HEIGHT_CAP) {
         return -1e6f;
     }
 
-    float h_ratio = (float)effective_h / (float)max_allowed;
+    float h_ratio = (float)effective_h / (float)HEIGHT_REF;
 
     // ── Survival wall ─────────────────────────────────────────
     // Near-death cliff: within NEAR_DEATH_ZONE rows of the death line, a penalty
     // that beats every positive term combined (slack=0 => the next block kills us).
-    if (effective_h >= max_allowed - NEAR_DEATH_ZONE) {
-        int slack = max_allowed - 1 - effective_h;
+    if (effective_h >= HEIGHT_REF - NEAR_DEATH_ZONE) {
+        int slack = HEIGHT_REF - 1 - effective_h;
         score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
     // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
@@ -1895,18 +1921,20 @@ static void evaluate_state_decompose(const SearchState* state, int board_height,
     BoardStats bs = compute_board_stats(state->board, board_height,
                                         upcoming, num_upcoming, state->col_heights);
 
-    int max_allowed = board_height - 4;
     int effective_h = bs.max_height + state->garbage_remaining;
-    if (effective_h >= max_allowed) { d[D_HEIGHT] = -1e6f; return; }
+    if (spawn_envelope_blocked_c(state->board) || effective_h >= DEATH_HEIGHT_CAP) {
+        d[D_HEIGHT] = -1e6f;
+        return;
+    }
 
-    float h_ratio = (float)effective_h / (float)max_allowed;
+    float h_ratio = (float)effective_h / (float)HEIGHT_REF;
     float hole_mult = 1.0f + 0.5f * h_ratio;
 
     // Survival
     d[D_HEIGHT] = -W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio
                   - W_AVG_HEIGHT * bs.avg_height;
-    if (effective_h >= max_allowed - NEAR_DEATH_ZONE) {
-        int slack = max_allowed - 1 - effective_h;
+    if (effective_h >= HEIGHT_REF - NEAR_DEATH_ZONE) {
+        int slack = HEIGHT_REF - 1 - effective_h;
         d[D_NEAR_DEATH] = -W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
     d[D_BUMPINESS] = -W_BUMPINESS * bs.bumpiness_exempted;
@@ -2977,7 +3005,7 @@ void b2b_run_eval_games(
         // --- Init game state ---
         uint16_t board[BOARD_ROWS];
         memset(board, 0, sizeof(board));
-        int bh = 24; // standard board height
+        int bh = 40; // board height (20 visible + 20 buffer)
 
         PieceQueue pq;
         pq_init(&pq, cfg.seed, queue_size);
@@ -3199,9 +3227,9 @@ void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
 
 #define MCAP 128          // candidate capacity (slots)
 #define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
-#define MBH 24            // board height
+#define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
-#define MROWNORM 23       // landing-row normaliser (board_height - 1)
+#define MROWNORM 39       // landing-row normaliser (board_height - 1)
 #define MCLIP 10.0f       // reward clip
 #define MAX_PATH 1024
 #define MAX_LPR 16        // max leaves collected per tree per round (intra-tree batching)
@@ -3217,7 +3245,7 @@ typedef struct {
 } MState;
 
 typedef struct {
-    int board_height, queue_size, max_height, max_holes, garbage_push_delay;
+    int board_height, queue_size, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
     float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
     int max_len;
@@ -3334,9 +3362,7 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     float attack = ar.attack;
     s->active = mstate_pop(s);
 
-    int top_rows = cfg->board_height - cfg->max_height;
-    bool top_out = false;
-    for (int r = 0; r < top_rows; r++) if (s->board[r] != 0) { top_out = true; break; }
+    bool top_out = board_topped_out(s->board, cfg->board_height);
 
     if (attack > 0) garb_cancel(s->gq, &s->gcnt, (int)attack);
     if (cfg->auto_push_garbage && clears == 0) {
@@ -3347,8 +3373,7 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     if (cfg->auto_push_garbage && cfg->garbage_push_delay == 0)
         garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt);
 
-    bool garbage_top_out = false;
-    for (int r = 0; r < top_rows; r++) if (s->board[r] != 0) { garbage_top_out = true; break; }
+    bool garbage_top_out = board_topped_out(s->board, cfg->board_height);
     bool exceeded_holes = false;
     if (cfg->max_holes >= 0)
         exceeded_holes = mcts_count_holes(s->board, cfg->board_height) > cfg->max_holes;
@@ -3364,10 +3389,10 @@ static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
     static __thread int64_t seq_scratch[160 * 32];   // discarded; max_len<=32
     const uint16_t* board = node->st.board;
     int ml = cfg->max_len;
-    find_placement_candidates_c(board, cfg->board_height, node->st.active, 0, 3, 0,
+    find_placement_candidates_c(board, cfg->board_height, node->st.active, SPAWN_ROW, 3, 0,
                                 ml, 0, seq_scratch, lr_nh);
     int holdpiece = node->st.hold != PIECE_N ? node->st.hold : node->st.queue[0];
-    find_placement_candidates_c(board, cfg->board_height, holdpiece, 0, 3, 0,
+    find_placement_candidates_c(board, cfg->board_height, holdpiece, SPAWN_ROW, 3, 0,
                                 ml, 1, seq_scratch, lr_h);
     node->n_legal = 0;
     int cnt = 0;
@@ -3395,9 +3420,11 @@ static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
 static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* board_out,
                               int64_t* pieces_out, float* bcg_out, float* pls_out, uint8_t* mask_out) {
     const MState* s = &node->st;
-    for (int r = 0; r < cfg->board_height; r++)
+    // Emit only the model-visible slice (bottom NET_ROWS rows) so the net contract stays (24,10,1).
+    for (int r = 0; r < NET_ROWS; r++)
         for (int c = 0; c < BOARD_COLS; c++)
-            board_out[r * BOARD_COLS + c] = (float)((s->board[r] >> c) & 1);
+            board_out[r * BOARD_COLS + c] =
+                (float)((s->board[(cfg->board_height - NET_ROWS) + r] >> c) & 1);
     pieces_out[0] = s->active; pieces_out[1] = s->hold;
     for (int i = 0; i < cfg->queue_size; i++) pieces_out[2 + i] = s->queue[i];
     bcg_out[0] = (float)s->b2b; bcg_out[1] = (float)s->combo;
@@ -3556,7 +3583,7 @@ static void msoftmax_into_prior(MNode* node, const float* logits) {
 // Exported protocol
 // ============================================================
 
-void* mcts_create(int num_trees, int board_height, int queue_size, int max_height,
+void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
@@ -3564,7 +3591,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size, int max_heigh
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
-      find_placement_candidates_c(b, board_height, PIECE_I, 0, 3, 0, max_len, 0, sq, lr); }
+      find_placement_candidates_c(b, board_height, PIECE_I, SPAWN_ROW, 3, 0, max_len, 0, sq, lr); }
     MEngine* e = (MEngine*)calloc(1, sizeof(MEngine));
     e->num_trees = num_trees;
     e->max_nodes = max_nodes;
@@ -3584,7 +3611,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size, int max_heigh
     e->prev_omp_threads = omp_get_max_threads();
     omp_set_num_threads(e->n_threads);
     e->cfg.board_height = board_height; e->cfg.queue_size = queue_size;
-    e->cfg.max_height = max_height; e->cfg.max_holes = max_holes;
+    e->cfg.max_holes = max_holes;
     e->cfg.garbage_push_delay = garbage_push_delay;
     e->cfg.auto_push_garbage = auto_push_garbage; e->cfg.auto_fill_queue = auto_fill_queue;
     e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
@@ -3645,7 +3672,7 @@ int mcts_collect_roots(void* h, float* boards, int64_t* pieces, float* bcg,
     for (int i = 0; i < e->num_trees; i++) {
         MTree* t = &e->trees[i];
         if (!t->alive) continue;
-        mcts_fill_request(t->root, cfg, &boards[(size_t)nv * cfg->board_height * BOARD_COLS],
+        mcts_fill_request(t->root, cfg, &boards[(size_t)nv * NET_ROWS * BOARD_COLS],
                           &pieces[(size_t)nv * pw], &bcg[(size_t)nv * 3],
                           &pls[(size_t)nv * MCAP * 18], &masks[(size_t)nv * MCAP]);
         tree_ids[nv] = i; nv++;
@@ -3693,7 +3720,7 @@ int mcts_collect_leaves(void* h, float* boards, int64_t* pieces, float* bcg,
         MTree* t = &e->trees[i];
         if (!t->alive) continue;
         for (int p = 0; p < t->n_pending; p++) {
-            mcts_fill_request(t->pending[p], cfg, &boards[(size_t)nv * cfg->board_height * BOARD_COLS],
+            mcts_fill_request(t->pending[p], cfg, &boards[(size_t)nv * NET_ROWS * BOARD_COLS],
                               &pieces[(size_t)nv * pw], &bcg[(size_t)nv * 3],
                               &pls[(size_t)nv * MCAP * 18], &masks[(size_t)nv * MCAP]);
             tree_ids[nv] = i; nv++;
@@ -3779,14 +3806,14 @@ int mcts_debug_enum(const uint16_t* board, int board_height, int active, int hol
 }
 
 // Apply one step to a serialized state; returns raw attack, writes post-step state out.
-float mcts_debug_step(uint16_t* board, int board_height, int max_height, int max_holes,
+float mcts_debug_step(uint16_t* board, int board_height, int max_holes,
                       int garbage_push_delay, int queue_size,
                       int* active, int* hold, int* queue, int* qlen,
                       int64_t* rng_t, int* pending, int* pending_len,
                       int* garb_rows, int* garb_col, int* garb_timer, int* gcnt,
                       int* b2b, int* combo, const int* desc, int* out_terminal) {
     MConfig cfg; memset(&cfg, 0, sizeof(cfg));
-    cfg.board_height = board_height; cfg.max_height = max_height; cfg.max_holes = max_holes;
+    cfg.board_height = board_height; cfg.max_holes = max_holes;
     cfg.garbage_push_delay = garbage_push_delay; cfg.queue_size = queue_size;
     cfg.auto_push_garbage = 1; cfg.auto_fill_queue = 1;
     b2b_init_pieces();

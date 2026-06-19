@@ -16,7 +16,7 @@ from TetrisEnv.Moves import Keys
 from TetrisEnv.Pieces import PieceType
 from qtris.data.placement_features import build_placement_inference
 
-ROW_NORM = 23  # board height - 1 (24-row board)
+ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 _FORCED_DROP = np.array([Keys.START, Keys.HARD_DROP] + [Keys.PAD] * 13, dtype=np.int64)
 
 
@@ -149,7 +149,9 @@ def net_input_from_env(env):
         + [p.value for p in env._queue],
         dtype=np.int64,
     )
-    board = env._board[None, ..., None].astype(np.float32)  # (1,24,10,1)
+    board = env._board[-24:][None, ..., None].astype(
+        np.float32
+    )  # (1,24,10,1) visible slice
     bcg = np.array(
         [env._scorer._b2b, env._scorer._combo, env._get_total_garbage()],
         dtype=np.float32,
