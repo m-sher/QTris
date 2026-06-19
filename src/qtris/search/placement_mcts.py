@@ -98,9 +98,8 @@ class PlacementMCTS:
         e0 = real_envs[0]
         engine = CMCTS(
             n,
-            board_height=24,
+            board_height=40,
             queue_size=e0._queue_size,
-            max_height=e0._max_height,
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),
@@ -187,9 +186,8 @@ class PlacementMCTS:
         e0 = real_envs[0]
         engine = CMCTS(
             n,
-            board_height=24,
+            board_height=40,
             queue_size=e0._queue_size,
-            max_height=e0._max_height,
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),

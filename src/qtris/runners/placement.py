@@ -18,7 +18,7 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from qtris.data.placement_features import build_placement_inference
 
-ROW_NORM = 23  # board height - 1
+ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 
 
 class PlacementRunner:
