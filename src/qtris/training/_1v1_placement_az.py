@@ -116,7 +116,7 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     # Death = own-placement death, garbage-induced top-out (re-check after the push), or holes.
     died = []
     for env, i in ((env1, info[0]), (env2, info[1])):
-        d = i["died"] or bool(np.any(env._board[: 24 - env._max_height] != 0.0))
+        d = i["died"] or env._is_top_out(env._board)
         if env._max_holes is not None:
             _h, holes, _s, _b = env._board_stats(env._board)
             d = d or holes > env._max_holes
