@@ -14,7 +14,9 @@ generation of updates) are logged to watch optimization divergence. Observabilit
 `qtris.observability`.
 """
 
+import time
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
@@ -42,6 +44,9 @@ def _flat(arr, sel):
 @tf.function
 def train_step(net, batch, value_coef):
     cand_mask = batch["cand_mask"]
+    # Optional per-position policy weight (1=train policy here, 0=value-only). Absent for
+    # solo AZ, so the policy terms reduce to a plain mean and behavior is unchanged.
+    pm = batch.get("policy_mask")
     with tf.GradientTape() as tape:
         logits, values = net(
             (
@@ -55,9 +60,12 @@ def train_step(net, batch, value_coef):
         )
         masked = tf.where(cand_mask, logits, tf.constant(-1e9, tf.float32))
         log_probs = tf.nn.log_softmax(masked, axis=-1)
-        policy_loss = tf.reduce_mean(
-            -tf.reduce_sum(batch["pi_target"] * log_probs, axis=-1)
-        )
+        ce = -tf.reduce_sum(batch["pi_target"] * log_probs, axis=-1)
+        if pm is not None:
+            pnorm = tf.reduce_sum(pm) + 1e-8
+            policy_loss = tf.reduce_sum(pm * ce) / pnorm
+        else:
+            policy_loss = tf.reduce_mean(ce)
         value_loss = tf.reduce_mean((values[:, 0] - batch["value_target"]) ** 2)
         loss = policy_loss + value_coef * value_loss
 
@@ -65,12 +73,16 @@ def train_step(net, batch, value_coef):
     net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
 
     probs = tf.nn.softmax(masked, axis=-1)
-    entropy = tf.reduce_mean(-tf.reduce_sum(probs * log_probs, axis=-1))
+    ent = -tf.reduce_sum(probs * log_probs, axis=-1)
     # Exact KL(pi_target || p_net) = CE - H(pi_target); zero target arms contribute 0.
     tgt = batch["pi_target"]
-    tgt_entropy = tf.reduce_mean(
-        -tf.reduce_sum(tgt * tf.math.log(tgt + 1e-12), axis=-1)
-    )
+    tgt_ent = -tf.reduce_sum(tgt * tf.math.log(tgt + 1e-12), axis=-1)
+    if pm is not None:
+        entropy = tf.reduce_sum(pm * ent) / pnorm
+        tgt_entropy = tf.reduce_sum(pm * tgt_ent) / pnorm
+    else:
+        entropy = tf.reduce_mean(ent)
+        tgt_entropy = tf.reduce_mean(tgt_ent)
     ret_var = tf.math.reduce_variance(batch["value_target"])
     res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
@@ -94,12 +106,85 @@ def _gen_log_probs(net, boards, pieces, bcg, cand_pl, cand_mk):
     return tf.nn.log_softmax(masked, axis=-1)
 
 
-def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len, args):
+def _load_trace_pools(traces_dir):
+    """Load the trace library: tier subdirs of .npy attack streams, sorted name =
+    difficulty order (e.g. 00_sims16 .. 03_sims256, 99_recent). Skips empty tiers."""
+    pools = {}
+    for tier in sorted(p for p in Path(traces_dir).iterdir() if p.is_dir()):
+        traces = [np.load(f) for f in sorted(tier.glob("*.npy"))]
+        traces = [t for t in traces if t.size > 0]
+        if traces:
+            pools[tier.name] = traces
+    return pools
+
+
+def _trace_tier_map(num_games, trace_free_envs, tiers):
+    """env index -> tier name (None = garbage-free). First trace_free_envs envs are
+    free; the rest split evenly across tiers, weakest (first sorted name) first."""
+    mapping = {}
+    rest = num_games - trace_free_envs
+    for i in range(num_games):
+        if i < trace_free_envs or not tiers:
+            mapping[i] = None
+        else:
+            mapping[i] = tiers[(i - trace_free_envs) * len(tiers) // rest]
+    return mapping
+
+
+# Difficulty-curriculum controller: keep per-game deaths inside [LO, HI] by ramping a
+# continuous difficulty index. Asymmetric (back off faster than ramp up) so a hard generation
+# is corrected before the spiral that weak search + over-hard garbage produces (the collapse
+# mechanism: difficulty above what competence + sims can survive).
+CUR_DEATH_LO, CUR_DEATH_HI = 0.4, 1.0
+CUR_STEP_UP, CUR_STEP_DOWN = 0.15, 0.40
+
+
+def _curriculum_tier_map(num_games, trace_free_envs, tiers, difficulty):
+    """env index -> tier name under the feedback curriculum. Trace envs face a spread of tiers
+    from the weakest up to the current difficulty ceiling, so the policy always keeps some
+    survivable envs to learn from plus harder ones to push competence. difficulty is a
+    continuous index in [0, len(tiers)-1]."""
+    mapping = {}
+    n_trace = max(num_games - trace_free_envs, 1)
+    top = max(len(tiers) - 1, 0)
+    for i in range(num_games):
+        if i < trace_free_envs or not tiers:
+            mapping[i] = None
+        else:
+            j = i - trace_free_envs
+            idx = round(difficulty * j / max(n_trace - 1, 1))
+            mapping[i] = tiers[min(max(idx, 0), top)]
+    return mapping
+
+
+def _build_envs(
+    num_games,
+    queue_size,
+    max_holes,
+    max_height,
+    max_steps,
+    max_len,
+    args,
+    trace_pools=None,
+):
     gmin = getattr(args, "garbage_chance_min", 0.0)
     gmax = getattr(args, "garbage_chance_max", 0.2)
     chances = [
         gmin + (gmax - gmin) * i / max(num_games - 1, 1) for i in range(num_games)
     ]
+    tier_map = {}
+    if trace_pools:
+        tier_map = _trace_tier_map(
+            num_games, getattr(args, "trace_free_envs", 2), list(trace_pools)
+        )
+        chances = [0.0] * num_games  # pressure comes from traces (or nothing)
+        print(
+            "Trace garbage tiers: "
+            + ", ".join(f"{t}({len(p)})" for t, p in trace_pools.items())
+            + " | env map: "
+            + " ".join(str(tier_map[i] or "-") for i in range(num_games)),
+            flush=True,
+        )
     return [
         PyTetrisEnv(
             queue_size=queue_size,
@@ -115,6 +200,7 @@ def _build_envs(num_games, queue_size, max_holes, max_height, max_steps, max_len
             garbage_max=getattr(args, "garbage_rows_max", 4),
             num_row_tiers=2,
             placement_candidates=False,
+            garbage_traces=trace_pools.get(tier_map[i]) if tier_map.get(i) else None,
         )
         for i in range(num_games)
     ]
@@ -166,6 +252,28 @@ def main(args):
     learning_rate = getattr(args, "learning_rate", 1e-4)
     replay_capacity = getattr(args, "replay_capacity", 25_000)
     gae_lambda = getattr(args, "gae_lambda", 1.0)
+    garbage_traces = getattr(args, "garbage_traces", None)
+    trace_free_envs = getattr(args, "trace_free_envs", 2)
+    trace_harvest_cap = getattr(args, "trace_harvest_cap", 256)
+    return_scale_override = getattr(args, "return_scale", None)
+    checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
+    run_name = getattr(args, "run_name", None)
+    no_harvest = getattr(args, "no_harvest", False)
+    trace_tiers = getattr(args, "trace_tiers", None)
+    np_seed = getattr(args, "np_seed", None)
+    curriculum = getattr(args, "curriculum", False)
+    cur_d = float(getattr(args, "curriculum_start", 0.0))
+
+    if np_seed is not None:
+        np.random.seed(np_seed)
+
+    trace_pools = _load_trace_pools(garbage_traces) if garbage_traces else None
+    if trace_pools is not None and trace_tiers:
+        keep = trace_tiers.split(",")
+        missing = [t for t in keep if t not in trace_pools]
+        if missing:
+            raise SystemExit(f"--trace-tiers: unknown tiers {missing}.")
+        trace_pools = {t: trace_pools[t] for t in sorted(keep)}
 
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
@@ -178,25 +286,6 @@ def main(args):
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
-    )
-
-    config = AlphaZeroTrainConfig(
-        num_games=num_games,
-        horizon=horizon,
-        num_simulations=cfg.num_simulations,
-        c_puct=cfg.c_puct,
-        gamma=cfg.gamma,
-        dirichlet_alpha=cfg.dirichlet_alpha,
-        dirichlet_eps=cfg.dirichlet_eps,
-        temp_moves=cfg.temp_moves,
-        w_attack=cfg.w_attack,
-        w_death=cfg.w_death,
-        mini_batch_size=mini_batch_size,
-        num_epochs=num_epochs,
-        value_coef=value_coef,
-        learning_rate=learning_rate,
-        replay_capacity=replay_capacity,
-        gae_lambda=gae_lambda,
     )
 
     net = PlacementPolicyValueNet(
@@ -230,9 +319,7 @@ def main(args):
         optimizer=optimizer,
         return_scale=return_scale,
     )
-    manager = tf.train.CheckpointManager(
-        checkpoint, "checkpoints/placement_az", max_to_keep=3
-    )
+    manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=3)
     if manager.latest_checkpoint:
         checkpoint.restore(manager.latest_checkpoint).expect_partial()
         print(f"Resumed AZ checkpoint {manager.latest_checkpoint}.", flush=True)
@@ -253,6 +340,7 @@ def main(args):
         max_steps=None,  # a cap counts truncations as deaths and cuts the bootstrap
         max_len=max_len,
         args=args,
+        trace_pools=trace_pools,
     )
     mcts = PlacementMCTS(net, cfg)
     searcher = (
@@ -266,31 +354,84 @@ def main(args):
         env._reset()
     move_count = np.zeros(num_games, dtype=np.int64)
 
+    # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
+    # whose return_scale was restored above, or when --return-scale forces it), then FROZEN:
+    # AZ normalizes nothing (bounded z target) and MuZero min-max normalizes Q in-tree; a
+    # running return-variance EMA is a PPO-style trick, and its loosening (variance up ->
+    # scale up -> death penalty down) amplified every collapse.
+    resumed = manager.latest_checkpoint is not None
+    if not resumed:
+        if return_scale_override is not None:
+            return_scale.assign(return_scale_override)
+            print(
+                f"Forced return_scale={float(return_scale):.3f} (frozen).", flush=True
+            )
+        else:
+            return_scale.assign(
+                tf.sqrt(
+                    _estimate_return_var(
+                        mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
+                    )
+                )
+            )
+            print(
+                f"Seeded return_scale={float(return_scale):.3f} from warm-start (frozen).",
+                flush=True,
+            )
+            for env in envs:
+                env._reset()
+            move_count = np.zeros(num_games, dtype=np.int64)
+    elif return_scale_override is not None:
+        print(
+            f"--return-scale {return_scale_override} ignored: resumed ckpt keeps "
+            f"return_scale={float(return_scale):.3f}.",
+            flush=True,
+        )
+
+    config = AlphaZeroTrainConfig(
+        num_games=num_games,
+        horizon=horizon,
+        num_simulations=cfg.num_simulations,
+        c_puct=cfg.c_puct,
+        gamma=cfg.gamma,
+        dirichlet_alpha=cfg.dirichlet_alpha,
+        dirichlet_eps=cfg.dirichlet_eps,
+        temp_moves=cfg.temp_moves,
+        w_attack=cfg.w_attack,
+        w_death=cfg.w_death,
+        mini_batch_size=mini_batch_size,
+        num_epochs=num_epochs,
+        value_coef=value_coef,
+        learning_rate=learning_rate,
+        replay_capacity=replay_capacity,
+        gae_lambda=gae_lambda,
+        garbage_traces=garbage_traces,
+        trace_free_envs=trace_free_envs,
+        return_scale=float(return_scale),
+        resumed=resumed,
+        checkpoint_dir=checkpoint_dir,
+        run_name=run_name,
+        harvest=not no_harvest,
+        trace_tiers=trace_tiers,
+        np_seed=np_seed,
+        curriculum=curriculum,
+        curriculum_start=cur_d,
+    )
     run = init_run(
         project="Tetris",
         config=config,
         wandb_mirror=getattr(args, "wandb", False),
+        run_name=run_name,
     )
-    # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
-    # whose return_scale was restored above), then FROZEN: AZ normalizes nothing (bounded
-    # z target) and MuZero min-max normalizes Q in-tree; a running return-variance EMA is a
-    # PPO-style trick, and its loosening (variance up -> scale up -> death penalty down)
-    # amplified every collapse.
-    if not manager.latest_checkpoint:
-        return_scale.assign(
-            tf.sqrt(
-                _estimate_return_var(
-                    mcts, envs, searcher, forced_drop, cfg.gamma, horizon, num_games
-                )
-            )
+
+    # Difficulty curriculum: start the trace envs at the configured difficulty floor (the fixed
+    # spread in _build_envs is the d=full assignment); the per-gen controller ramps from here.
+    if curriculum and trace_pools:
+        cmap = _curriculum_tier_map(
+            num_games, trace_free_envs, list(trace_pools), cur_d
         )
-        print(
-            f"Seeded return_scale={float(return_scale):.3f} from warm-start (frozen).",
-            flush=True,
-        )
-        for env in envs:
-            env._reset()
-        move_count = np.zeros(num_games, dtype=np.int64)
+        for i, e in enumerate(envs):
+            e._garbage_traces = trace_pools.get(cmap[i]) if cmap.get(i) else None
 
     # Multi-generation replay of storable positions (decorrelates the tiny on-policy batches
     # and resists drift off the pretrained init). Each entry is one generation's numpy arrays;
@@ -317,6 +458,11 @@ def main(args):
         dones = np.zeros((horizon, num_games), dtype=np.float32)
         storable = np.zeros((horizon, num_games), dtype=bool)
         visits = np.zeros((horizon, num_games), dtype=np.float32)
+
+        garb_before = [
+            (e._garbage_spawned_rows, e._garbage_spawned_events, e._garbage_pushed_rows)
+            for e in envs
+        ]
 
         scale = float(return_scale)
         for t in range(horizon):
@@ -463,6 +609,36 @@ def main(args):
         deaths_per_game = dones.sum(axis=0)
         b2b_series = bcg[..., 0][storable]
         combo_series = bcg[..., 1][storable]
+
+        # Feedback curriculum: ramp difficulty toward the deaths deadband, reassign env tiers.
+        if curriculum and trace_pools:
+            ad = float(deaths_per_game.mean())
+            if ad < CUR_DEATH_LO:
+                cur_d = min(cur_d + CUR_STEP_UP, len(trace_pools) - 1)
+            elif ad > CUR_DEATH_HI:
+                cur_d = max(cur_d - CUR_STEP_DOWN, 0.0)
+            cmap = _curriculum_tier_map(
+                num_games, trace_free_envs, list(trace_pools), cur_d
+            )
+            for i, e in enumerate(envs):
+                e._garbage_traces = trace_pools.get(cmap[i]) if cmap.get(i) else None
+
+        # Incoming-garbage telemetry from the env counters (per-gen deltas).
+        # cancel_frac is approximate per gen: pending-queue carryover and reset-dropped
+        # entries land on the "cancelled" side; accurate in the long run.
+        g_rows = sum(e._garbage_spawned_rows for e in envs) - sum(
+            b[0] for b in garb_before
+        )
+        g_events = sum(e._garbage_spawned_events for e in envs) - sum(
+            b[1] for b in garb_before
+        )
+        g_pushed = sum(e._garbage_pushed_rows for e in envs) - sum(
+            b[2] for b in garb_before
+        )
+        garbage_in_max = max(e._garbage_max_event for e in envs)
+        for e in envs:
+            e._garbage_max_event = 0
+        n_steps = horizon * num_games
         if gen % 1 == 0:
             log_step(
                 SingleAgentAZLog(
@@ -474,6 +650,7 @@ def main(args):
                     explained_var=step_out["explained_var"],
                     value_mean=step_out["value_mean"],
                     return_var=gen_return_var,
+                    return_scale=scale,
                     avg_total_reward=float(rewards.sum(axis=0).mean()),
                     avg_attacks=float(attacks.sum(axis=0).mean()),
                     avg_clears=float(clears.sum(axis=0).mean()),
@@ -485,6 +662,15 @@ def main(args):
                     surge_rate=float((b2b_series >= 4).mean())
                     if b2b_series.size
                     else 0.0,
+                    garbage_in_app=g_rows / n_steps,
+                    garbage_in_rate=g_events / n_steps,
+                    garbage_in_chunk=g_rows / g_events if g_events else 0.0,
+                    garbage_in_max=float(garbage_in_max),
+                    garbage_cancel_frac=1.0 - g_pushed / g_rows if g_rows else 0.0,
+                    trace_pool_size=sum(len(p) for p in trace_pools.values())
+                    if trace_pools
+                    else 0,
+                    curriculum_d=cur_d if curriculum else 0.0,
                     avg_visits=float(visits[storable].mean())
                     if storable.any()
                     else 0.0,
@@ -503,6 +689,28 @@ def main(args):
                 f"Deaths: {float(deaths_per_game.mean()):1.2f} | Updates: {updates}",
                 flush=True,
             )
+        if trace_pools is not None and not no_harvest:
+            # Rolling harvest: this gen's attack streams become future opponents.
+            # Timestamp prefix keeps eviction chronological across resumes.
+            recent = Path(garbage_traces) / "99_recent"
+            recent.mkdir(exist_ok=True)
+            stamp = int(time.time())
+            for i in range(num_games):
+                if attacks[:, i].any():
+                    np.save(recent / f"{stamp}_g{gen:06d}_e{i:02d}.npy", attacks[:, i])
+            files = sorted(recent.glob("*.npy"))
+            for f in files[: max(0, len(files) - trace_harvest_cap)]:
+                f.unlink()
+            if gen % 25 == 24 and not curriculum:
+                trace_pools = _load_trace_pools(garbage_traces)
+                tier_map = _trace_tier_map(
+                    num_games, trace_free_envs, list(trace_pools)
+                )
+                for i, e in enumerate(envs):
+                    e._garbage_traces = (
+                        trace_pools.get(tier_map[i]) if tier_map.get(i) else None
+                    )
+
         if gen % 5 == 0:
             manager.save()
 

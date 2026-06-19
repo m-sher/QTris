@@ -28,6 +28,7 @@ class PlacementPolicyValueNet(QtrisModelBase):
         num_layers,
         dropout_rate,
         candidate_capacity=CANDIDATE_CAPACITY,
+        value_activation=None,
     ):
         super().__init__()
 
@@ -107,7 +108,9 @@ class PlacementPolicyValueNet(QtrisModelBase):
             ],
             name="value_trunk",
         )
-        self.value_top = layers.Dense(1, name="value")
+        # Linear by default (solo AZ / BC regress unbounded return). 1v1 AZ passes
+        # "tanh" to bound the value to the outcome target's [-1, 1].
+        self.value_top = layers.Dense(1, activation=value_activation, name="value")
 
     def process_obs(self, inputs, training=False):
         """Encoder pass returning the piece latent AND the board patch latent.

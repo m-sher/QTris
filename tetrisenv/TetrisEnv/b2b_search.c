@@ -3219,7 +3219,7 @@ typedef struct {
 typedef struct {
     int board_height, queue_size, max_height, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
-    float c_puct, gamma, w_attack, w_death, return_scale;
+    float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -3472,6 +3472,13 @@ static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
     }
 }
 
+// b2b potential for the w_b2b shaping: Phi = min(max(0, b2b), CAP).
+#define B2B_POTENTIAL_CAP 12
+static inline float b2b_phi(int b2b) {
+    int p = b2b > 0 ? b2b : 0;
+    return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
+}
+
 static float mcts_scale_reward(const MConfig* cfg, float reward) {
     float r = reward / (cfg->return_scale + 1e-8f);
     if (r > MCLIP) r = MCLIP; else if (r < -MCLIP) r = -MCLIP;
@@ -3510,13 +3517,21 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
+                    // Terminal Phi=0: refund the parent's b2b potential.
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
-                        - cfg->w_death / (cfg->return_scale + 1e-8f);
+                        - cfg->w_death / (cfg->return_scale + 1e-8f)
+                        - cfg->w_b2b * b2b_phi(node->st.b2b)
+                              / (cfg->return_scale + 1e-8f);
                     mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
-                node->edge_reward[slot] = mcts_scale_reward(cfg, cfg->w_attack * attack);
+                // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)).
+                node->edge_reward[slot] =
+                    mcts_scale_reward(cfg, cfg->w_attack * attack)
+                    + cfg->w_b2b
+                          * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                          / (cfg->return_scale + 1e-8f);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3545,7 +3560,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size, int max_heigh
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss) {
+                  int leaves_per_round, float vloss, float w_b2b) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3574,7 +3589,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size, int max_heigh
     e->cfg.auto_push_garbage = auto_push_garbage; e->cfg.auto_fill_queue = auto_fill_queue;
     e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
-    e->cfg.return_scale = return_scale;
+    e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;

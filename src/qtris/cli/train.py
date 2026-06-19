@@ -41,6 +41,50 @@ def main() -> None:
         help="moves collected per game per generation.",
     )
     az.add_argument(
+        "--max-game-steps",
+        type=int,
+        default=512,
+        help="placement 1v1 only: hard per-game placement cap; a game still alive at the "
+        "cap is flushed as a draw.",
+    )
+    az.add_argument(
+        "--max-pool-size",
+        type=int,
+        default=30,
+        help="placement 1v1 only: max opponent-pool snapshots kept on disk (gen_0 pinned).",
+    )
+    az.add_argument(
+        "--pool-interval",
+        type=int,
+        default=10,
+        help="placement 1v1 only: generations between gated opponent-pool snapshots.",
+    )
+    az.add_argument(
+        "--pool-wr-gate",
+        type=float,
+        default=0.55,
+        help="placement 1v1 only: decisive-WR EMA the learner must beat to add a snapshot.",
+    )
+    az.add_argument(
+        "--eval-interval",
+        type=int,
+        default=10,
+        help="placement 1v1 only: generations between win_rate_vs_ref evals (vs frozen gen_0).",
+    )
+    az.add_argument(
+        "--eval-games",
+        type=int,
+        default=8,
+        help="placement 1v1 only: games per win_rate_vs_ref eval.",
+    )
+    az.add_argument(
+        "--td-lambda",
+        type=float,
+        default=0.9,
+        help="placement 1v1 only: TD(lambda) for the value target (1=raw outcome z on "
+        "every position; lower bootstraps toward near-term root value).",
+    )
+    az.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(
@@ -115,6 +159,13 @@ def main() -> None:
         help="terminal-edge death penalty (raw attack units; also the realized death reward).",
     )
     az.add_argument(
+        "--w-b2b",
+        type=float,
+        default=0.06,
+        help="placement 1v1 only: potential-based b2b-build search shaping "
+        "(Phi=min(b2b,12); builds toward surges instead of cashing out; 0=off).",
+    )
+    az.add_argument(
         "--replay-capacity",
         type=int,
         default=25_000,
@@ -125,6 +176,78 @@ def main() -> None:
         type=float,
         default=1.0,
         help="lambda for the value-target return (1.0 = MC return + horizon bootstrap).",
+    )
+    az.add_argument(
+        "--garbage-traces",
+        type=str,
+        default=None,
+        help="trace-replay garbage: dir of tier subdirs of .npy attack streams "
+        "(sorted tier name = difficulty). Replaces the chance sweep when set.",
+    )
+    az.add_argument(
+        "--trace-free-envs",
+        type=int,
+        default=2,
+        help="number of garbage-free envs when --garbage-traces is set.",
+    )
+    az.add_argument(
+        "--trace-harvest-cap",
+        type=int,
+        default=256,
+        help="max files kept in the rolling 99_recent harvest tier.",
+    )
+    az.add_argument(
+        "--return-scale",
+        type=float,
+        default=None,
+        help="force the frozen return_scale (skips the warm-start seeding rollout; "
+        "ignored when resuming a checkpoint).",
+    )
+    az.add_argument(
+        "--checkpoint-dir",
+        default="checkpoints/placement_az",
+        help="AZ checkpoint directory (a non-empty dir silently resumes).",
+    )
+    az.add_argument(
+        "--run-name",
+        default=None,
+        help="suffix for the TensorBoard run dir.",
+    )
+    az.add_argument(
+        "--save-states",
+        default=None,
+        help="placement 1v1 only: dir to dump per-generation state shards (both players) for "
+        "offline oracle relabeling via `datagen placement --label-states`.",
+    )
+    az.add_argument(
+        "--no-harvest",
+        action="store_true",
+        help="trace mode: don't write this run's attacks into 99_recent and don't "
+        "rescan the library (static pools for the whole run).",
+    )
+    az.add_argument(
+        "--trace-tiers",
+        default=None,
+        help="comma-separated tier subdirs to load from --garbage-traces (default: all).",
+    )
+    az.add_argument(
+        "--np-seed",
+        type=int,
+        default=None,
+        help="seed the numpy RNG (Dirichlet noise, temperature sampling).",
+    )
+    az.add_argument(
+        "--curriculum",
+        action="store_true",
+        help="trace mode: feedback difficulty curriculum (ramp trace tiers toward a deaths "
+        "deadband) instead of the fixed even tier split.",
+    )
+    az.add_argument(
+        "--curriculum-start",
+        type=float,
+        default=0.0,
+        help="--curriculum: starting difficulty index (0 = weakest tier; pass the last value "
+        "when resuming a chained run).",
     )
     az.add_argument(
         "--garbage-chance-min",
@@ -147,13 +270,18 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.algo == "az" and (args.family != "placement" or args.mode != "single"):
-        parser.error("--algo az is only supported for `train placement` (single mode).")
+    if args.algo == "az" and args.family != "placement":
+        parser.error("--algo az is only supported for `train placement`.")
 
     if args.mode == "1v1":
         if args.family == "placement":
-            parser.error("placement 1v1 not supported; use `train placement` (single).")
-        from qtris.training._1v1 import main as run
+            if args.algo != "az":
+                parser.error(
+                    "placement 1v1 supports only --algo az (opponent-pool AlphaZero)."
+                )
+            from qtris.training._1v1_placement_az import main as run
+        else:
+            from qtris.training._1v1 import main as run
     elif args.family == "ar":
         from qtris.training.ar import main as run
     elif args.family == "placement":

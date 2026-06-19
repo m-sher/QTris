@@ -149,7 +149,9 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         return self._reward_spec
 
     def _step_one_player(self, env, action):
-        """Execute an action for one player. Returns (top_out, clear, attack, net_attack, is_spin)."""
+        """Execute an action for one player. Returns
+        (top_out, clear, attack, net_attack, is_spin, is_surge)."""
+        pre_b2b = env._scorer._b2b
         (
             top_out, clear, attack, is_spin,
             board, vis_board, active_piece, hold_piece, queue,
@@ -157,6 +159,9 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
             env._board, env._vis_board, env._active_piece,
             env._hold_piece, env._queue, action,
         )
+
+        # Actual surge = a b2b chain (>=4) broken by this clear (Scorer.judge releases it).
+        is_surge = clear > 0 and pre_b2b >= 4 and env._scorer._b2b == -1
 
         # Cancel own pending garbage with outgoing attack
         pending_before = env._get_total_garbage()
@@ -172,7 +177,7 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         env._hold_piece = hold_piece
         env._queue = queue
 
-        return top_out, clear, float(attack), float(net_attack), is_spin
+        return top_out, clear, float(attack), float(net_attack), is_spin, is_surge
 
     def _reset(self) -> ts.TimeStep:
         self._env1._reset()
@@ -194,8 +199,12 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         action2 = combined_action[15:]
 
         # --- Execute both players' actions ---
-        top_out1, clear1, attack1, net1, _ = self._step_one_player(self._env1, action1)
-        top_out2, clear2, attack2, net2, _ = self._step_one_player(self._env2, action2)
+        top_out1, clear1, attack1, net1, _, surge1 = self._step_one_player(
+            self._env1, action1
+        )
+        top_out2, clear2, attack2, net2, _, surge2 = self._step_one_player(
+            self._env2, action2
+        )
 
         # --- Push existing garbage for non-clearing players ---
         # Push BEFORE injecting new attacks so incoming garbage always sits
@@ -213,13 +222,11 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
                 self._env2._push_garbage_to_board(self._env2._board, self._env2._vis_board)
             )
 
-        # --- Inject net attacks as garbage into opponent ---
+        # --- Inject net attacks as garbage into opponent (real surges split into waves) ---
         if net1 > 0:
-            col = self._random.randint(0, 9)
-            self._env2._garbage_queue.append((int(net1), col, self._env2._garbage_push_delay))
+            self._env2._receive_attack(int(net1), self._random.randint(0, 9), surge1)
         if net2 > 0:
-            col = self._random.randint(0, 9)
-            self._env1._garbage_queue.append((int(net2), col, self._env1._garbage_push_delay))
+            self._env1._receive_attack(int(net2), self._random.randint(0, 9), surge2)
 
         # --- Death checks ---
         p1_died = top_out1 or np.any(self._env1._board[:24 - self._max_height] != 0.0)

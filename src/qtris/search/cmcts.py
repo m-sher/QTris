@@ -20,6 +20,7 @@ import TetrisEnv
 CANDIDATE_CAPACITY = 128
 FEATURE_DIM = 18
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
+_MAX_GARB_ENTRIES = 32  # mirrors MAX_GARB_ENTRIES in b2b_search.c (fixed root gq array)
 
 _F32 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags="C_CONTIGUOUS")
 _I32 = np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
@@ -39,6 +40,7 @@ def _load_lib():
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
+        + [ctypes.c_float]  # w_b2b
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_set_root.argtypes = [
@@ -99,6 +101,7 @@ class CMCTS:
         num_simulations=64,
         leaves_per_round=4,
         vloss=1.0,
+        w_b2b=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -130,6 +133,7 @@ class CMCTS:
             + 1,  # arena: root + ~one node per simulation (+L headroom)
             self.lpr,
             vloss,
+            w_b2b,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
@@ -150,7 +154,9 @@ class CMCTS:
         board = np.ascontiguousarray((occ * _COL_BITS).sum(axis=1, dtype=np.uint16))
         queue = np.array([p.value for p in env._queue], np.int32)
         pending = np.array([p.value for p in env._next_bag], np.int32)
-        gq = env._garbage_queue
+        # Clamp to the C root's fixed capacity; the front entries are the imminent ones a
+        # search can reach (surge segmentation can lengthen the queue past the cap).
+        gq = env._garbage_queue[:_MAX_GARB_ENTRIES]
         gr = np.array([g[0] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
         gc = np.array([g[1] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
         gt = np.array([g[2] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
