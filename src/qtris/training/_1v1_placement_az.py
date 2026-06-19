@@ -36,7 +36,7 @@ from qtris.search.placement_search import placement_step
 from qtris.training.placement_az import _gen_log_probs, train_step
 
 
-def _build_game_pairs(num_games, queue_size, max_holes, max_height, max_len, seed0=123):
+def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
     """List of (env1, env2) raw PyTetrisEnv pairs built like PyTetris1v1Env's sub-envs:
     no random garbage, manual garbage push + queue fill, no env step cap (the loop caps
     games). Both envs of a pair share a seed (mirror-fair pieces); games differ."""
@@ -45,7 +45,6 @@ def _build_game_pairs(num_games, queue_size, max_holes, max_height, max_len, see
         kw = dict(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=None,
             max_len=max_len,
             pathfinding=False,
@@ -227,7 +226,7 @@ def _eval_vs_ref(
 ):
     """Decisive win rate of the learner (player 1) vs the frozen reference (player 2), both
     greedy, played to completion on fresh games. Batched over still-live games each round."""
-    pairs = _build_game_pairs(n_games, queue_size, 50, 18, max_len, seed0=9001)
+    pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
     for e1, e2 in pairs:
         e1._reset()
         e2._reset()
@@ -379,7 +378,7 @@ def main(args):
         run_name=run_name,
     )
 
-    pairs = _build_game_pairs(num_games, queue_size, 50, 18, max_len)
+    pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
     mcts = PlacementMCTS(net, cfg)
     opp_mcts = PlacementMCTS(opp_net, cfg)
     ref_mcts = PlacementMCTS(ref_net, cfg)

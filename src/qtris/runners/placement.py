@@ -26,7 +26,6 @@ class PlacementRunner:
         self,
         queue_size: int,
         max_holes: Optional[int],
-        max_height: int,
         max_steps: int,
         max_len: int,
         num_steps: int,
@@ -56,7 +55,6 @@ class PlacementRunner:
             lambda idx=i: PyTetrisEnv(
                 queue_size=queue_size,
                 max_holes=max_holes,
-                max_height=max_height,
                 max_steps=max_steps,
                 max_len=max_len,
                 pathfinding=True,

@@ -23,7 +23,6 @@ class ModelConfig(BaseModel):
 
 class EnvConfig(BaseModel):
     max_holes: int = 50
-    max_height: int = 18
     max_steps: int = 512
     garbage_chance: float = 0.15
     garbage_min: int = 1

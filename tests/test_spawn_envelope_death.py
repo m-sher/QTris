@@ -7,7 +7,6 @@ def _make_env() -> PyTetrisEnv:
     return PyTetrisEnv(
         queue_size=5,
         max_holes=50,
-        max_height=18,
         max_steps=None,
         max_len=15,
         pathfinding=False,

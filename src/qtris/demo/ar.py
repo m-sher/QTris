@@ -36,7 +36,6 @@ max_len = 15
 num_steps = 500
 queue_size = 5
 max_holes = 100
-max_height = 18
 
 
 def main(args):
@@ -68,7 +67,6 @@ def main(args):
     py_env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=num_steps,
         max_len=max_len,
         pathfinding=True,

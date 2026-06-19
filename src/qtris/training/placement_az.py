@@ -161,7 +161,6 @@ def _build_envs(
     num_games,
     queue_size,
     max_holes,
-    max_height,
     max_steps,
     max_len,
     args,
@@ -189,7 +188,6 @@ def _build_envs(
         PyTetrisEnv(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=max_steps,
             max_len=max_len,
             pathfinding=False,
@@ -336,7 +334,6 @@ def main(args):
         num_games,
         queue_size,
         max_holes=50,
-        max_height=18,
         max_steps=None,  # a cap counts truncations as deaths and cuts the bootstrap
         max_len=max_len,
         args=args,
