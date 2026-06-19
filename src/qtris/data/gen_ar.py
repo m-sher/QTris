@@ -37,7 +37,6 @@ def collect(
     beam_width,
     queue_size,
     max_len,
-    max_height,
     max_holes,
     max_steps_env,
     garbage_chance,
@@ -58,7 +57,6 @@ def collect(
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=max_steps_env,
         max_len=max_len,
         pathfinding=True,
@@ -147,7 +145,6 @@ def main(args):
     datagen_cfg = DataGenConfig()
     queue_size = 5
     max_len = 15
-    max_height = 18
     max_holes = 50
     max_steps_env = 9999999
     garbage_chance = 0.15
@@ -197,7 +194,6 @@ def main(args):
         beam_width=datagen_cfg.beam_width,
         queue_size=queue_size,
         max_len=max_len,
-        max_height=max_height,
         max_holes=max_holes,
         max_steps_env=max_steps_env,
         garbage_chance=garbage_chance,

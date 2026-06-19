@@ -54,7 +54,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self,
         queue_size: int,
         max_holes: Optional[int],
-        max_height: int,
         max_steps: Optional[int],
         max_len: int,
         pathfinding: bool,
@@ -88,7 +87,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._b2b_extend_scale = b2b_extend_scale
 
         self._max_holes = max_holes
-        self._max_height = max_height
         self._max_steps = max_steps
         self._max_len = max_len
         self._pathfinding = pathfinding
@@ -912,5 +910,5 @@ class PyTetrisEnv(py_environment.PyEnvironment):
     def _is_top_out(self, board: np.ndarray) -> bool:
         """Top-out = the spawn box is blocked, or a column reaches the height cap. Two
         separate checks; `board` is the full (40,10) occupancy board."""
-        max_height = int(np.max(self._get_heights(board)))
-        return spawn_envelope_blocked(board) or max_height >= DEATH_HEIGHT_CAP
+        max_h = int(np.max(self._get_heights(board)))
+        return spawn_envelope_blocked(board) or max_h >= DEATH_HEIGHT_CAP

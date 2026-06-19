@@ -32,7 +32,6 @@ num_envs = 64
 num_collection_steps = 256
 queue_size = 5
 max_holes = 50
-max_height = 18
 max_steps = 1024
 garbage_chance_min = 0.15
 garbage_chance_max = 0.15
@@ -376,7 +375,6 @@ def main(args):
     runner = FlatRunner(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=max_steps,
         max_len=max_len,
         num_steps=num_collection_steps,

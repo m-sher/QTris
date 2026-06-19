@@ -191,7 +191,6 @@ def main():
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=50,
-        max_height=18,
         max_steps=9999999,
         max_len=max_len,
         pathfinding=True,
