@@ -3229,7 +3229,6 @@ void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
 #define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
-#define MROWNORM 39       // landing-row normaliser (board_height - 1)
 #define MCLIP 10.0f       // reward clip
 #define MAX_PATH 1024
 #define MAX_LPR 16        // max leaves collected per tree per round (intra-tree batching)
@@ -3442,7 +3441,9 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
         if (piece >= 1 && piece <= 7) f[piece - 1] = 1.0f;
         f[7 + rot] = 1.0f;
         f[11] = norm_col / 9.0f;
-        float rn = landing / (float)MROWNORM; f[12] = rn < 1.0f ? rn : 1.0f;
+        // landing row relative to the visible window (matches training)
+        float rn = (landing - (cfg->board_height - NET_ROWS)) / (float)(NET_ROWS - 1);
+        f[12] = rn < 0.0f ? 0.0f : (rn > 1.0f ? 1.0f : rn);
         f[13 + spin] = 1.0f;
         f[17] = (float)is_hold;
         mask_out[slot] = 1;
