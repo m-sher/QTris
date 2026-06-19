@@ -37,9 +37,27 @@ def main() -> None:
         action="store_true",
         help="Disable the progress bar; emit periodic log lines instead.",
     )
+    parser.add_argument(
+        "--label-states",
+        type=Path,
+        default=None,
+        help="placement only: run the oracle on states saved during AZ training (a dir of "
+        "shard_* tf.data shards) and write the labeled dataset to --output. Skips the rollout.",
+    )
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=1,
+        help="with --label-states: label this many shards per dataset write, then delete those "
+        "shards so an interrupted run resumes from the remaining shards. Default 1.",
+    )
     args = parser.parse_args()
 
-    if args.dagger:
+    if args.label_states is not None:
+        if args.family != "placement":
+            parser.error("--label-states is placement-only.")
+        from qtris.data.dagger import main_label as run
+    elif args.dagger:
         if args.policy_checkpoint is None:
             parser.error("--dagger requires --policy-checkpoint.")
         if args.seed is None:

@@ -59,6 +59,27 @@ def main() -> None:
         "virtual loss). Higher = fewer net calls (~L x faster); 1 = exact sequential. "
         "Default 4.",
     )
+    parser.add_argument(
+        "--garbage-chance",
+        type=float,
+        default=0.15,
+        help="placement only: per-step garbage chance for the chance model "
+        "(0 = no garbage at all; ignored when --garbage-traces is set).",
+    )
+    parser.add_argument(
+        "--garbage-traces",
+        type=str,
+        default=None,
+        help="placement only: trace-replay garbage from this library dir "
+        "(replaces the chance model; see train --garbage-traces).",
+    )
+    parser.add_argument(
+        "--trace-tier",
+        type=str,
+        default=None,
+        help="placement --garbage-traces: tier subdir to draw from "
+        "(default: last sorted = strongest).",
+    )
     args = parser.parse_args()
 
     if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:

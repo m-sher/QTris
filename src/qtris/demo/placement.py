@@ -27,6 +27,7 @@ from qtris.demo.rendering import (
     draw_garbage_bar,
 )
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
+from qtris.training.placement_az import _load_trace_pools
 
 num_envs = 1
 piece_dim = 8
@@ -88,6 +89,18 @@ def main(args):
 
     p_model.summary()
 
+    garbage_traces = None
+    traces_dir = getattr(args, "garbage_traces", None)
+    if traces_dir:
+        pools = _load_trace_pools(traces_dir)
+        tier = getattr(args, "trace_tier", None) or (list(pools)[-1] if pools else None)
+        if tier not in pools:
+            raise SystemExit(
+                f"trace tier {tier!r} not found in {traces_dir} (have {list(pools)})"
+            )
+        garbage_traces = pools[tier]
+        print(f"Trace garbage: tier {tier} ({len(garbage_traces)} traces)", flush=True)
+
     py_env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -95,12 +108,13 @@ def main(args):
         max_steps=num_steps,
         max_len=max_len,
         pathfinding=True,
-        garbage_chance=0.15,
+        garbage_chance=getattr(args, "garbage_chance", 0.15),
         garbage_min=1,
         garbage_max=4,
         seed=0,
         idx=0,
         num_row_tiers=num_row_tiers,
+        garbage_traces=garbage_traces,
     )
     env = TFPyEnvironment(py_env)
     searcher = CB2BSearch()
@@ -119,6 +133,10 @@ def main(args):
                 c_puct=args.mcts_cpuct,
                 dirichlet_eps=0.0,
                 leaves_per_round=getattr(args, "mcts_leaves", 4),
+                gamma=1.0,
+                w_attack=0.05,
+                w_death=1.0,
+                w_b2b=0.06,
             ),
         )
         if getattr(args, "mcts_sims", 0) > 0

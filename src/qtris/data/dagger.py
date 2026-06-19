@@ -41,6 +41,81 @@ from qtris.data.placement_features import (
     build_placement_target,
 )
 
+# Fields of a placement state record (net inputs + oracle search inputs), in save order.
+_STATE_FIELDS = {
+    "board": np.float32,
+    "pieces": np.int64,
+    "bcg": np.float32,
+    "board_occ": np.float32,
+    "active": np.int32,
+    "hold": np.int32,
+    "queue": np.int32,
+    "b2b": np.int32,
+    "combo": np.int32,
+    "total_garbage": np.int32,
+    "push_delay": np.int32,
+}
+
+
+def _state_record(env):
+    """Placement state dict from a live env: the net inputs (board/pieces/bcg, identical to
+    `_create_observation`) plus the oracle search inputs (board_occ/active/hold/queue/b2b/combo/
+    total_garbage/push_delay). label_placement_states consumes exactly these keys, so a record
+    from a DAgger rollout and one dumped during AZ self-play are interchangeable."""
+    pieces = np.array(
+        [env._active_piece.piece_type.value, env._hold_piece.value]
+        + [p.value for p in env._queue],
+        dtype=np.int64,
+    )
+    return {
+        "board": env._board[..., None].astype(np.float32),
+        "pieces": pieces,
+        "bcg": np.array(
+            [env._scorer._b2b, env._scorer._combo, env._get_total_garbage()],
+            dtype=np.float32,
+        ),
+        "board_occ": env._board.copy().astype(np.float32),
+        "active": int(env._active_piece.piece_type.value),
+        "hold": int(env._hold_piece.value),
+        "queue": np.array([p.value for p in env._queue], dtype=np.int32),
+        "b2b": int(env._scorer._b2b),
+        "combo": int(env._scorer._combo),
+        "total_garbage": int(env._get_total_garbage()),
+        "push_delay": int(env._garbage_push_delay),
+    }
+
+
+def save_states(states, path):
+    """Save a list of state records as a tf.data dataset shard (the codebase's dataset format).
+    Phase 2 (label_placement_states) reads these back to label with the oracle."""
+    cols = {}
+    for k, dt in _STATE_FIELDS.items():
+        vals = [s[k] for s in states]
+        cols[k] = (
+            np.stack(vals).astype(dt)
+            if np.ndim(vals[0]) > 0
+            else np.array(vals, dtype=dt)
+        )
+    tf.data.Dataset.from_tensor_slices(cols).save(str(path))
+
+
+def _shard_paths(states_dir):
+    """Sorted `shard_*` tf.data dirs under states_dir."""
+    states_dir = str(states_dir)
+    return sorted(
+        os.path.join(states_dir, d)
+        for d in os.listdir(states_dir)
+        if d.startswith("shard_")
+    )
+
+
+def _load_shard(shard_dir):
+    """Load one tf.data state shard into a list of state dicts."""
+    ds = tf.data.Dataset.load(shard_dir)
+    cols = {k: v.numpy() for k, v in next(iter(ds.batch(10_000_000))).items()}
+    n = len(cols["active"])
+    return [{k: cols[k][i] for k in cols} for i in range(n)]
+
 
 def collect_dagger(
     p_model,
@@ -177,7 +252,7 @@ def collect_dagger(
     return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
 
 
-def collect_dagger_placement(
+def rollout_placement_states(
     p_model,
     seed,
     num_steps,
@@ -193,15 +268,16 @@ def collect_dagger_placement(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    searcher,
     headless=False,
     log_every=1000,
 ):
-    """Roll the placement policy forward; label each visited state with the search
-    placement target.
-
-    The search is run once per state and serves both roles: its candidates feed the
-    policy's ranking (which drives the env - the DAgger invariant) and its scores
-    form the label (gen_placement's 128-slot target)."""
+    """Phase 1: roll the placement policy forward (the DAgger invariant) and record each
+    visited state. A state dict holds the net inputs (board/pieces/bcg) and the oracle search
+    inputs (board_occ/active/hold/queue/b2b/combo/total_garbage/push_delay), so phase 2 can be
+    labeled later from any source. The oracle is run here only to supply the candidate set the
+    policy ranks to drive the env; its output is cached on the state so phase 2 need not
+    re-search these states. Returns (states, stats)."""
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -221,9 +297,8 @@ def collect_dagger_placement(
     )
 
     time_step = env.reset()
-    searcher = CB2BSearch()
 
-    transitions = []
+    states = []
     beam_dead = 0
     deaths = 0
     max_b2b = 0
@@ -231,28 +306,20 @@ def collect_dagger_placement(
     total_attack = 0.0
     pieces_placed = 0
 
-    pbar = tqdm(
-        range(num_steps), disable=headless, desc="dagger placement", unit="step"
-    )
+    pbar = tqdm(range(num_steps), disable=headless, desc="dagger rollout", unit="step")
     for step in pbar:
-        obs = time_step.observation
-        board = obs["board"].astype(np.float32)
-        pieces = obs["pieces"].astype(np.int64)
-        bcg = obs["b2b_combo_garbage"].astype(np.float32)
+        rec = _state_record(env)
 
-        active = env._active_piece.piece_type.value
-        hold = env._hold_piece.value
-        queue = np.array([p.value for p in env._queue], dtype=np.int32)
         best_action, best_seq, cand_actions, cand_scores, cand_seqs, cand_rows = (
             searcher.search_with_scores(
-                board=env._board,
-                active_piece=active,
-                hold_piece=hold,
-                queue=queue,
-                b2b=int(env._scorer._b2b),
-                combo=int(env._scorer._combo),
-                total_garbage=int(env._get_total_garbage()),
-                garbage_push_delay=env._garbage_push_delay,
+                board=rec["board_occ"],
+                active_piece=rec["active"],
+                hold_piece=rec["hold"],
+                queue=rec["queue"],
+                b2b=rec["b2b"],
+                combo=rec["combo"],
+                total_garbage=rec["total_garbage"],
+                garbage_push_delay=rec["push_delay"],
                 search_depth=search_depth,
                 beam_width=beam_width,
                 max_len=max_len,
@@ -265,30 +332,33 @@ def collect_dagger_placement(
             time_step = env.reset()
             continue
 
-        row_norm = env._board.shape[0] - 1
-        # Label: the search's placement target for this state.
-        placements_t, scores_t = build_placement_target(
-            cand_actions, cand_scores, cand_rows, active, hold, int(queue[0]), row_norm
+        states.append(
+            {
+                **rec,
+                "cand_actions": cand_actions,
+                "cand_scores": cand_scores,
+                "cand_rows": cand_rows,
+            }
         )
-        transitions.append((board, pieces, bcg, placements_t, scores_t))
 
-        # Policy ranks the same candidates; its choice drives the env.
+        # Policy ranks the same candidates; its choice drives the env (DAgger invariant).
+        row_norm = rec["board_occ"].shape[0] - 1
         infer_pl, infer_mask, infer_seqs = build_placement_inference(
             cand_actions,
             cand_scores,
             cand_rows,
             cand_seqs,
-            active,
-            hold,
-            int(queue[0]),
+            rec["active"],
+            rec["hold"],
+            int(rec["queue"][0]),
             row_norm,
             max_len,
         )
         policy_seq, _, _, _ = p_model.predict(
             (
-                tf.constant(board[None], dtype=tf.float32),
-                tf.constant(pieces[None], dtype=tf.int64),
-                tf.constant(bcg[None], dtype=tf.float32),
+                tf.constant(rec["board"][None], dtype=tf.float32),
+                tf.constant(rec["pieces"][None], dtype=tf.int64),
+                tf.constant(rec["bcg"][None], dtype=tf.float32),
                 tf.constant(infer_pl[None], dtype=tf.float32),
                 tf.constant(infer_mask[None], dtype=tf.bool),
             ),
@@ -313,7 +383,7 @@ def collect_dagger_placement(
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
             app = total_attack / max(pieces_placed, 1)
             stats = (
-                f"transitions={len(transitions)} beam_dead={beam_dead} "
+                f"states={len(states)} beam_dead={beam_dead} "
                 f"deaths={deaths} max_b2b={max_b2b} app={app:.3f} "
                 f"policy≠beam={policy_disagrees} ({disagree_rate:.1f}%)"
             )
@@ -323,7 +393,122 @@ def collect_dagger_placement(
                 pbar.set_postfix_str(stats)
 
     app = total_attack / max(pieces_placed, 1)
-    return transitions, beam_dead, deaths, max_b2b, policy_disagrees, app
+    return states, {
+        "beam_dead": beam_dead,
+        "deaths": deaths,
+        "max_b2b": max_b2b,
+        "policy_disagrees": policy_disagrees,
+        "app": app,
+    }
+
+
+def label_placement_states(
+    searcher, states, search_depth, beam_width, max_len, progress=False
+):
+    """Phase 2: run the oracle on collected placement states and build the 128-slot target.
+
+    Source-agnostic - `states` may come from rollout_placement_states OR from AZ self-play
+    (saved with the same keys). Each state is a dict of the oracle search inputs (board_occ,
+    active, hold, queue, b2b, combo, total_garbage, push_delay) plus the net inputs (board,
+    pieces, bcg). A state that already carries the oracle output (cand_actions/cand_scores/
+    cand_rows, e.g. from a rollout) reuses it; otherwise the oracle is run here. Returns
+    (transitions, beam_dead); each transition is (board, pieces, bcg, placements_t, scores_t)."""
+    transitions = []
+    beam_dead = 0
+    for s in tqdm(states, desc="oracle label", unit="state", disable=not progress):
+        cand_scores = s.get("cand_scores")
+        if cand_scores is not None:
+            cand_actions, cand_rows = s["cand_actions"], s["cand_rows"]
+        else:
+            best_action, _bseq, cand_actions, cand_scores, _cseq, cand_rows = (
+                searcher.search_with_scores(
+                    board=s["board_occ"],
+                    active_piece=s["active"],
+                    hold_piece=s["hold"],
+                    queue=s["queue"],
+                    b2b=s["b2b"],
+                    combo=s["combo"],
+                    total_garbage=s["total_garbage"],
+                    garbage_push_delay=s["push_delay"],
+                    search_depth=search_depth,
+                    beam_width=beam_width,
+                    max_len=max_len,
+                )
+            )
+            if best_action < 0:
+                beam_dead += 1
+                continue
+        if len(cand_scores) == 0:
+            beam_dead += 1
+            continue
+        row_norm = s["board_occ"].shape[0] - 1
+        placements_t, scores_t = build_placement_target(
+            cand_actions,
+            cand_scores,
+            cand_rows,
+            s["active"],
+            s["hold"],
+            int(s["queue"][0]),
+            row_norm,
+        )
+        transitions.append((s["board"], s["pieces"], s["bcg"], placements_t, scores_t))
+    return transitions, beam_dead
+
+
+def collect_dagger_placement(
+    p_model,
+    seed,
+    num_steps,
+    search_depth,
+    beam_width,
+    queue_size,
+    max_len,
+    max_height,
+    max_holes,
+    max_steps_env,
+    garbage_chance,
+    garbage_min,
+    garbage_max,
+    garbage_push_delay,
+    num_row_tiers,
+    headless=False,
+    log_every=1000,
+):
+    """Placement DAgger as the two phases composed: roll the policy to collect states, then
+    label them with the oracle. The same searcher is shared; rollout states carry their cached
+    oracle output so labeling does not re-search them."""
+    searcher = CB2BSearch()
+    states, stats = rollout_placement_states(
+        p_model,
+        seed,
+        num_steps,
+        search_depth,
+        beam_width,
+        queue_size,
+        max_len,
+        max_height,
+        max_holes,
+        max_steps_env,
+        garbage_chance,
+        garbage_min,
+        garbage_max,
+        garbage_push_delay,
+        num_row_tiers,
+        searcher,
+        headless=headless,
+        log_every=log_every,
+    )
+    transitions, label_beam_dead = label_placement_states(
+        searcher, states, search_depth, beam_width, max_len
+    )
+    return (
+        transitions,
+        stats["beam_dead"] + label_beam_dead,
+        stats["deaths"],
+        stats["max_b2b"],
+        stats["policy_disagrees"],
+        stats["app"],
+    )
 
 
 def _build_ar_model(args):
@@ -389,6 +574,138 @@ def _build_placement_model(args):
         )
     )
     return p_model
+
+
+def _load_existing(dataset_path, is_placement):
+    """Load an existing dataset for append. Returns (existing_dict | None, count); None when the
+    path is absent or its schema doesn't match this family."""
+    if not os.path.exists(dataset_path):
+        return None, 0
+    try:
+        existing_ds = tf.data.Dataset.load(dataset_path)
+        existing = {
+            k: v.numpy() for k, v in next(iter(existing_ds.batch(10_000_000))).items()
+        }
+    except Exception:
+        print("Existing dataset load failed, starting fresh", flush=True)
+        return None, 0
+    count = len(existing.get("cand_scores", []))
+    if is_placement:
+        cp = existing.get("cand_placements")
+        schema_ok = cp is not None and cp.shape[1:] == (
+            CANDIDATE_CAPACITY,
+            PLACEMENT_FEATURE_DIM,
+        )
+    else:
+        schema_ok = (
+            "cand_scores" in existing
+            and existing["cand_scores"].shape[1] == NUM_ACTIONS
+        )
+    if not schema_ok:
+        print(
+            "Existing dataset is an older/incompatible schema for this family - "
+            "starting fresh.",
+            flush=True,
+        )
+        return None, 0
+    print(f"Found existing dataset with {count} transitions", flush=True)
+    return existing, count
+
+
+def _merge_and_save(new_transitions, existing, dataset_path, is_placement):
+    """Stack new transitions, append to existing, and save the dataset."""
+    boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
+    pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
+    bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
+    cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
+    if is_placement:
+        label_key = "cand_placements"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.float32)
+    else:
+        label_key = "cand_sequences"
+        label = np.stack([t[3] for t in new_transitions]).astype(np.int8)
+
+    if existing is not None:
+        boards = np.concatenate([existing["boards"], boards])
+        pieces = np.concatenate([existing["pieces"], pieces])
+        bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
+        label = np.concatenate([existing[label_key], label])
+        cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
+        print(
+            f"Combined: {len(existing['cand_scores'])} existing + "
+            f"{len(new_transitions)} new = {len(cand_scores)} total",
+            flush=True,
+        )
+
+    dataset = tf.data.Dataset.from_tensor_slices(
+        {
+            "boards": boards,
+            "pieces": pieces,
+            "b2b_combo_garbage": bcg,
+            label_key: label,
+            "cand_scores": cand_scores,
+        }
+    )
+    # Write to a temp dir and swap, so an interrupted rewrite can't destroy the prior dataset
+    # (matters when the relabel deletes input shards after each merge).
+    tmp = str(dataset_path) + ".tmp"
+    if os.path.exists(tmp):
+        shutil.rmtree(tmp)
+    dataset.save(tmp)
+    if os.path.exists(dataset_path):
+        shutil.rmtree(dataset_path)
+    os.rename(tmp, dataset_path)
+    print(f"Saved {len(cand_scores)} transitions to {dataset_path}", flush=True)
+
+
+def main_label(cli_args):
+    """Oracle-predict mode: load placement states saved during AZ self-play and label them with
+    the oracle, writing the same dataset the fused DAgger path does. No rollout."""
+    from qtris.config import ModelConfig
+
+    m = ModelConfig()
+    states_dir = cli_args.label_states
+    dataset_path = (
+        str(cli_args.output) if cli_args.output else "datasets/tetris_oracle_placement"
+    )
+    # Recover an orphaned temp dataset from a rewrite interrupted mid-swap (see _merge_and_save).
+    tmp = dataset_path + ".tmp"
+    if not os.path.exists(dataset_path) and os.path.exists(tmp):
+        os.rename(tmp, dataset_path)
+
+    # Label shard-by-shard; each labeled shard's transitions are merged into the dataset, then the
+    # shard is deleted - so an interrupted run resumes from the remaining shards (no re-labeling,
+    # no duplicates). --save-every is how many shards to label per dataset write.
+    shards_per_flush = max(1, getattr(cli_args, "save_every", 1))
+    progress = not getattr(cli_args, "headless", False)
+    shard_dirs = _shard_paths(states_dir)
+    if not shard_dirs:
+        print(f"No shards in {states_dir}; dataset unchanged.", flush=True)
+        return 0
+    print(f"Labeling {len(shard_dirs)} shard(s) from {states_dir}", flush=True)
+
+    searcher = CB2BSearch()
+    total_trans = 0
+    for i in range(0, len(shard_dirs), shards_per_flush):
+        group = shard_dirs[i : i + shards_per_flush]
+        states = [s for sd in group for s in _load_shard(sd)]
+        transitions, beam_dead = label_placement_states(
+            searcher, states, 16, 200, m.max_len, progress=progress
+        )
+        if transitions:
+            existing, _ = _load_existing(dataset_path, is_placement=True)
+            _merge_and_save(transitions, existing, dataset_path, is_placement=True)
+            total_trans += len(transitions)
+        for sd in group:
+            shutil.rmtree(sd)  # durably labeled -> consume so a re-run skips it
+        remaining = len(shard_dirs) - i - len(group)
+        print(
+            f"Merged {len(group)} shard(s) | +{len(transitions)} transitions "
+            f"(beam_dead {beam_dead}) | {total_trans} total | {remaining} shard(s) left",
+            flush=True,
+        )
+    print(f"Done: {total_trans} transitions; all shards consumed.", flush=True)
+    return 0
 
 
 def main(cli_args):
@@ -464,42 +781,7 @@ def main(cli_args):
         flush=True,
     )
 
-    existing_count = 0
-    existing = None
-    if os.path.exists(dataset_path):
-        try:
-            existing_ds = tf.data.Dataset.load(dataset_path)
-            existing = {
-                k: v.numpy()
-                for k, v in next(iter(existing_ds.batch(10_000_000))).items()
-            }
-            existing_count = len(existing.get("cand_scores", []))
-            if is_placement:
-                cp = existing.get("cand_placements")
-                schema_ok = cp is not None and cp.shape[1:] == (
-                    CANDIDATE_CAPACITY,
-                    PLACEMENT_FEATURE_DIM,
-                )
-            else:
-                schema_ok = (
-                    "cand_scores" in existing
-                    and existing["cand_scores"].shape[1] == NUM_ACTIONS
-                )
-            if not schema_ok:
-                print(
-                    "Existing dataset is an older/incompatible schema for this "
-                    "family - starting fresh.",
-                    flush=True,
-                )
-                existing = None
-                existing_count = 0
-            else:
-                print(
-                    f"Found existing dataset with {existing_count} transitions",
-                    flush=True,
-                )
-        except Exception:
-            print("Existing dataset load failed, starting fresh", flush=True)
+    existing, existing_count = _load_existing(dataset_path, is_placement)
 
     print(
         f"Collecting {args.num_steps} DAgger steps "
@@ -539,41 +821,5 @@ def main(cli_args):
         flush=True,
     )
 
-    boards = np.stack([t[0] for t in new_transitions]).astype(np.float32)
-    pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
-    bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
-    cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
-    if is_placement:
-        label_key = "cand_placements"
-        label = np.stack([t[3] for t in new_transitions]).astype(np.float32)
-    else:
-        label_key = "cand_sequences"
-        label = np.stack([t[3] for t in new_transitions]).astype(np.int8)
-
-    if existing is not None:
-        boards = np.concatenate([existing["boards"], boards])
-        pieces = np.concatenate([existing["pieces"], pieces])
-        bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
-        label = np.concatenate([existing[label_key], label])
-        cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
-        print(
-            f"Combined: {existing_count} existing + {len(new_transitions)} "
-            f"new = {len(cand_scores)} total",
-            flush=True,
-        )
-
-    if os.path.exists(dataset_path):
-        shutil.rmtree(dataset_path)
-
-    dataset = tf.data.Dataset.from_tensor_slices(
-        {
-            "boards": boards,
-            "pieces": pieces,
-            "b2b_combo_garbage": bcg,
-            label_key: label,
-            "cand_scores": cand_scores,
-        }
-    )
-    dataset.save(dataset_path)
-    print(f"Saved {len(cand_scores)} transitions to {dataset_path}", flush=True)
+    _merge_and_save(new_transitions, existing, dataset_path, is_placement)
     return 0
