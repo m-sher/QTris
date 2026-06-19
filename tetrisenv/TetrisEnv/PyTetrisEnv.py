@@ -36,6 +36,7 @@ def _surge_segments(num_rows: int) -> list:
 
 # 40-row board = 20 visible + 20 buffer; row 0 = top. Pieces spawn just above the visible field
 # and top out when the piece-agnostic spawn box (rows 17-18, cols 3-6) is blocked (matches fusion).
+VISIBLE_ROWS = 20
 SPAWN_ROW = 17
 DEATH_HEIGHT_CAP = 35
 SPAWN_ENVELOPE = np.array(
@@ -249,7 +250,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         )
 
         # Survival
-        height_norm = height / self._max_height
+        height_norm = height / VISIBLE_ROWS
         phi_safety = self._safety_coef * (height_norm**2)
 
         # Cleanliness
