@@ -82,7 +82,7 @@ def placement_step(env, searcher, desc):
     env._scorer._b2b = new_b2b
     env._scorer._combo = new_combo
     next_active = env._spawn_piece(queue.pop(0))
-    top_out = bool(np.any(board[: 24 - env._max_height] != 0.0))
+    top_out = env._is_top_out(board)
 
     vis = env._vis_board
     if attack > 0:
@@ -118,7 +118,7 @@ def placement_step(env, searcher, desc):
         else 0.0
     )
     exceeded_holes = holes_val > env._max_holes if env._max_holes is not None else False
-    garbage_top_out = bool(np.any(board[: 24 - env._max_height] != 0.0))
+    garbage_top_out = env._is_top_out(board)
     died = top_out or exceeded_holes or garbage_top_out
     total_reward = (
         attack_reward
