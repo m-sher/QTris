@@ -19,6 +19,7 @@ import TetrisEnv
 
 CANDIDATE_CAPACITY = 128
 FEATURE_DIM = 18
+_NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
 _MAX_GARB_ENTRIES = 32  # mirrors MAX_GARB_ENTRIES in b2b_search.c (fixed root gq array)
 
@@ -36,7 +37,7 @@ def _load_lib():
         raise RuntimeError(f"b2b_search .so not found in {pkg}")
     lib = ctypes.CDLL(cands[0])
     lib.mcts_create.argtypes = (
-        [ctypes.c_int] * 8
+        [ctypes.c_int] * 7
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
@@ -85,9 +86,8 @@ class CMCTS:
         self,
         num_trees,
         *,
-        board_height=24,
+        board_height=40,
         queue_size=5,
-        max_height=18,
         max_holes=50,
         garbage_push_delay=0,
         auto_push_garbage=1,
@@ -117,7 +117,6 @@ class CMCTS:
             num_trees,
             board_height,
             queue_size,
-            max_height,
             max_holes if max_holes is not None else -1,
             garbage_push_delay,
             auto_push_garbage,
@@ -137,7 +136,7 @@ class CMCTS:
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
-        self._boards = np.zeros(rows * board_height * 10, np.float32)
+        self._boards = np.zeros(rows * _NET_ROWS * 10, np.float32)
         self._pieces = np.zeros(rows * self.pw, np.int64)
         self._bcg = np.zeros(rows * 3, np.float32)
         self._pls = np.zeros(rows * self.cap * FEATURE_DIM, np.float32)
@@ -193,7 +192,7 @@ class CMCTS:
         )
         if nv == 0:
             return 0, None
-        boards = self._boards[: nv * self.bh * 10].reshape(nv, self.bh, 10, 1)
+        boards = self._boards[: nv * _NET_ROWS * 10].reshape(nv, _NET_ROWS, 10, 1)
         pieces = self._pieces[: nv * self.pw].reshape(nv, self.pw)
         bcg = self._bcg[: nv * 3].reshape(nv, 3)
         pls = self._pls[: nv * self.cap * FEATURE_DIM].reshape(

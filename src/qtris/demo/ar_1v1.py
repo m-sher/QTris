@@ -71,7 +71,6 @@ def main(cli_args):
     py_env = PyTetris1v1Env(
         queue_size=queue_size,
         max_holes=50,
-        max_height=18,
         max_steps=num_steps,
         max_len=max_len,
         pathfinding=True,

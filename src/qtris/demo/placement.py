@@ -16,6 +16,7 @@ from qtris.demo.panels import (
     MaxStatTracker,
     draw_bcg_panel,
     draw_board_area,
+    draw_death_envelope,
     draw_info_panel,
     draw_step_counter,
     run_replay,
@@ -46,7 +47,6 @@ beam_width = 512
 num_steps = 500
 queue_size = 5
 max_holes = 100
-max_height = 18
 
 
 def main(args):
@@ -104,7 +104,6 @@ def main(args):
     py_env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=num_steps,
         max_len=max_len,
         pathfinding=True,
@@ -322,6 +321,7 @@ def main(args):
             garbage_surface,
             PIECE_COLORS,
         )
+        draw_death_envelope(screen, py_env)
         draw_bcg_panel(
             screen,
             small_font,

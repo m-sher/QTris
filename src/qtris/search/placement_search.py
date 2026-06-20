@@ -16,7 +16,7 @@ from TetrisEnv.Moves import Keys
 from TetrisEnv.Pieces import PieceType
 from qtris.data.placement_features import build_placement_inference
 
-ROW_NORM = 23  # board height - 1 (24-row board)
+ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 _FORCED_DROP = np.array([Keys.START, Keys.HARD_DROP] + [Keys.PAD] * 13, dtype=np.int64)
 
 
@@ -82,7 +82,7 @@ def placement_step(env, searcher, desc):
     env._scorer._b2b = new_b2b
     env._scorer._combo = new_combo
     next_active = env._spawn_piece(queue.pop(0))
-    top_out = bool(np.any(board[: 24 - env._max_height] != 0.0))
+    top_out = env._is_top_out(board)
 
     vis = env._vis_board
     if attack > 0:
@@ -118,7 +118,7 @@ def placement_step(env, searcher, desc):
         else 0.0
     )
     exceeded_holes = holes_val > env._max_holes if env._max_holes is not None else False
-    garbage_top_out = bool(np.any(board[: 24 - env._max_height] != 0.0))
+    garbage_top_out = env._is_top_out(board)
     died = top_out or exceeded_holes or garbage_top_out
     total_reward = (
         attack_reward
@@ -149,7 +149,9 @@ def net_input_from_env(env):
         + [p.value for p in env._queue],
         dtype=np.int64,
     )
-    board = env._board[None, ..., None].astype(np.float32)  # (1,24,10,1)
+    board = env._board[-24:][None, ..., None].astype(
+        np.float32
+    )  # (1,24,10,1) visible slice
     bcg = np.array(
         [env._scorer._b2b, env._scorer._combo, env._get_total_garbage()],
         dtype=np.float32,

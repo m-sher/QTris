@@ -12,7 +12,6 @@ class Py1v1TetrisRunner:
         self,
         queue_size: int,
         max_holes: Optional[int],
-        max_height: int,
         max_steps: int,
         pathfinding: bool,
         max_len: int,
@@ -45,7 +44,6 @@ class Py1v1TetrisRunner:
             lambda idx=i: PyTetris1v1Env(
                 queue_size=queue_size,
                 max_holes=max_holes,
-                max_height=max_height,
                 max_steps=max_steps,
                 max_len=max_len,
                 pathfinding=pathfinding,

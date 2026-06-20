@@ -34,12 +34,26 @@ def _surge_segments(num_rows: int) -> list:
     return _split_into_waves(num_rows) if num_rows > TRACE_SURGE_THRESHOLD else [num_rows]
 
 
+# 40-row board = 20 visible + 20 buffer; row 0 = top. Pieces spawn just above the visible field
+# and top out when the piece-agnostic spawn box (rows 17-18, cols 3-6) is blocked (matches fusion).
+VISIBLE_ROWS = 20
+SPAWN_ROW = 17
+DEATH_HEIGHT_CAP = 35
+SPAWN_ENVELOPE = np.array(
+    [[17, 3], [17, 4], [17, 5], [18, 3], [18, 4], [18, 5], [18, 6]], dtype=np.int32
+)
+
+
+def spawn_envelope_blocked(board: np.ndarray) -> bool:
+    """True if the 7-cell spawn box is obstructed. `board` is the full (40,10) occupancy board."""
+    return bool(np.any(board[SPAWN_ENVELOPE[:, 0], SPAWN_ENVELOPE[:, 1]] != 0.0))
+
+
 class PyTetrisEnv(py_environment.PyEnvironment):
     def __init__(
         self,
         queue_size: int,
         max_holes: Optional[int],
-        max_height: int,
         max_steps: Optional[int],
         max_len: int,
         pathfinding: bool,
@@ -73,7 +87,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._b2b_extend_scale = b2b_extend_scale
 
         self._max_holes = max_holes
-        self._max_height = max_height
         self._max_steps = max_steps
         self._max_len = max_len
         self._pathfinding = pathfinding
@@ -110,8 +123,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._random = random.Random(seed)
         self._tetrio_rng = TetrioRNG(seed)
 
-        self._board = np.zeros((24, 10), dtype=np.float32)
-        self._vis_board = np.zeros((24, 10), dtype=np.int32)
+        self._board = np.zeros((40, 10), dtype=np.float32)
+        self._vis_board = np.zeros((40, 10), dtype=np.int32)
 
         self._rotation_system = RotationSystem()
         self._key_sequence_finder = CKeySequenceFinder(
@@ -235,7 +248,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         )
 
         # Survival
-        height_norm = height / self._max_height
+        height_norm = height / VISIBLE_ROWS
         phi_safety = self._safety_coef * (height_norm**2)
 
         # Cleanliness
@@ -371,8 +384,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             holes_val > self._max_holes if self._max_holes is not None else False
         )
 
-        # Check for top-out caused by garbage
-        garbage_top_out = np.any(board[: 24 - self._max_height] != 0.0)
+        # Check for top-out caused by garbage (spawn box blocked or a column at the height cap)
+        garbage_top_out = self._is_top_out(board)
 
         died = top_out or exceeded_holes or garbage_top_out
 
@@ -475,9 +488,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         )
 
     def _spawn_piece(self, piece_type: PieceType) -> Piece:
-        # All pieces spawn 3 cells from the left on a default board
+        # All pieces spawn 3 cells from the left, just above the visible field (SPAWN_ROW).
         # For the O piece, this is actually 4 cells including the padding
-        spawn_loc = np.array([0, 3], np.int32)
+        spawn_loc = np.array([SPAWN_ROW, 3], np.int32)
         cells = self._rotation_system.orientations[piece_type][0]
 
         return Piece(piece_type=piece_type, loc=spawn_loc, r=0, cells=cells)
@@ -517,8 +530,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             )
 
         observation = {
-            "board": self._board[..., None],
-            "vis_board": self._vis_board[..., None],
+            "board": self._board[-24:][..., None],
+            "vis_board": self._vis_board[-24:][..., None],
             "pieces": pieces,
             "b2b_combo_garbage": stats,
             "sequences": sequences,
@@ -713,7 +726,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         active_piece = self._spawn_piece(queue.pop(0))
 
-        top_out = np.any(board[: 24 - self._max_height] != 0.0)
+        top_out = self._is_top_out(board)
 
         return clears, top_out, active_piece, board, vis_board, queue
 
@@ -893,3 +906,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         # Return heights, holes, and bumpy
         return height_val, holes_val, skyline_val, bumpy_val
+
+    def _is_top_out(self, board: np.ndarray) -> bool:
+        """Top-out = the spawn box is blocked, or a column reaches the height cap. Two
+        separate checks; `board` is the full (40,10) occupancy board."""
+        max_h = int(np.max(self._get_heights(board)))
+        return spawn_envelope_blocked(board) or max_h >= DEATH_HEIGHT_CAP
