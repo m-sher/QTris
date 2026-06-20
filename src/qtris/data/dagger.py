@@ -68,7 +68,8 @@ def _state_record(env):
         dtype=np.int64,
     )
     return {
-        "board": env._board[..., None].astype(np.float32),
+        # net input: the model-visible slice (bottom 24); board_occ keeps the full board for the oracle
+        "board": env._board[-24:][..., None].astype(np.float32),
         "pieces": pieces,
         "bcg": np.array(
             [env._scorer._b2b, env._scorer._combo, env._get_total_garbage()],
