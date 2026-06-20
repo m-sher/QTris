@@ -16,6 +16,7 @@ from qtris.demo.panels import (
     MaxStatTracker,
     draw_bcg_panel,
     draw_board_area,
+    draw_death_envelope,
     draw_info_panel,
     draw_step_counter,
     run_replay,
@@ -320,6 +321,7 @@ def main(args):
             garbage_surface,
             PIECE_COLORS,
         )
+        draw_death_envelope(screen, py_env)
         draw_bcg_panel(
             screen,
             small_font,

@@ -9,9 +9,17 @@ import pygame_widgets
 from pygame_widgets.button import Button
 from pygame_widgets.slider import Slider
 
+from TetrisEnv.PyTetrisEnv import SPAWN_ENVELOPE
+
 from qtris.demo.constants import BCG_LABELS
 
 WHITE = (255, 255, 255)
+
+# Board render geometry (mirrors draw_board_area): 24-row board blitted at (25,0) + 2px border, 25px cells.
+BOARD_ORIGIN_X = 27
+BOARD_ORIGIN_Y = 2
+BOARD_CELL = 25
+DEATH_HEIGHT_WARN = 18  # highlight the spawn box once a column climbs above this
 
 # BCG attention panel layout (vertical column along the right edge)
 BCG_PANEL_X = 720
@@ -112,6 +120,26 @@ def draw_board_area(screen, board, vis_board, sidebar, scores, garbage, piece_co
     screen.blit(board_with_border, (25, 0))
     screen.blit(piece_surf, (285, 0))
     screen.blit(scores_surf, (415, 0))
+
+
+def draw_death_envelope(screen, env):
+    """Overlay the spawn (death) envelope in translucent red once any column climbs above
+    DEATH_HEIGHT_WARN, warning that the stack is nearing the top-out box. Call after the board."""
+    if int(env._get_heights(env._board).max()) <= DEATH_HEIGHT_WARN:
+        return
+    offset = env._board.shape[0] - 24  # buffer rows above the rendered 24-row slice
+    overlay = pygame.Surface((BOARD_CELL, BOARD_CELL), pygame.SRCALPHA)
+    overlay.fill((255, 0, 0, 110))
+    for board_row, col in SPAWN_ENVELOPE:
+        slice_row = int(board_row) - offset
+        if 0 <= slice_row < 24:
+            screen.blit(
+                overlay,
+                (
+                    BOARD_ORIGIN_X + int(col) * BOARD_CELL,
+                    BOARD_ORIGIN_Y + slice_row * BOARD_CELL,
+                ),
+            )
 
 
 def draw_bcg_panel(screen, small_font, heatmaps, values):
