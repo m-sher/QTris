@@ -11,6 +11,7 @@ truth shared by datagen and the runtime/demo candidate builder.
 import numpy as np
 
 PLACEMENT_FEATURE_DIM = 18
+MODEL_ROWS = 24  # model-visible board height (net input is (MODEL_ROWS, 10, 1))
 BRANCH_CAPACITY = 64
 CANDIDATE_CAPACITY = 2 * BRANCH_CAPACITY  # 128
 SENTINEL = np.float32(-1e30)  # score for empty/masked slots
@@ -29,7 +30,9 @@ def encode_placement_features(
         f[piece_value - 1] = 1.0
     f[7 + rot] = 1.0
     f[11] = norm_col / 9.0
-    f[12] = min(landing_row / row_norm, 1.0) if row_norm > 0 else 0.0
+    # landing row relative to the visible window (matches the 24-row training board)
+    window_row = landing_row - (row_norm + 1 - MODEL_ROWS)
+    f[12] = min(max(window_row / (MODEL_ROWS - 1), 0.0), 1.0) if row_norm > 0 else 0.0
     f[13 + spin_type] = 1.0
     f[17] = float(is_hold)
     return f

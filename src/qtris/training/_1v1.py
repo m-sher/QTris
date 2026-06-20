@@ -33,7 +33,6 @@ num_envs = 64
 num_collection_steps = 256
 queue_size = 5
 max_holes = 50
-max_height = 18
 max_steps = 512
 num_row_tiers = 2
 num_sequences = 160 * num_row_tiers
@@ -573,7 +572,6 @@ def main(args):
         runner = Py1v1TetrisRunnerFlat(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=max_steps,
             max_len=max_len,
             num_steps=num_collection_steps,
@@ -590,7 +588,6 @@ def main(args):
         runner = Py1v1TetrisRunner(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=max_steps,
             pathfinding=True,
             max_len=max_len,

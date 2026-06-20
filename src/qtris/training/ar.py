@@ -400,7 +400,6 @@ def main(args):
     runner = PyTetrisRunner(
         queue_size=model_cfg.queue_size,
         max_holes=env_cfg.max_holes,
-        max_height=env_cfg.max_height,
         max_steps=env_cfg.max_steps,
         pathfinding=True,
         max_len=model_cfg.max_len,

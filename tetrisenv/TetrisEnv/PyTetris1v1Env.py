@@ -22,7 +22,6 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         self,
         queue_size: int,
         max_holes: Optional[int],
-        max_height: int,
         max_steps: Optional[int],
         max_len: int,
         pathfinding: bool,
@@ -32,7 +31,6 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         num_row_tiers: int = 2,
     ) -> None:
         self._max_holes = max_holes
-        self._max_height = max_height
         self._max_steps = max_steps
         self._max_len = max_len
         self._queue_size = queue_size
@@ -50,7 +48,6 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         self._env1 = PyTetrisEnv(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=None,  # We handle max_steps at the 1v1 level
             max_len=max_len,
             pathfinding=pathfinding,
@@ -67,7 +64,6 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         self._env2 = PyTetrisEnv(
             queue_size=queue_size,
             max_holes=max_holes,
-            max_height=max_height,
             max_steps=None,
             max_len=max_len,
             pathfinding=pathfinding,
@@ -229,8 +225,8 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
             self._env1._receive_attack(int(net2), self._random.randint(0, 9), surge2)
 
         # --- Death checks ---
-        p1_died = top_out1 or np.any(self._env1._board[:24 - self._max_height] != 0.0)
-        p2_died = top_out2 or np.any(self._env2._board[:24 - self._max_height] != 0.0)
+        p1_died = top_out1 or self._env1._is_top_out(self._env1._board)
+        p2_died = top_out2 or self._env2._is_top_out(self._env2._board)
 
         h1, holes1, sky1, bump1 = self._env1._board_stats(self._env1._board)
         if self._max_holes is not None and holes1 > self._max_holes:

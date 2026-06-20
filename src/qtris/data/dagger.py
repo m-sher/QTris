@@ -68,7 +68,8 @@ def _state_record(env):
         dtype=np.int64,
     )
     return {
-        "board": env._board[..., None].astype(np.float32),
+        # net input: the model-visible slice (bottom 24); board_occ keeps the full board for the oracle
+        "board": env._board[-24:][..., None].astype(np.float32),
         "pieces": pieces,
         "bcg": np.array(
             [env._scorer._b2b, env._scorer._combo, env._get_total_garbage()],
@@ -125,7 +126,6 @@ def collect_dagger(
     beam_width,
     queue_size,
     max_len,
-    max_height,
     max_holes,
     max_steps_env,
     garbage_chance,
@@ -147,7 +147,6 @@ def collect_dagger(
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=max_steps_env,
         max_len=max_len,
         pathfinding=True,
@@ -260,7 +259,6 @@ def rollout_placement_states(
     beam_width,
     queue_size,
     max_len,
-    max_height,
     max_holes,
     max_steps_env,
     garbage_chance,
@@ -281,7 +279,6 @@ def rollout_placement_states(
     env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
-        max_height=max_height,
         max_steps=max_steps_env,
         max_len=max_len,
         pathfinding=True,
@@ -463,7 +460,6 @@ def collect_dagger_placement(
     beam_width,
     queue_size,
     max_len,
-    max_height,
     max_holes,
     max_steps_env,
     garbage_chance,
@@ -486,7 +482,6 @@ def collect_dagger_placement(
         beam_width,
         queue_size,
         max_len,
-        max_height,
         max_holes,
         max_steps_env,
         garbage_chance,
@@ -730,7 +725,6 @@ def main(cli_args):
         num_heads=m.num_heads,
         num_layers=m.num_layers,
         dropout_rate=m.dropout_rate,
-        max_height=e.max_height,
         max_holes=e.max_holes,
         max_steps_env=9_999_999,
         garbage_chance=e.garbage_chance,
@@ -798,7 +792,6 @@ def main(cli_args):
         beam_width=args.beam_width,
         queue_size=args.queue_size,
         max_len=args.max_len,
-        max_height=args.max_height,
         max_holes=args.max_holes,
         max_steps_env=args.max_steps_env,
         garbage_chance=args.garbage_chance,

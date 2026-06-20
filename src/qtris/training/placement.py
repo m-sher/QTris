@@ -247,7 +247,6 @@ def main(args):
     runner = PlacementRunner(
         queue_size=queue_size,
         max_holes=50,
-        max_height=18,
         max_steps=1024,
         max_len=max_len,
         num_steps=num_steps,
