@@ -33,6 +33,7 @@ from qtris.observability.backend import finish, init_run, log_step
 from qtris.observability.models import OneVsOneAZLog, OneVsOnePlacementAZConfig
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
+from qtris.training.elo import EloBook
 from qtris.training.placement_az import _gen_log_probs, train_step
 
 
@@ -224,8 +225,8 @@ def _sample_pool(opp_net, pool_dir):
 def _eval_vs_ref(
     learner_mcts, ref_mcts, n_games, queue_size, max_len, max_steps, rng, searcher
 ):
-    """Decisive win rate of the learner (player 1) vs the frozen reference (player 2), both
-    greedy, played to completion on fresh games. Batched over still-live games each round."""
+    """Decisive (wins, losses) of the learner (player 1) vs the frozen reference (player 2),
+    both greedy, played to completion on fresh games. Batched over still-live games each round."""
     pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
     for e1, e2 in pairs:
         e1._reset()
@@ -262,8 +263,7 @@ def _eval_vs_ref(
                 alive[g] = False
             elif mc[g] >= max_steps:
                 alive[g] = False  # timeout = draw, excluded from decisive WR
-    dec = wins + losses
-    return wins / dec if dec else 0.5
+    return wins, losses
 
 
 def main(args):
@@ -292,6 +292,12 @@ def main(args):
     run_name = getattr(args, "run_name", None)
     np_seed = getattr(args, "np_seed", None)
     save_states_dir = getattr(args, "save_states", None)
+    # Opponent-pool Elo knobs.
+    elo_enabled = getattr(args, "elo_enabled", True)
+    elo_init = getattr(args, "elo_init", 1500.0)
+    elo_k_learner = getattr(args, "elo_k_learner", 2.0)
+    elo_k_opp = getattr(args, "elo_k_opp", 0.5)
+    elo_draw_weight = getattr(args, "elo_draw_weight", 0.5)
 
     if np_seed is not None:
         np.random.seed(np_seed)
@@ -343,6 +349,23 @@ def main(args):
     ref_prefix = os.path.join(pool_dir, "gen_0")
     ref_net.load_weights(ref_prefix).expect_partial()
 
+    # Opponent-pool Elo book (anchored at gen_0).
+    elo_path = os.path.join(pool_dir, "elo.json")
+    elo = None
+    if elo_enabled:
+        if os.path.exists(elo_path):
+            elo = EloBook.from_json(elo_path)
+            print(f"Resumed Elo book from {elo_path}.", flush=True)
+        else:
+            elo = EloBook(
+                init=elo_init,
+                k_learner=elo_k_learner,
+                k_opp=elo_k_opp,
+                draw_weight=elo_draw_weight,
+            )
+            for snap in _pool_snaps(pool_dir):
+                elo.seed(os.path.basename(snap))
+
     resumed = manager.latest_checkpoint is not None
     config = OneVsOnePlacementAZConfig(
         num_games=num_games,
@@ -370,6 +393,11 @@ def main(args):
         run_name=run_name,
         np_seed=np_seed,
         save_states=save_states_dir,
+        elo_enabled=elo_enabled,
+        elo_init=elo_init,
+        elo_k_learner=elo_k_learner,
+        elo_k_opp=elo_k_opp,
+        elo_draw_weight=elo_draw_weight,
     )
     run = init_run(
         project="Tetris",
@@ -559,11 +587,15 @@ def main(args):
             value_calibration = 0.0
 
         # Pool maintenance: EMA the decisive WR, grow the pool (gated), and periodically
-        # eval vs the frozen gen_0 reference.
+        # eval vs the frozen gen_0 reference. Elo folds in this gen's pool games and the
+        # eval-vs-ref (anchor) games.
         if decisive > 0:
             wr_ema = 0.9 * wr_ema + 0.1 * win_rate
+        if elo is not None and opp_tag is not None and decisive + n_draw > 0:
+            wins = int(sum(p1_wins))
+            elo.update(opp_tag, wins, decisive - wins, n_draw)
         if gen % eval_interval == 0:
-            last_wr_ref = _eval_vs_ref(
+            ref_wins, ref_losses = _eval_vs_ref(
                 mcts,
                 ref_mcts,
                 eval_games,
@@ -573,6 +605,10 @@ def main(args):
                 rng,
                 searcher,
             )
+            ref_dec = ref_wins + ref_losses
+            last_wr_ref = ref_wins / ref_dec if ref_dec else 0.5
+            if elo is not None:
+                elo.update("gen_0", ref_wins, ref_losses, 0)
         if (
             gen > 0
             and gen % pool_interval == 0
@@ -581,6 +617,23 @@ def main(args):
         ):
             _save_pool(net, gen, pool_dir, max_pool_size)
             print(f"Saved opponent-pool gen_{gen} (wr_ema {wr_ema:.3f}).", flush=True)
+            if elo is not None:
+                elo.on_snapshot(f"gen_{gen}")
+                elo.to_json(elo_path)
+
+        # Per-opponent Elo fan; new series appear as the pool grows.
+        present = [os.path.basename(p) for p in _pool_snaps(pool_dir)]
+        elo_tags = {}
+        if elo is not None:
+            summ = elo.present_summary(present)
+            elo_tags = {
+                "elo/learner": elo.ratings["learner"],
+                "elo/reference": elo.ratings["gen_0"],
+                "elo/best_pool": summ["best_pool"],
+                "elo/learner_minus_ref": summ["learner_minus_ref"],
+                "elo/gap_to_pool": summ["gap_to_pool"],
+                **{f"elo/pool/{g}": elo.ratings[g] for g in present if g != "gen_0"},
+            }
 
         log_step(
             OneVsOneAZLog(
@@ -606,7 +659,8 @@ def main(args):
                 updates=updates,
                 buffer_size=replay_size,
                 completed_games=n_games,
-                pool_size=len(_pool_snaps(pool_dir)),
+                pool_size=len(present),
+                elo=elo_tags,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )
@@ -621,5 +675,7 @@ def main(args):
 
         if gen % 5 == 0:
             manager.save()
+            if elo is not None:
+                elo.to_json(elo_path)
 
     finish(run)
