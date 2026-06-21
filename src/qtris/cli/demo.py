@@ -80,6 +80,18 @@ def main() -> None:
         help="placement --garbage-traces: tier subdir to draw from "
         "(default: last sorted = strongest).",
     )
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=500,
+        help="placement --mode 1v1: max moves before the duel is called a draw.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="placement --mode 1v1: RNG seed (piece sequence + garbage columns).",
+    )
     args = parser.parse_args()
 
     if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:
@@ -90,11 +102,15 @@ def main() -> None:
             parser.error(
                 "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
             )
-        if args.family in ("flat", "placement"):
+        if args.family == "flat":
             parser.error(
-                f"{args.family} 1v1 demo not yet implemented; only `demo ar --mode 1v1` is supported."
+                "flat 1v1 demo not yet implemented; use `demo ar --mode 1v1` or "
+                "`demo placement --mode 1v1`."
             )
-        from qtris.demo.ar_1v1 import main as run
+        if args.family == "placement":
+            from qtris.demo.placement_1v1 import main as run
+        else:
+            from qtris.demo.ar_1v1 import main as run
     else:
         if args.checkpoint is None:
             parser.error(f"`demo {args.family}` requires --checkpoint.")
