@@ -262,6 +262,12 @@ class OneVsOnePlacementAZConfig(BaseModel):
     run_name: Optional[str] = None
     np_seed: Optional[int] = None
     save_states: Optional[str] = None
+    # Opponent-pool Elo
+    elo_enabled: bool = True
+    elo_init: float = 1500.0
+    elo_k_learner: float = 2.0
+    elo_k_opp: float = 0.5
+    elo_draw_weight: float = 0.5
 
 
 class OneVsOneAZLog(LogPayloadModel):
@@ -298,8 +304,16 @@ class OneVsOneAZLog(LogPayloadModel):
     completed_games: int
     pool_size: int
 
+    # Opponent-pool Elo: pre-formatted "elo/..." tags spliced in by to_payload.
+    elo: dict[str, float] = {}
+
     # Visualization (wrapped at log time)
     board: np.ndarray
+
+    def to_payload(self) -> dict[str, Any]:
+        d = super().to_payload()
+        d.update(d.pop("elo", {}))
+        return d
 
     _image_fields: tuple[str, ...] = ("board",)
     _tag_groups: dict[str, tuple[str, ...]] = {
