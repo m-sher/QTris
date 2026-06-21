@@ -2,20 +2,20 @@
 
 Vision-transformer reinforcement-learning agents for modern Tetris. A shared transformer
 encoder feeds three interchangeable policy families, trained by behavioral cloning from a
-fast C beam-search oracle and then refined with PPO or AlphaZero-style MCTS, all in a vendored C
-Tetris environment.
+fast C beam-search oracle then refined with PPO or AlphaZero-style MCTS, in a Tetris environment
+added here as a subtree (mine).
 
-| Demo | |
-| --- | --- |
-| <img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="200"> | A 500-piece rollout of an early autoregressive checkpoint, already landing the occasional T-spin, though far from competitive. (This checkpoint predates the back-to-back / combo / garbage inputs the current models receive.) |
+The current placement agent (AlphaZero-style MCTS, trained by 1v1 self-play), ranks env's legal candidate placements optimizing APP while handling incoming garbage:
+
+<img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="400">
 
 ## Overview
 
 Every model shares one **vision-transformer encoder**: the board is cut into patches by a
 small CNN, the piece queue and the back-to-back/combo/garbage (BCG) scalars become tokens,
 and paired cross-attention decoder layers mix board and piece representations. Family-specific
-**heads** then turn that latent state into an action. Agents are bootstrapped by **behavioral
-cloning** against a C beam-search oracle (`CB2BSearch`), then improved with on-policy
+**heads** then turn that latent state into an action. Agents are bootstrapped by behavioral
+cloning against a C beam-search oracle (`CB2BSearch`), then improved with on-policy
 **PPO** (single-player and 1v1 self-play) or, for the placement family, **AlphaZero-style
 MCTS** self-play.
 
