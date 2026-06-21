@@ -63,11 +63,11 @@ uv run train flat --mode 1v1                               # 1v1 self-play w/ op
 uv run train placement --algo az --num-simulations 128
 
 # Generate / relabel training data
-uv run datagen placement --steps 200000
-uv run datagen ar --dagger --policy-checkpoint checkpoints/ar_pretrained_policy
+uv run datagen placement --num-steps 200000
+uv run datagen ar --dagger --checkpoint checkpoints/ar_pretrained_policy
 
 # Watch a checkpoint play (pygame)
-uv run demo placement --checkpoint checkpoints/placement_az --mcts-sims 256
+uv run demo placement --checkpoint checkpoints/placement_az --num-simulations 256
 uv run demo ar --mode 1v1 --checkpoint checkpoints/ar_policy_445k --opponent checkpoints/ar_pretrained_policy
 ```
 

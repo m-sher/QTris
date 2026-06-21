@@ -38,7 +38,7 @@ def main() -> None:
         help="placement --search: top-K candidates expanded per node.",
     )
     parser.add_argument(
-        "--mcts-sims",
+        "--num-simulations",
         type=int,
         default=0,
         help="placement only: play with PUCT MCTS (net policy priors + value leaves) "
@@ -46,18 +46,15 @@ def main() -> None:
         "an `--algo az` checkpoint. 0 = off (use greedy top-1 or --search).",
     )
     parser.add_argument(
-        "--mcts-cpuct",
-        type=float,
-        default=1.5,
-        help="placement --mcts-sims: PUCT exploration constant.",
+        "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
     )
     parser.add_argument(
-        "--mcts-leaves",
+        "--leaves-per-round",
         type=int,
         default=4,
-        help="placement --mcts-sims: intra-tree leaf batching (leaves per net call via "
-        "virtual loss). Higher = fewer net calls (~L x faster); 1 = exact sequential. "
-        "Default 4.",
+        help="intra-tree leaf batching: leaves collected per tree per net call (virtual "
+        "loss). Higher = fewer net calls (~L x faster) but more search distortion; 1 = "
+        "sequential. Default 4.",
     )
     parser.add_argument(
         "--garbage-chance",
@@ -84,18 +81,18 @@ def main() -> None:
         "--num-steps",
         type=int,
         default=500,
-        help="placement --mode 1v1: max moves before the duel is called a draw.",
+        help="--mode 1v1: max moves before the duel is called a draw.",
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=0,
-        help="placement --mode 1v1: RNG seed (piece sequence + garbage columns).",
+        help="--mode 1v1: RNG seed (piece sequence + garbage columns).",
     )
     args = parser.parse_args()
 
-    if getattr(args, "search", False) and getattr(args, "mcts_sims", 0) > 0:
-        parser.error("use either --search or --mcts-sims, not both.")
+    if getattr(args, "search", False) and getattr(args, "num_simulations", 0) > 0:
+        parser.error("use either --search or --num-simulations, not both.")
 
     if args.mode == "1v1":
         if args.checkpoint is None or args.opponent is None:

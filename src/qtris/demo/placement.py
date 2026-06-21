@@ -122,23 +122,23 @@ def main(args):
         if getattr(args, "search", False)
         else None
     )
-    # --mcts-sims plays the AlphaZero way: PUCT MCTS over the net's policy+value picks
-    # the move (greedy by visit count). No Dirichlet noise (eval, not self-play).
+    # --num-simulations plays the AlphaZero way: PUCT MCTS over the net's policy+value
+    # picks the move (greedy by visit count). No Dirichlet noise (eval, not self-play).
     mcts = (
         PlacementMCTS(
             p_model,
             MCTSConfig(
-                num_simulations=args.mcts_sims,
-                c_puct=args.mcts_cpuct,
+                num_simulations=args.num_simulations,
+                c_puct=args.c_puct,
                 dirichlet_eps=0.0,
-                leaves_per_round=getattr(args, "mcts_leaves", 4),
+                leaves_per_round=getattr(args, "leaves_per_round", 4),
                 gamma=1.0,
                 w_attack=0.05,
                 w_death=1.0,
                 w_b2b=0.06,
             ),
         )
-        if getattr(args, "mcts_sims", 0) > 0
+        if getattr(args, "num_simulations", 0) > 0
         else None
     )
 
