@@ -11,13 +11,13 @@ def main() -> None:
         help="Use DAgger collection (policy rollout + beam relabel) instead of pure beam-search.",
     )
     parser.add_argument(
-        "--policy-checkpoint",
+        "--checkpoint",
         type=Path,
         default=None,
         help="Required for --dagger. Path to PolicyModel checkpoint directory to roll out.",
     )
     parser.add_argument(
-        "--steps", type=int, default=200_000, help="Number of env steps to collect."
+        "--num-steps", type=int, default=200_000, help="Number of env steps to collect."
     )
     parser.add_argument(
         "--output",
@@ -58,8 +58,8 @@ def main() -> None:
             parser.error("--label-states is placement-only.")
         from qtris.data.dagger import main_label as run
     elif args.dagger:
-        if args.policy_checkpoint is None:
-            parser.error("--dagger requires --policy-checkpoint.")
+        if args.checkpoint is None:
+            parser.error("--dagger requires --checkpoint.")
         if args.seed is None:
             args.seed = 10_000_000  # match DAgger's old default (far from beam seeds)
         from qtris.data.dagger import main as run

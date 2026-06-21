@@ -54,13 +54,13 @@ def main(cli_args):
     args = SimpleNamespace(
         p1=str(cli_args.checkpoint),
         p2=str(cli_args.opponent),
-        steps=getattr(cli_args, "steps", 500),
+        num_steps=getattr(cli_args, "num_steps", 500),
         seed=getattr(cli_args, "seed", 0),
         greedy=getattr(cli_args, "greedy", False),
         temperature=getattr(cli_args, "temperature", 1.0),
     )
 
-    num_steps = args.steps
+    num_steps = args.num_steps
 
     # Load models
     p1_model = load_policy(args.p1)

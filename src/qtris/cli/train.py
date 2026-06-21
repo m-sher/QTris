@@ -88,6 +88,9 @@ def main() -> None:
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(
+        "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
+    )
+    az.add_argument(
         "--leaves-per-round",
         type=int,
         default=4,
@@ -100,9 +103,6 @@ def main() -> None:
         type=float,
         default=1.0,
         help="virtual-loss magnitude (scaled-Q units).",
-    )
-    az.add_argument(
-        "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
     )
     az.add_argument(
         "--dirichlet-alpha",
@@ -129,7 +129,7 @@ def main() -> None:
         help="opening moves sampled at temperature 1 before greedy.",
     )
     az.add_argument(
-        "--mini-batch-size", type=int, default=256, help="training minibatch size."
+        "--batch-size", type=int, default=256, help="training minibatch size."
     )
     az.add_argument(
         "--num-epochs",

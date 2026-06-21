@@ -273,7 +273,7 @@ def main(args):
     horizon = getattr(args, "horizon", 32)
     max_game_steps = getattr(args, "max_game_steps", 512)
     num_generations = getattr(args, "num_generations", 1_000_000)
-    mini_batch_size = getattr(args, "mini_batch_size", 256)
+    mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 1e-4)
