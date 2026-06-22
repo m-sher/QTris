@@ -38,6 +38,7 @@ extend-exclude = ["tetrisenv"]
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4",
     "pytest>=8",
     "ruff>=0.15.14",
     "setuptools<81",
