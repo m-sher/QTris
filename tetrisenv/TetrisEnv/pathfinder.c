@@ -445,11 +445,14 @@ static void write_sequence(
         curr = meta[curr].parent;
     }
 
+    // Drop a trailing soft-drop: the appended hard-drop re-descends to the same row (issue #23).
+    int start = (len > 0 && path[0] == KEY_SOFT_DROP) ? 1 : 0;
+
     int p = 0;
     out_row[p++] = KEY_START;
     if (is_hold) out_row[p++] = KEY_HOLD;
 
-    for(int i=len-1; i>=0; i--) {
+    for(int i=len-1; i>=start; i--) {
         if (p < max_len) out_row[p++] = path[i];
     }
 
