@@ -3,8 +3,16 @@ set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.."
 
-: "${LEADERBOARD_URL:?set LEADERBOARD_URL to the Worker base URL}"
-: "${LEADERBOARD_TOKEN:?set LEADERBOARD_TOKEN to the publish secret}"
+# Load creds from .env (repo root) if present, so they need not be exported.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source ./.env
+  set +a
+fi
+
+: "${LEADERBOARD_URL:?set LEADERBOARD_URL (in .env or the environment)}"
+: "${LEADERBOARD_TOKEN:?set LEADERBOARD_TOKEN (in .env or the environment)}"
 
 mkdir -p logs
 ts="$(date +%Y%m%d_%H%M%S)"
