@@ -225,7 +225,7 @@ class AlphaZeroTrainConfig(BaseModel):
     run_name: Optional[str] = None
     harvest: bool = True
     trace_tiers: Optional[str] = None
-    np_seed: Optional[int] = None
+    seed: Optional[int] = None
     curriculum: bool = False
     curriculum_start: float = 0.0
 
@@ -260,7 +260,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
-    np_seed: Optional[int] = None
+    seed: Optional[int] = None
     save_states: Optional[str] = None
     # Opponent-pool Elo
     elo_enabled: bool = True

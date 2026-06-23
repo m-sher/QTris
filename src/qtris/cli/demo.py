@@ -78,7 +78,7 @@ def main() -> None:
         "(default: last sorted = strongest).",
     )
     parser.add_argument(
-        "--num-steps",
+        "--max-game-steps",
         type=int,
         default=500,
         help="--mode 1v1: max moves before the duel is called a draw.",

@@ -49,7 +49,7 @@ def main(cli_args):
     )  # 1v1 is MCTS-only; 0 -> default budget
     cpuct = getattr(cli_args, "c_puct", 1.5)
     leaves = getattr(cli_args, "leaves_per_round", 4)
-    num_steps = getattr(cli_args, "num_steps", 500)
+    num_steps = getattr(cli_args, "max_game_steps", 500)
     seed = getattr(cli_args, "seed", 0)
 
     if (
