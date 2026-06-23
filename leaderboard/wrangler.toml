@@ -11,6 +11,6 @@ binding = "ASSETS"
 # Created with `wrangler kv namespace create LEADERBOARD`; paste the printed id below.
 [[kv_namespaces]]
 binding = "LEADERBOARD"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "a8563949aac04d188e6abc958d298752"
 
 # PUBLISH_TOKEN is a secret, not config: `wrangler secret put PUBLISH_TOKEN`.

@@ -7,6 +7,7 @@ tb_logs/
 datasets/
 **/**checkpoint**
 build/
+.wrangler/
 *.egg-info/
 *.so
 tetrio/
