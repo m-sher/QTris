@@ -231,10 +231,10 @@ def main() -> None:
         help="comma-separated tier subdirs to load from --garbage-traces (default: all).",
     )
     az.add_argument(
-        "--np-seed",
+        "--seed",
         type=int,
         default=None,
-        help="seed the numpy RNG (Dirichlet noise, temperature sampling).",
+        help="seed the RNG (Dirichlet noise, temperature sampling).",
     )
     az.add_argument(
         "--curriculum",

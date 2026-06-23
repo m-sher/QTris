@@ -54,7 +54,7 @@ def main(cli_args):
     args = SimpleNamespace(
         p1=str(cli_args.checkpoint),
         p2=str(cli_args.opponent),
-        num_steps=getattr(cli_args, "num_steps", 500),
+        num_steps=getattr(cli_args, "max_game_steps", 500),
         seed=getattr(cli_args, "seed", 0),
         greedy=getattr(cli_args, "greedy", False),
         temperature=getattr(cli_args, "temperature", 1.0),
