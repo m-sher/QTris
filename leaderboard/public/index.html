@@ -48,6 +48,7 @@
       .tag.live { color: var(--good); border-color: rgba(63,185,80,.4); }
       .name-tags { display: inline-flex; gap: 6px; align-items: center; }
       .rank { color: var(--muted); }
+      .raw { color: var(--muted); font-size: 11px; margin-left: 6px; }
       footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
       a { color: var(--ref); }
       .status { color: var(--muted); }
@@ -62,7 +63,8 @@
       <div id="content"><p class="status">Loading&hellip;</p></div>
 
       <footer>
-        Auto-refreshes every 30s &middot; <span id="updated">&mdash;</span>
+        Auto-refreshes every 30s &middot; <span id="updated">&mdash;</span><br />
+        Learner ELO is smoothed (EMA); its raw value is shown beside it.
       </footer>
     </div>
 
@@ -94,16 +96,19 @@
           return;
         }
 
-        const entries = data.entries.slice().sort((a, b) => b.rating - a.rating);
+        // The learner's displayed rating is its smoothed EMA; everyone else uses raw.
+        const shown = (e) => (e.is_learner && e.rating_ema != null ? e.rating_ema : e.rating);
+        const entries = data.entries.slice().sort((a, b) => shown(b) - shown(a));
         const learner = entries.find((e) => e.is_learner);
         const reference = entries.find((e) => e.is_reference);
         const pool = entries.filter((e) => !e.is_learner && !e.is_reference);
         const best = pool.length ? Math.max(...pool.map((e) => e.rating)) : null;
 
-        const delta = learner && reference ? learner.rating - reference.rating : null;
+        const lr = learner ? shown(learner) : null;
+        const delta = lr != null && reference ? lr - reference.rating : null;
         const deltaStr = delta == null ? "—" : (delta >= 0 ? "+" : "") + fmt(delta);
         cards.innerHTML =
-          card("Learner", learner ? fmt(learner.rating) : "—") +
+          card("Learner", lr == null ? "—" : fmt(lr)) +
           card("vs reference", deltaStr, delta == null ? "" : delta >= 0 ? "delta-pos" : "delta-neg") +
           card("Best pool", best == null ? "—" : fmt(best));
 
@@ -117,7 +122,11 @@
             return `<tr class="${cls}">
               <td class="rank">${i + 1}</td>
               <td><span class="name-tags">${e.id} ${tags.join(" ")}</span></td>
-              <td>${fmt(e.rating)}</td>
+              <td>${fmt(shown(e))}${
+                e.is_learner && e.rating_ema != null
+                  ? `<span class="raw">raw ${fmt(e.rating)}</span>`
+                  : ""
+              }</td>
               <td>${e.games ?? 0}</td>
             </tr>`;
           })

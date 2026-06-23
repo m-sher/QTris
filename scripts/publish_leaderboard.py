@@ -14,11 +14,13 @@ import hashlib
 import json
 import os
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
 DEFAULT_POOL = "checkpoints/1v1_placement_az/pool"
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_USER_AGENT = "qtris-leaderboard-publisher/1.0"
 
 
 def _load_dotenv(path):
@@ -96,12 +98,51 @@ def publish(payload, url, token):
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
             # Cloudflare's bot check (error 1010) blocks the default Python-urllib UA.
-            "User-Agent": "qtris-leaderboard-publisher/1.0",
+            "User-Agent": _USER_AGENT,
         },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status
+
+
+def _seed_state(url):
+    """Resume (ema, last_raw) for the learner from the last published payload; (None, None)
+    if nothing has been published yet or the Worker is unreachable."""
+    try:
+        req = urllib.request.Request(
+            url.rstrip("/") + "/api/leaderboard", headers={"User-Agent": _USER_AGENT}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, ValueError, TimeoutError):
+        return None, None
+    for e in data.get("entries", []):
+        if e.get("is_learner"):
+            ema, raw = e.get("rating_ema"), e.get("rating")
+            return (
+                float(ema) if ema is not None else None,
+                float(raw) if raw is not None else None,
+            )
+    return None, None
+
+
+def _fold_ema(payload, ema, last_raw, alpha):
+    """Advance the learner's EMA on a changed raw rating and tag it onto the learner entry.
+
+    The EMA is recursive (ema = alpha*raw + (1-alpha)*ema_prev), so only the running value is
+    carried, not history. Advances only when the raw rating actually changed, so alpha measures
+    rating updates (~every 5 gens) rather than publish polls. Returns the new (ema, last_raw)."""
+    learner = next((e for e in payload["entries"] if e.get("is_learner")), None)
+    if learner is None:
+        return ema, last_raw
+    raw = learner["rating"]
+    if ema is None:
+        ema = raw  # cold start: begin at the current value
+    elif last_raw is not None and raw != last_raw:
+        ema = alpha * raw + (1.0 - alpha) * ema
+    learner["rating_ema"] = round(ema, 2)
+    return ema, raw
 
 
 def main():
@@ -130,6 +171,12 @@ def main():
         default=120,
         help="min seconds between writes, KV free-tier guard (default 120)",
     )
+    ap.add_argument(
+        "--ema-alpha",
+        type=float,
+        default=0.3,
+        help="EMA smoothing for the learner's displayed rating (0-1; lower = calmer)",
+    )
     args = ap.parse_args()
 
     # Precedence: explicit flag > already-exported env > .env file.
@@ -142,6 +189,8 @@ def main():
             "or via --url/--token)."
         )
 
+    # Resume the smoothing from KV so restarts don't reset the learner's smoothed line.
+    ema, last_raw = _seed_state(url)
     last_digest = None
     last_write = 0.0
     while True:
@@ -149,6 +198,7 @@ def main():
         if payload is None:
             print(f"no readable elo.json in {args.pool_dir}, skipping", flush=True)
         else:
+            ema, last_raw = _fold_ema(payload, ema, last_raw, args.ema_alpha)
             digest = _digest(payload)
             now = time.monotonic()
             if digest == last_digest:

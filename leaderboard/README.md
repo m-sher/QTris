@@ -61,6 +61,16 @@ Or via cron (stdlib only, so plain `python3` works) every 2 minutes; it reads th
 
 Then open the Worker URL.
 
+The learner's displayed rating is a restart-safe EMA (smoothing the raw, noisy per-generation
+Elo); raw is shown beside it. Tune the smoothing with `--ema-alpha` (0-1, lower = calmer,
+default 0.3). This is display-only: it never alters `elo.json`.
+
+## Updating after edits
+
+- Changed `worker.js`, `public/index.html`, or `wrangler.toml`? Redeploy: `cd leaderboard &&
+  npx wrangler deploy`.
+- Changed `scripts/publish_leaderboard.py`? Just restart the publisher loop (no redeploy).
+
 ## Local dev
 
 ```bash
