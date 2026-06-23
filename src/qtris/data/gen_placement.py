@@ -133,7 +133,7 @@ def main(args):
     dataset_path = (
         str(args.output) if args.output else "datasets/tetris_oracle_placement"
     )
-    num_steps = args.steps
+    num_steps = args.num_steps
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()

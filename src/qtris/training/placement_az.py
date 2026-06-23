@@ -244,7 +244,7 @@ def main(args):
     num_games = getattr(args, "num_games", 16)
     horizon = getattr(args, "horizon", 32)
     num_generations = getattr(args, "num_generations", 1_000_000)
-    mini_batch_size = getattr(args, "mini_batch_size", 256)
+    mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 1e-4)
@@ -258,12 +258,12 @@ def main(args):
     run_name = getattr(args, "run_name", None)
     no_harvest = getattr(args, "no_harvest", False)
     trace_tiers = getattr(args, "trace_tiers", None)
-    np_seed = getattr(args, "np_seed", None)
+    seed = getattr(args, "seed", None)
     curriculum = getattr(args, "curriculum", False)
     cur_d = float(getattr(args, "curriculum_start", 0.0))
 
-    if np_seed is not None:
-        np.random.seed(np_seed)
+    if seed is not None:
+        np.random.seed(seed)
 
     trace_pools = _load_trace_pools(garbage_traces) if garbage_traces else None
     if trace_pools is not None and trace_tiers:
@@ -410,7 +410,7 @@ def main(args):
         run_name=run_name,
         harvest=not no_harvest,
         trace_tiers=trace_tiers,
-        np_seed=np_seed,
+        seed=seed,
         curriculum=curriculum,
         curriculum_start=cur_d,
     )
