@@ -116,7 +116,6 @@
           .map((e, i) => {
             const cls = e.is_learner ? "learner" : e.is_reference ? "reference" : "";
             const tags = [];
-            if (e.is_learner) tags.push('<span class="tag">learner</span>');
             if (e.is_reference) tags.push('<span class="tag">reference</span>');
             tags.push(`<span class="tag ${e.present ? "live" : ""}">${e.present ? "live" : "archived"}</span>`);
             return `<tr class="${cls}">
