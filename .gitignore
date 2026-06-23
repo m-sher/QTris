@@ -1,4 +1,5 @@
 /.ipynb_checkpoints
+.env
 **/__pycache__
 **/wandb
 tb_logs/

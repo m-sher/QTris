@@ -18,6 +18,23 @@ import urllib.request
 from datetime import datetime, timezone
 
 DEFAULT_POOL = "checkpoints/1v1_placement_az/pool"
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _load_dotenv(path):
+    """Fill os.environ from a simple KEY=VALUE .env file; real env vars still win."""
+    try:
+        with open(path) as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.removeprefix("export ").strip()
+        os.environ.setdefault(key, val.strip().strip("\"'"))
 
 
 def _present_gens(pool_dir):
@@ -78,6 +95,8 @@ def publish(payload, url, token):
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            # Cloudflare's bot check (error 1010) blocks the default Python-urllib UA.
+            "User-Agent": "qtris-leaderboard-publisher/1.0",
         },
         method="POST",
     )
@@ -92,11 +111,14 @@ def main():
     ap.add_argument(
         "--pool-dir", default=DEFAULT_POOL, help="dir holding elo.json + gen_*.index"
     )
+    ap.add_argument("--url", default=None, help="Worker base URL (or LEADERBOARD_URL)")
     ap.add_argument(
-        "--url", default=os.environ.get("LEADERBOARD_URL"), help="Worker base URL"
+        "--token", default=None, help="publish secret (or LEADERBOARD_TOKEN)"
     )
     ap.add_argument(
-        "--token", default=os.environ.get("LEADERBOARD_TOKEN"), help="publish secret"
+        "--env-file",
+        default=os.path.join(_REPO_ROOT, ".env"),
+        help="dotenv file holding LEADERBOARD_URL / LEADERBOARD_TOKEN",
     )
     ap.add_argument("--once", action="store_true", help="publish once and exit")
     ap.add_argument(
@@ -110,8 +132,15 @@ def main():
     )
     args = ap.parse_args()
 
-    if not args.url or not args.token:
-        ap.error("set LEADERBOARD_URL and LEADERBOARD_TOKEN (or pass --url/--token).")
+    # Precedence: explicit flag > already-exported env > .env file.
+    _load_dotenv(args.env_file)
+    url = args.url or os.environ.get("LEADERBOARD_URL")
+    token = args.token or os.environ.get("LEADERBOARD_TOKEN")
+    if not url or not token:
+        ap.error(
+            "set LEADERBOARD_URL and LEADERBOARD_TOKEN (in .env, the environment, "
+            "or via --url/--token)."
+        )
 
     last_digest = None
     last_write = 0.0
@@ -127,7 +156,7 @@ def main():
             elif now - last_write < args.min_interval and not args.once:
                 pass  # changed, but hold off to respect the write cap
             else:
-                status = publish(payload, args.url, args.token)
+                status = publish(payload, url, token)
                 last_digest, last_write = digest, now
                 n = len(payload["entries"])
                 print(
