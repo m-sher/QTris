@@ -32,10 +32,20 @@ npx wrangler deploy
 
 ## Run the publisher (training machine)
 
-```bash
-export LEADERBOARD_URL="https://qtris-leaderboard.<subdomain>.workers.dev"
-export LEADERBOARD_TOKEN="<same secret you set above>"
+Put your URL and token in a `.env` at the repo root (copy the template, gitignored so the
+token is never committed):
 
+```bash
+cp .env.example .env
+# then edit .env:
+#   LEADERBOARD_URL=https://qtris-leaderboard.<subdomain>.workers.dev
+#   LEADERBOARD_TOKEN=<same secret you set above>
+```
+
+The publisher auto-loads `.env` from the repo root (precedence: `--url`/`--token` flag >
+exported env var > `.env`), so no `export` is needed:
+
+```bash
 # One-shot (verify it works):
 uv run python scripts/publish_leaderboard.py --once
 
@@ -43,10 +53,10 @@ uv run python scripts/publish_leaderboard.py --once
 scripts/run_leaderboard_publisher.sh
 ```
 
-Or via cron (stdlib only, so plain `python3` works) every 2 minutes:
+Or via cron (stdlib only, so plain `python3` works) every 2 minutes; it reads the same `.env`:
 
 ```cron
-*/2 * * * * cd /path/to/QTris && LEADERBOARD_URL=... LEADERBOARD_TOKEN=... python3 scripts/publish_leaderboard.py --once >> logs/leaderboard_cron.log 2>&1
+*/2 * * * * cd /path/to/QTris && python3 scripts/publish_leaderboard.py --once >> logs/leaderboard_cron.log 2>&1
 ```
 
 Then open the Worker URL.
