@@ -273,7 +273,7 @@ def main(args):
     horizon = getattr(args, "horizon", 32)
     max_game_steps = getattr(args, "max_game_steps", 512)
     num_generations = getattr(args, "num_generations", 1_000_000)
-    mini_batch_size = getattr(args, "mini_batch_size", 256)
+    mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 1e-4)
@@ -290,7 +290,7 @@ def main(args):
         checkpoint_dir = "checkpoints/1v1_placement_az"
     pool_dir = os.path.join(checkpoint_dir, "pool")
     run_name = getattr(args, "run_name", None)
-    np_seed = getattr(args, "np_seed", None)
+    seed = getattr(args, "seed", None)
     save_states_dir = getattr(args, "save_states", None)
     # Opponent-pool Elo knobs.
     elo_enabled = getattr(args, "elo_enabled", True)
@@ -299,9 +299,9 @@ def main(args):
     elo_k_opp = getattr(args, "elo_k_opp", 0.5)
     elo_draw_weight = getattr(args, "elo_draw_weight", 0.5)
 
-    if np_seed is not None:
-        np.random.seed(np_seed)
-    rng = random.Random(np_seed if np_seed is not None else 0)
+    if seed is not None:
+        np.random.seed(seed)
+    rng = random.Random(seed if seed is not None else 0)
 
     # Outcome-z value target; search reward = small attack credit + b2b-build shaping,
     # own-death = -1, undiscounted, scale 1.
@@ -391,7 +391,7 @@ def main(args):
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
-        np_seed=np_seed,
+        seed=seed,
         save_states=save_states_dir,
         elo_enabled=elo_enabled,
         elo_init=elo_init,

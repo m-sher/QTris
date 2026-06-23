@@ -711,9 +711,9 @@ def main(cli_args):
     e = EnvConfig()
     args = SimpleNamespace(
         family=cli_args.family,
-        policy_checkpoint=getattr(cli_args, "policy_checkpoint", None),
+        policy_checkpoint=getattr(cli_args, "checkpoint", None),
         dataset_path=getattr(cli_args, "output", None),
-        num_steps=cli_args.steps,
+        num_steps=cli_args.num_steps,
         seed=getattr(cli_args, "seed", 10_000_000),
         search_depth=16,
         beam_width=200,

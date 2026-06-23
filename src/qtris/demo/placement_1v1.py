@@ -45,11 +45,11 @@ def main(cli_args):
     p1_ckpt = str(cli_args.checkpoint)
     p2_ckpt = str(cli_args.opponent)
     sims = (
-        getattr(cli_args, "mcts_sims", 0) or 256
+        getattr(cli_args, "num_simulations", 0) or 256
     )  # 1v1 is MCTS-only; 0 -> default budget
-    cpuct = getattr(cli_args, "mcts_cpuct", 1.5)
-    leaves = getattr(cli_args, "mcts_leaves", 4)
-    num_steps = getattr(cli_args, "num_steps", 500)
+    cpuct = getattr(cli_args, "c_puct", 1.5)
+    leaves = getattr(cli_args, "leaves_per_round", 4)
+    num_steps = getattr(cli_args, "max_game_steps", 500)
     seed = getattr(cli_args, "seed", 0)
 
     if (
