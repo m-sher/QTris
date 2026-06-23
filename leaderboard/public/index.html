@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QTris ELO Leaderboard</title>
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #171b22;
+        --line: #262c36;
+        --text: #e6edf3;
+        --muted: #8b949e;
+        --accent: #f5a623;
+        --good: #3fb950;
+        --ref: #58a6ff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        padding: 24px 16px 48px;
+      }
+      .wrap { max-width: 760px; margin: 0 auto; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+      .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+      .card {
+        flex: 1 1 160px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+      .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      .card .value { font-size: 22px; margin-top: 4px; }
+      .delta-pos { color: var(--good); }
+      .delta-neg { color: var(--accent); }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+      th:nth-child(2), td:nth-child(2) { text-align: left; }
+      th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+      tr.learner td { background: rgba(245, 166, 35, .10); }
+      tr.reference td { color: var(--ref); }
+      .tag { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+      .tag.live { color: var(--good); border-color: rgba(63,185,80,.4); }
+      .name-tags { display: inline-flex; gap: 6px; align-items: center; }
+      .rank { color: var(--muted); }
+      footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
+      a { color: var(--ref); }
+      .status { color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>QTris ELO Leaderboard</h1>
+      <div class="sub">1v1 AlphaZero opponent pool &middot; anchored Elo (gen_0 = 1500)</div>
+
+      <div id="cards" class="cards"></div>
+      <div id="content"><p class="status">Loading&hellip;</p></div>
+
+      <footer>
+        Auto-refreshes every 30s &middot; <span id="updated">&mdash;</span>
+      </footer>
+    </div>
+
+    <script>
+      const POLL_MS = 30000;
+      const fmt = (n) => (n == null ? "—" : Number(n).toFixed(1));
+
+      function ago(iso) {
+        if (!iso) return "no data yet";
+        const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+        if (s < 60) return `updated ${Math.round(s)}s ago`;
+        if (s < 3600) return `updated ${Math.round(s / 60)}m ago`;
+        return `updated ${Math.round(s / 3600)}h ago`;
+      }
+
+      function card(label, value, deltaClass) {
+        return `<div class="card"><div class="label">${label}</div><div class="value ${deltaClass || ""}">${value}</div></div>`;
+      }
+
+      function render(data) {
+        const updated = document.getElementById("updated");
+        const cards = document.getElementById("cards");
+        const content = document.getElementById("content");
+
+        if (!data || data.status === "waiting" || !Array.isArray(data.entries)) {
+          cards.innerHTML = "";
+          content.innerHTML = '<p class="status">Waiting for the first publish from the training run&hellip;</p>';
+          updated.textContent = "no data yet";
+          return;
+        }
+
+        const entries = data.entries.slice().sort((a, b) => b.rating - a.rating);
+        const learner = entries.find((e) => e.is_learner);
+        const reference = entries.find((e) => e.is_reference);
+        const pool = entries.filter((e) => !e.is_learner && !e.is_reference);
+        const best = pool.length ? Math.max(...pool.map((e) => e.rating)) : null;
+
+        const delta = learner && reference ? learner.rating - reference.rating : null;
+        const deltaStr = delta == null ? "—" : (delta >= 0 ? "+" : "") + fmt(delta);
+        cards.innerHTML =
+          card("Learner", learner ? fmt(learner.rating) : "—") +
+          card("vs reference", deltaStr, delta == null ? "" : delta >= 0 ? "delta-pos" : "delta-neg") +
+          card("Best pool", best == null ? "—" : fmt(best));
+
+        const rows = entries
+          .map((e, i) => {
+            const cls = e.is_learner ? "learner" : e.is_reference ? "reference" : "";
+            const tags = [];
+            if (e.is_learner) tags.push('<span class="tag">learner</span>');
+            if (e.is_reference) tags.push('<span class="tag">reference</span>');
+            tags.push(`<span class="tag ${e.present ? "live" : ""}">${e.present ? "live" : "archived"}</span>`);
+            return `<tr class="${cls}">
+              <td class="rank">${i + 1}</td>
+              <td><span class="name-tags">${e.id} ${tags.join(" ")}</span></td>
+              <td>${fmt(e.rating)}</td>
+              <td>${e.games ?? 0}</td>
+            </tr>`;
+          })
+          .join("");
+
+        content.innerHTML = `<table>
+          <thead><tr><th>#</th><th>Checkpoint</th><th>ELO</th><th>Games</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+        updated.textContent = ago(data.updated_at);
+      }
+
+      async function tick() {
+        try {
+          const r = await fetch("/api/leaderboard", { cache: "no-store" });
+          render(await r.json());
+        } catch (e) {
+          document.getElementById("updated").textContent = "fetch failed, retrying…";
+        }
+      }
+
+      tick();
+      setInterval(tick, POLL_MS);
+    </script>
+  </body>
+</html>
