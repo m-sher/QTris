@@ -1,4 +1,6 @@
 /.ipynb_checkpoints
+.env
+.dev.vars
 **/__pycache__
 **/wandb
 tb_logs/
@@ -6,6 +8,7 @@ tb_logs/
 datasets/
 **/**checkpoint**
 build/
+.wrangler/
 *.egg-info/
 *.so
 tetrio/

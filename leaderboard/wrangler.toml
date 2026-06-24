@@ -1,0 +1,16 @@
+name = "qtris-leaderboard"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Static page (public/index.html). The Worker handles /api/* and falls back to
+# env.ASSETS for everything else.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Created with `wrangler kv namespace create LEADERBOARD`; paste the printed id below.
+[[kv_namespaces]]
+binding = "LEADERBOARD"
+id = "a8563949aac04d188e6abc958d298752"
+
+# PUBLISH_TOKEN is a secret, not config: `wrangler secret put PUBLISH_TOKEN`.
