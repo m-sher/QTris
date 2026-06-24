@@ -68,6 +68,9 @@ uv run datagen ar --dagger --checkpoint checkpoints/ar_pretrained_policy
 
 # Watch a checkpoint play (pygame)
 uv run demo placement --checkpoint checkpoints/placement_az --num-simulations 256
+
+# Agent debug MCP (placement AZ tools only; see src/qtris/mcp/README.md)
+uv run qtris-mcp
 uv run demo ar --mode 1v1 --checkpoint checkpoints/ar_policy_445k --opponent checkpoints/ar_pretrained_policy
 ```
 

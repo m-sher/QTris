@@ -22,6 +22,7 @@ pretrain = "qtris.cli.pretrain:main"
 train    = "qtris.cli.train:main"
 demo     = "qtris.cli.demo:main"
 datagen  = "qtris.cli.datagen:main"
+qtris-mcp = "qtris.mcp.server:main"
 
 [build-system]
 requires = ["hatchling"]
