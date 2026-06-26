@@ -205,7 +205,7 @@ class PyTetrisRunner:
             else:
                 key_sequence, log_probs, masks, _ = self.p_model.predict(
                     (board, pieces, b2b_combo_garbage),
-                    valid_sequences=Convert.tf_to_sequences[None, ...],
+                    valid_sequences=tf.cast(Convert.to_sequence, tf.int64)[None, ...],
                     temperature=self._temperature,
                 )
 

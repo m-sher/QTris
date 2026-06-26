@@ -239,7 +239,7 @@ class Py1v1TetrisRunner:
             else:
                 p1_key_sequence, log_probs, masks, _ = self.p_model.predict(
                     (board, pieces, b2b_combo_garbage),
-                    valid_sequences=Convert.tf_to_sequences[None, ...],
+                    valid_sequences=tf.cast(Convert.to_sequence, tf.int64)[None, ...],
                     temperature=self._temperature,
                 )
 
@@ -258,7 +258,7 @@ class Py1v1TetrisRunner:
             else:
                 p2_key_sequence, _, _, _ = self.opp_model.predict(
                     (opp_board, opp_pieces, opp_b2b_combo_garbage),
-                    valid_sequences=Convert.tf_to_sequences[None, ...],
+                    valid_sequences=tf.cast(Convert.to_sequence, tf.int64)[None, ...],
                     temperature=self._temperature,
                 )
 
