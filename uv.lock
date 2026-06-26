@@ -1638,6 +1638,7 @@ source = { editable = "tetrisenv" }
 dependencies = [
     { name = "gymnasium" },
     { name = "numpy" },
+    { name = "pygame" },
     { name = "tensorflow" },
 ]
 
@@ -1645,6 +1646,7 @@ dependencies = [
 requires-dist = [
     { name = "gymnasium" },
     { name = "numpy" },
+    { name = "pygame" },
     { name = "tensorflow" },
 ]
 
