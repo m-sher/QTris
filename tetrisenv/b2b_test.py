@@ -65,10 +65,10 @@ def run_game(seed, num_steps=200, search_depth=7, beam_width=128,
             game_over = True
             break
 
-        ts = env._step(sequence)
+        _obs, _r, terminated, truncated, info = env.step(sequence)
 
-        atk = float(ts.reward["attack"])
-        clr = float(ts.reward["clear"])
+        atk = float(info["attack"])
+        clr = float(info["clear"])
         total_attack += atk
         total_clears += int(clr)
         if env._scorer._b2b > max_b2b:
@@ -81,7 +81,7 @@ def run_game(seed, num_steps=200, search_depth=7, beam_width=128,
                 break
         heights.append(h)
 
-        if ts.is_last():
+        if terminated or truncated:
             game_over = True
 
     return {

@@ -416,9 +416,9 @@ def run_headless(args):
         n_legal = len(np.unique(cand_actions)) if len(cand_actions) else 0
         print(f"  move dist (top5 of {n_legal} legal): {dist_str}")
 
-        ts = env._step(sequence)
+        _obs, _r, terminated, truncated, info = env.step(sequence)
 
-        atk = float(ts.reward["attack"])
+        atk = float(info["attack"])
         total_attack += atk
 
         # Track consecutive-attack streak
@@ -452,7 +452,7 @@ def run_headless(args):
             f"{max_height:>5}  {avg_height:>5.1f}"
         )
 
-        if ts.is_last():
+        if terminated or truncated:
             print(f"\n** Game over at turn {step} **")
             break
 
@@ -669,11 +669,11 @@ def main():
             return
 
         # Execute action
-        ts = env._step(last_sequence)
+        _obs, _r, terminated, truncated, info = env.step(last_sequence)
 
         # Extract reward info
-        atk = float(ts.reward["attack"])
-        clr = float(ts.reward["clear"])
+        atk = float(info["attack"])
+        clr = float(info["clear"])
         last_attack = atk
         last_clears = int(clr)
         total_attack += atk
@@ -683,7 +683,7 @@ def main():
         step_info_history.append(info)
 
         # Check game over
-        if ts.is_last():
+        if terminated or truncated:
             game_over = True
 
         # Save snapshot
