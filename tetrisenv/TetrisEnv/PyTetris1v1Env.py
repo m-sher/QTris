@@ -1,14 +1,12 @@
-from tf_agents.environments import py_environment
-from tf_agents.specs import array_spec
-from tf_agents.trajectories import time_step as ts
+import gymnasium
+from gymnasium import spaces
 from .PyTetrisEnv import PyTetrisEnv
-from .Pieces import PieceType
 import numpy as np
 import random
 from typing import Dict, Optional
 
 
-class PyTetris1v1Env(py_environment.PyEnvironment):
+class PyTetris1v1Env(gymnasium.Env):
     """1v1 Tetris environment for self-play training.
 
     Wraps two PyTetrisEnv instances with garbage_chance=0 and auto_push_garbage=False.
@@ -83,77 +81,46 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
 
         num_sequences = 160 * num_row_tiers
 
-        self._observation_spec = {
+        obs_spaces = {
             # Player 1 (training)
-            "board": array_spec.BoundedArraySpec(
-                shape=(24, 10, 1), dtype=np.float32, minimum=0.0, maximum=1.0, name="board",
-            ),
-            "vis_board": array_spec.BoundedArraySpec(
-                shape=(24, 10, 1), dtype=np.int32, minimum=0, maximum=8, name="vis_board",
-            ),
-            "pieces": array_spec.BoundedArraySpec(
-                shape=(2 + queue_size,), dtype=np.int64, minimum=0, maximum=7, name="pieces",
-            ),
-            "b2b_combo_garbage": array_spec.ArraySpec(
-                shape=(3,), dtype=np.float32, name="b2b_combo_garbage",
-            ),
-            "sequences": array_spec.ArraySpec(
-                shape=(num_sequences, max_len), dtype=np.int64, name="sequences",
-            ),
+            "board": spaces.Box(0.0, 1.0, (24, 10, 1), np.float32),
+            "vis_board": spaces.Box(0, 8, (24, 10, 1), np.int32),
+            "pieces": spaces.Box(0, 7, (2 + queue_size,), np.int64),
+            "b2b_combo_garbage": spaces.Box(-np.inf, np.inf, (3,), np.float32),
+            "sequences": spaces.Box(0, 11, (num_sequences, max_len), np.int64),
             # Player 2 (opponent)
-            "opp_board": array_spec.BoundedArraySpec(
-                shape=(24, 10, 1), dtype=np.float32, minimum=0.0, maximum=1.0, name="opp_board",
-            ),
-            "opp_pieces": array_spec.BoundedArraySpec(
-                shape=(2 + queue_size,), dtype=np.int64, minimum=0, maximum=7, name="opp_pieces",
-            ),
-            "opp_b2b_combo_garbage": array_spec.ArraySpec(
-                shape=(3,), dtype=np.float32, name="opp_b2b_combo_garbage",
-            ),
-            "opp_sequences": array_spec.ArraySpec(
-                shape=(num_sequences, max_len), dtype=np.int64, name="opp_sequences",
-            ),
+            "opp_board": spaces.Box(0.0, 1.0, (24, 10, 1), np.float32),
+            "opp_pieces": spaces.Box(0, 7, (2 + queue_size,), np.int64),
+            "opp_b2b_combo_garbage": spaces.Box(-np.inf, np.inf, (3,), np.float32),
+            "opp_sequences": spaces.Box(0, 11, (num_sequences, max_len), np.int64),
         }
-
-        # Two key sequences concatenated: player 1 (15) + player 2 (15)
-        self._action_spec = array_spec.BoundedArraySpec(
-            shape=(30,), dtype=np.int64, minimum=0, maximum=11, name="key_sequences",
-        )
-
-        self._reward_spec = {
-            "attack": array_spec.ArraySpec(shape=(), dtype=np.float32, name="attack"),
-            "net_attack": array_spec.ArraySpec(shape=(), dtype=np.float32, name="net_attack"),
-            "clear": array_spec.ArraySpec(shape=(), dtype=np.float32, name="clear"),
-            "attack_reward": array_spec.ArraySpec(shape=(), dtype=np.float32, name="attack_reward"),
-            "total_reward": array_spec.ArraySpec(shape=(), dtype=np.float32, name="total_reward"),
-            "garbage_pushed": array_spec.ArraySpec(shape=(), dtype=np.float32, name="garbage_pushed"),
-            "win": array_spec.ArraySpec(shape=(), dtype=np.float32, name="win"),
-            "loss": array_spec.ArraySpec(shape=(), dtype=np.float32, name="loss"),
-            "opp_attack": array_spec.ArraySpec(shape=(), dtype=np.float32, name="opp_attack"),
-            "opp_clear": array_spec.ArraySpec(shape=(), dtype=np.float32, name="opp_clear"),
-        }
+        self.observation_space = spaces.Dict(obs_spaces)
+        # Two key sequences concatenated: player 1 (15) + player 2 (15).
+        self.action_space = spaces.Box(0, 11, (30,), np.int64)
 
         print(f"Initialized 1v1 Env {idx}", flush=True)
-
-    def action_spec(self) -> array_spec.BoundedArraySpec:
-        return self._action_spec
-
-    def observation_spec(self) -> Dict[str, array_spec.ArraySpec]:
-        return self._observation_spec
-
-    def reward_spec(self) -> Dict[str, array_spec.ArraySpec]:
-        return self._reward_spec
 
     def _step_one_player(self, env, action):
         """Execute an action for one player. Returns
         (top_out, clear, attack, net_attack, is_spin, is_surge)."""
         pre_b2b = env._scorer._b2b
         (
-            top_out, clear, attack, is_spin,
-            board, vis_board, active_piece, hold_piece, queue,
+            top_out,
+            clear,
+            attack,
+            is_spin,
+            board,
+            vis_board,
+            active_piece,
+            hold_piece,
+            queue,
         ) = env._execute_action(
-            env._board, env._vis_board, env._active_piece,
-            env._hold_piece, env._queue, action,
+            env._board,
+            env._vis_board,
+            env._active_piece,
+            env._hold_piece,
+            env._queue,
+            action,
         )
 
         # Actual surge = a b2b chain (>=4) broken by this clear (Scorer.judge releases it).
@@ -175,21 +142,22 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
 
         return top_out, clear, float(attack), float(net_attack), is_spin, is_surge
 
-    def _reset(self) -> ts.TimeStep:
-        self._env1._reset()
-        self._env2._reset()
+    def reset(self, *, seed=None, options=None):
+        if seed is not None:
+            self._random = random.Random(seed)
+            self._env1._seed = seed
+            self._env2._seed = seed
+        self._env1.reset()
+        self._env2.reset()
         self._step_num = 0
         self._episode_ended = False
         self._random = random.Random(self._random.randint(0, 2**31))
 
         observation = self._create_1v1_observation()
-        return ts.restart(observation=observation, reward_spec=self._reward_spec)
+        return observation, {}
 
-    def _step(self, combined_action: np.ndarray) -> ts.TimeStep:
+    def step(self, combined_action: np.ndarray):
         self._step_num += 1
-
-        if self._episode_ended:
-            return self.reset()
 
         action1 = combined_action[:15]
         action2 = combined_action[15:]
@@ -209,13 +177,17 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         if clear1 == 0 and self._env1._garbage_queue:
             self._env1._tick_garbage_timers()
             self._env1._board, self._env1._vis_board, garbage_pushed1 = (
-                self._env1._push_garbage_to_board(self._env1._board, self._env1._vis_board)
+                self._env1._push_garbage_to_board(
+                    self._env1._board, self._env1._vis_board
+                )
             )
 
         if clear2 == 0 and self._env2._garbage_queue:
             self._env2._tick_garbage_timers()
             self._env2._board, self._env2._vis_board, _ = (
-                self._env2._push_garbage_to_board(self._env2._board, self._env2._vis_board)
+                self._env2._push_garbage_to_board(
+                    self._env2._board, self._env2._vis_board
+                )
             )
 
         # --- Inject net attacks as garbage into opponent (real surges split into waves) ---
@@ -257,7 +229,7 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         p1_won = p2_died and not p1_died
         p1_lost = p1_died and not p2_died
 
-        reward = {
+        info = {
             "attack": np.float32(attack1),
             "net_attack": np.float32(net1),
             "clear": np.float32(clear1),
@@ -270,14 +242,15 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
             "opp_clear": np.float32(clear2),
         }
 
-        self._episode_ended = p1_died or p2_died or (
-            self._max_steps is not None and self._step_num >= self._max_steps
+        terminated = bool(p1_died or p2_died)
+        truncated = (
+            not terminated
+            and self._max_steps is not None
+            and self._step_num >= self._max_steps
         )
+        self._episode_ended = terminated or truncated
 
-        if self._episode_ended:
-            return ts.termination(observation=observation, reward=reward)
-        else:
-            return ts.transition(observation=observation, reward=reward)
+        return observation, float(total_reward), terminated, truncated, info
 
     def _create_1v1_observation(self) -> Dict[str, np.ndarray]:
         obs1 = self._env1._create_observation()

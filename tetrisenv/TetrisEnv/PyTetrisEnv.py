@@ -1,6 +1,5 @@
-from tf_agents.environments import py_environment
-from tf_agents.specs import array_spec
-from tf_agents.trajectories import time_step as ts
+import gymnasium
+from gymnasium import spaces
 from .RotationSystem import RotationSystem
 from .Scorer import Scorer
 from .Pieces import Piece, PieceType
@@ -31,7 +30,9 @@ def _split_into_waves(num_rows: int) -> list:
 
 def _surge_segments(num_rows: int) -> list:
     """Trace garbage: 3 waves when the row count alone marks a surge (>6), else one slab."""
-    return _split_into_waves(num_rows) if num_rows > TRACE_SURGE_THRESHOLD else [num_rows]
+    return (
+        _split_into_waves(num_rows) if num_rows > TRACE_SURGE_THRESHOLD else [num_rows]
+    )
 
 
 # 40-row board = 20 visible + 20 buffer; row 0 = top. Pieces spawn just above the visible field
@@ -49,7 +50,7 @@ def spawn_envelope_blocked(board: np.ndarray) -> bool:
     return bool(np.any(board[SPAWN_ENVELOPE[:, 0], SPAWN_ENVELOPE[:, 1]] != 0.0))
 
 
-class PyTetrisEnv(py_environment.PyEnvironment):
+class PyTetrisEnv(gymnasium.Env):
     def __init__(
         self,
         queue_size: int,
@@ -155,76 +156,28 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         # by action index, from pathfinding) so the candidate-ranking net can be driven.
         self._placement_candidates = placement_candidates
 
-        self._observation_spec = {
-            "board": array_spec.BoundedArraySpec(
-                shape=(24, 10, 1),
-                dtype=np.float32,
-                minimum=0.0,
-                maximum=1.0,
-                name="board",
-            ),
-            "vis_board": array_spec.BoundedArraySpec(
-                shape=(24, 10, 1),
-                dtype=np.int32,
-                minimum=0.0,
-                maximum=8.0,
-                name="vis_board",
-            ),
-            "pieces": array_spec.BoundedArraySpec(
-                shape=(2 + queue_size,),
-                dtype=np.int64,
-                minimum=0,
-                maximum=7,
-                name="pieces",
-            ),
-            "b2b_combo_garbage": array_spec.ArraySpec(
-                shape=(3,), dtype=np.float32, name="b2b_combo"
-            ),
-            "sequences": array_spec.ArraySpec(
-                shape=(160 * num_row_tiers, max_len), dtype=np.int64, name="sequences"
-            ),
+        obs_spaces = {
+            "board": spaces.Box(0.0, 1.0, (24, 10, 1), np.float32),
+            "vis_board": spaces.Box(0, 8, (24, 10, 1), np.int32),
+            "pieces": spaces.Box(0, 7, (2 + queue_size,), np.int64),
+            "b2b_combo_garbage": spaces.Box(-np.inf, np.inf, (3,), np.float32),
+            "sequences": spaces.Box(0, 11, (160 * num_row_tiers, max_len), np.int64),
         }
         if placement_candidates:
-            self._observation_spec["cand_scores"] = array_spec.ArraySpec(
-                shape=(NUM_PLACEMENT_ACTIONS,), dtype=np.float32, name="cand_scores"
+            obs_spaces["cand_scores"] = spaces.Box(
+                -np.inf, 0.0, (NUM_PLACEMENT_ACTIONS,), np.float32
             )
-            self._observation_spec["cand_landing_rows"] = array_spec.ArraySpec(
-                shape=(NUM_PLACEMENT_ACTIONS,), dtype=np.int32, name="cand_landing_rows"
+            obs_spaces["cand_landing_rows"] = spaces.Box(
+                -1, 39, (NUM_PLACEMENT_ACTIONS,), np.int32
             )
-            self._observation_spec["cand_sequences"] = array_spec.ArraySpec(
-                shape=(NUM_PLACEMENT_ACTIONS, max_len),
-                dtype=np.int64,
-                name="cand_sequences",
+            obs_spaces["cand_sequences"] = spaces.Box(
+                0, 11, (NUM_PLACEMENT_ACTIONS, max_len), np.int64
             )
-
-        self._action_spec = array_spec.BoundedArraySpec(
-            shape=(15,), dtype=np.int64, minimum=0, maximum=11, name="key_sequence"
-        )
-
-        self._reward_spec = {
-            "attack": array_spec.ArraySpec(shape=(), dtype=np.float32, name="attack"),
-            "clear": array_spec.ArraySpec(shape=(), dtype=np.float32, name="clear"),
-            "attack_reward": array_spec.ArraySpec(
-                shape=(), dtype=np.float32, name="attack_reward"
-            ),
-            "total_reward": array_spec.ArraySpec(
-                shape=(), dtype=np.float32, name="total_reward"
-            ),
-            "garbage_pushed": array_spec.ArraySpec(
-                shape=(), dtype=np.float32, name="garbage_pushed"
-            ),
-        }
+        self.observation_space = spaces.Dict(obs_spaces)
+        # Action is a fixed-length key sequence.
+        self.action_space = spaces.Box(0, 11, (15,), np.int64)
 
         print(f"Initialized Env {idx}", flush=True)
-
-    def action_spec(self) -> array_spec.BoundedArraySpec:
-        return self._action_spec
-
-    def observation_spec(self) -> Dict[str, array_spec.ArraySpec]:
-        return self._observation_spec
-
-    def reward_spec(self) -> Dict[str, array_spec.ArraySpec]:
-        return self._reward_spec
 
     def _calculate_potential(
         self,
@@ -260,7 +213,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         return phi_target - phi_safety - phi_clean
 
-    def _reset(self) -> ts.TimeStep:
+    def reset(self, *, seed=None, options=None):
+        if seed is not None:
+            self._seed = seed
         self._seed = (self._seed + 1) if self._seed is not None else None
 
         self._random = random.Random(self._seed)
@@ -299,18 +254,12 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         observation = self._create_observation()
 
-        return ts.restart(observation=observation, reward_spec=self._reward_spec)
+        return observation, {}
 
-    def _step(self, key_sequence: np.ndarray) -> ts.TimeStep:
-        """
-        `_lock_piece` does not move piece to the bottom, and only tries
-        locking at the current location. Action sequences all already end in
-        hard drop."
-        """
+    def step(self, key_sequence: np.ndarray):
+        """`_lock_piece` does not move the piece to the bottom; it only tries locking at the
+        current location. Action sequences all already end in hard drop."""
         self._step_num += 1
-
-        if self._episode_ended:
-            return self.reset()
 
         pre_b2b = self._scorer._b2b
 
@@ -410,22 +359,24 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         observation = self._create_observation()
 
-        reward = {
-            "attack": np.array(attack),
-            "clear": np.array(clear),
-            "attack_reward": np.array(attack_reward),
-            "total_reward": np.array(total_reward),
-            "garbage_pushed": np.array(float(garbage_pushed)),
+        # Reward channels in info (float32); the scalar reward is total_reward.
+        info = {
+            "attack": np.float32(attack),
+            "clear": np.float32(clear),
+            "attack_reward": np.float32(attack_reward),
+            "total_reward": np.float32(total_reward),
+            "garbage_pushed": np.float32(garbage_pushed),
         }
 
-        self._episode_ended = died or (
-            False if not self._max_steps else self._step_num >= self._max_steps
+        terminated = bool(died)
+        truncated = (
+            not terminated
+            and bool(self._max_steps)
+            and self._step_num >= self._max_steps
         )
+        self._episode_ended = terminated or truncated
 
-        if self._episode_ended:
-            return ts.termination(observation=observation, reward=reward)
-        else:
-            return ts.transition(observation=observation, reward=reward)
+        return observation, float(total_reward), terminated, truncated, info
 
     def _execute_action(
         self,
