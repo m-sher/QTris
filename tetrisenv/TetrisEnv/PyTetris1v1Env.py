@@ -154,7 +154,23 @@ class PyTetris1v1Env(gymnasium.Env):
         self._random = random.Random(self._random.randint(0, 2**31))
 
         observation = self._create_1v1_observation()
-        return observation, {}
+        # info reports the reward channels zeroed (no action taken yet).
+        info = {
+            k: np.float32(0.0)
+            for k in (
+                "attack",
+                "net_attack",
+                "clear",
+                "attack_reward",
+                "total_reward",
+                "garbage_pushed",
+                "win",
+                "loss",
+                "opp_attack",
+                "opp_clear",
+            )
+        }
+        return observation, info
 
     def step(self, combined_action: np.ndarray):
         self._step_num += 1

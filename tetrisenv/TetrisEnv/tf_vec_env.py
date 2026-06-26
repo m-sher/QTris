@@ -29,8 +29,10 @@ class TFVecEnv:
         self.num_envs = venv.num_envs
 
     def reset(self):
-        obs, _info = self._venv.reset()
-        return VecStep(_to_tf(obs), {}, None)
+        obs, info = self._venv.reset()
+        reward = _to_tf({k: v for k, v in info.items() if not k.startswith("_")})
+        done = tf.zeros(self.num_envs, tf.bool)
+        return VecStep(_to_tf(obs), reward, done)
 
     def step(self, actions):
         a = actions.numpy() if hasattr(actions, "numpy") else np.asarray(actions)

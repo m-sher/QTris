@@ -254,7 +254,18 @@ class PyTetrisEnv(gymnasium.Env):
 
         observation = self._create_observation()
 
-        return observation, {}
+        # info reports the reward channels zeroed (no action taken yet).
+        info = {
+            k: np.float32(0.0)
+            for k in (
+                "attack",
+                "clear",
+                "attack_reward",
+                "total_reward",
+                "garbage_pushed",
+            )
+        }
+        return observation, info
 
     def step(self, key_sequence: np.ndarray):
         """`_lock_piece` does not move the piece to the bottom; it only tries locking at the
