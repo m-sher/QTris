@@ -161,7 +161,7 @@ def collect_dagger(
         num_row_tiers=num_row_tiers,
     )
 
-    time_step = env.reset()
+    obs, _ = env.reset()
     searcher = CB2BSearch()
 
     transitions = []
@@ -174,7 +174,6 @@ def collect_dagger(
 
     pbar = tqdm(range(num_steps), disable=headless, desc="dagger", unit="step")
     for step in pbar:
-        obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
@@ -216,23 +215,23 @@ def collect_dagger(
             # No labelable placement - treat as terminal and reset.
             beam_dead += 1
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
             continue
 
         seqs, scores = dense_target(cand_actions, cand_scores, cand_seqs, max_len)
         transitions.append((board, pieces, bcg, seqs, scores))
 
         # Step env with the POLICY's choice (DAgger invariant).
-        time_step = env._step(policy_seq)
-        total_attack += float(time_step.reward["attack"])
+        obs, _reward, terminated, truncated, info = env.step(policy_seq)
+        total_attack += float(info["attack"])
         pieces_placed += 1
         if not np.array_equal(policy_seq, best_seq):
             policy_disagrees += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
-        if time_step.is_last():
+        if terminated or truncated:
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
 
         if (step + 1) % log_every == 0:
             disagree_rate = 100.0 * policy_disagrees / (step + 1)
@@ -293,7 +292,7 @@ def rollout_placement_states(
         num_row_tiers=num_row_tiers,
     )
 
-    time_step = env.reset()
+    obs, _ = env.reset()
 
     states = []
     beam_dead = 0
@@ -326,7 +325,7 @@ def rollout_placement_states(
         if best_action < 0 or len(cand_scores) == 0:
             beam_dead += 1
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
             continue
 
         states.append(
@@ -365,16 +364,16 @@ def rollout_placement_states(
         )
         policy_seq = policy_seq.numpy()[0].astype(np.int64)
 
-        time_step = env._step(policy_seq)
-        total_attack += float(time_step.reward["attack"])
+        obs, _reward, terminated, truncated, info = env.step(policy_seq)
+        total_attack += float(info["attack"])
         pieces_placed += 1
         if not np.array_equal(policy_seq, best_seq):
             policy_disagrees += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
-        if time_step.is_last():
+        if terminated or truncated:
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
 
         if (step + 1) % log_every == 0:
             disagree_rate = 100.0 * policy_disagrees / (step + 1)

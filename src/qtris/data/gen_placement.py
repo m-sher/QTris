@@ -53,7 +53,7 @@ def collect(
         num_row_tiers=num_row_tiers,
     )
 
-    time_step = env.reset()
+    obs, _ = env.reset()
     searcher = CB2BSearch()
 
     transitions = []
@@ -66,7 +66,6 @@ def collect(
         range(num_steps), disable=headless, desc="datagen placement", unit="step"
     )
     for step in pbar:
-        obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
@@ -90,7 +89,7 @@ def collect(
 
         if best_action < 0 or len(cand_scores) == 0:
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
             continue
 
         row_norm = env._board.shape[0] - 1
@@ -105,14 +104,14 @@ def collect(
         )
         transitions.append((board, pieces, bcg, placements, scores))
 
-        time_step = env._step(best_seq.astype(np.int64))
-        total_attack += float(time_step.reward["attack"])
+        obs, _reward, terminated, truncated, info = env.step(best_seq.astype(np.int64))
+        total_attack += float(info["attack"])
         pieces_placed += 1
         max_b2b = max(max_b2b, int(env._scorer._b2b))
 
-        if time_step.is_last():
+        if terminated or truncated:
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
 
         if (step + 1) % log_every == 0:
             app = total_attack / max(pieces_placed, 1)

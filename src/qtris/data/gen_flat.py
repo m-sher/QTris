@@ -51,7 +51,7 @@ def collect(
         gamma=gamma,
     )
 
-    time_step = env.reset()
+    obs, _ = env.reset()
     searcher = CB2BSearch()
 
     transitions = []
@@ -96,7 +96,6 @@ def collect(
 
     pbar = tqdm(range(num_steps), disable=headless, desc="datagen flat", unit="step")
     for step in pbar:
-        obs = time_step.observation
         board = obs["board"].astype(np.float32)
         pieces = obs["pieces"].astype(np.int64)
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
@@ -120,7 +119,7 @@ def collect(
             flush(episode_buf, is_death=True)
             episode_buf = []
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
             continue
 
         sequence = sequence.astype(np.int64)
@@ -128,24 +127,24 @@ def collect(
 
         if not np.any(matches):
             unmatched += 1
-            time_step = env._step(sequence)
-            total_attack += float(time_step.reward["attack"])
+            obs, _reward, terminated, truncated, info = env.step(sequence)
+            total_attack += float(info["attack"])
             pieces_placed += 1
-            if time_step.is_last():
+            if terminated or truncated:
                 flush(episode_buf, is_death=True)
                 episode_buf = []
                 deaths += 1
-                time_step = env.reset()
+                obs, _ = env.reset()
             continue
 
         flat_action_idx = int(np.argmax(matches))
         valid_mask = np.any(valid_sequences == HARD_DROP_ID, axis=-1)
 
-        time_step = env._step(sequence)
-        total_attack += float(time_step.reward["attack"])
+        obs, _reward, terminated, truncated, info = env.step(sequence)
+        total_attack += float(info["attack"])
         pieces_placed += 1
-        reward = float(time_step.reward["total_reward"])
-        done = bool(time_step.is_last())
+        reward = float(info["total_reward"])
+        done = bool(terminated or truncated)
 
         episode_buf.append(
             (
@@ -165,7 +164,7 @@ def collect(
             flush(episode_buf, is_death=True)
             episode_buf = []
             deaths += 1
-            time_step = env.reset()
+            obs, _ = env.reset()
 
         if (step + 1) % log_every == 0:
             app = total_attack / max(pieces_placed, 1)
