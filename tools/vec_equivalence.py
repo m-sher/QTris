@@ -1,13 +1,10 @@
-"""Vectorized-parity harness for the tf-agents -> gymnasium env migration.
+"""Vectorized-parity harness: compares the AsyncVectorEnv + TFVecEnv stack bit-exact
+against the committed golden over a deterministic action stream crossing autoreset
+boundaries. Isolates the wrapper (batching + autoreset + tensor I/O); per-step env logic
+is covered by env_equivalence.py.
 
-Captures batched (obs / reward channels / done) from the OLD vector stack
-(ParallelPyEnvironment + TFPyEnvironment) over a deterministic, state-independent
-action stream that crosses autoreset boundaries, then compares the NEW stack
-(AsyncVectorEnv + TFVecEnv) bit-exact. This isolates the wrapper (batching + autoreset
-+ tensor I/O); per-step env logic is covered separately by env_equivalence.py.
-
-  capture (old, pre-migration): python tools/vec_equivalence.py --impl old --capture --kind single
-  compare (new, after Phase 2):  python tools/vec_equivalence.py --impl new --kind single
+  compare: python tools/vec_equivalence.py --kind single
+  capture: python tools/vec_equivalence.py --capture --kind single
 """
 
 import argparse
@@ -37,8 +34,8 @@ def _make_env(kind, seed, idx):
 
 
 def _action_batch(rng, num_envs, action_dim):
-    """State-independent key-sequence batch; every 15-key segment ends in HARD_DROP so a
-    piece always locks (avoids the no-lock is_spin path). 1v1 action_dim=30 is two segments."""
+    """State-independent key-sequence batch; every 15-key segment ends in HARD_DROP.
+    1v1 action_dim=30 is two segments."""
     out = np.full((num_envs, action_dim), Keys.PAD, dtype=np.int64)
     for e in range(num_envs):
         for base in range(0, action_dim, 15):
@@ -47,31 +44,6 @@ def _action_batch(rng, num_envs, action_dim):
             ]
             out[e, base : base + len(seq)] = seq
     return out
-
-
-def _build_old(kind, num_envs):
-    import tensorflow as tf
-    from tf_agents.environments.batched_py_environment import BatchedPyEnvironment
-    from tf_agents.environments.tf_py_environment import TFPyEnvironment
-
-    # BatchedPyEnvironment (serial, in-process) yields the same batched values + autoreset
-    # semantics as ParallelPyEnvironment (subprocess) without needing handle_main; the
-    # per-env outputs are parallelism-independent. This is the runner stack's TimeStep oracle.
-    envs = [_make_env(kind, 2000 + i, i) for i in range(num_envs)]
-    venv = TFPyEnvironment(BatchedPyEnvironment(envs))
-
-    class OldVec:
-        def reset(self):
-            ts = venv.reset()
-            return {k: v.numpy() for k, v in ts.observation.items()}
-
-        def step(self, actions):
-            ts = venv.step(tf.constant(actions))
-            obs = {k: v.numpy() for k, v in ts.observation.items()}
-            reward = {k: np.asarray(v.numpy()) for k, v in ts.reward.items()}
-            return obs, reward, ts.is_last().numpy()
-
-    return OldVec()
 
 
 def _build_new(kind, num_envs):
@@ -109,8 +81,8 @@ def _digest(obs, reward, done):
     return h.hexdigest()
 
 
-def run(impl, kind, num_envs, steps):
-    venv = (_build_old if impl == "old" else _build_new)(kind, num_envs)
+def run(kind, num_envs, steps):
+    venv = _build_new(kind, num_envs)
     action_dim = 15 if kind == "single" else 30
     rng = random.Random(f"vec-{kind}-{num_envs}")
 
@@ -136,7 +108,6 @@ def run(impl, kind, num_envs, steps):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--impl", choices=["old", "new"], required=True)
     ap.add_argument("--kind", choices=["single", "1v1"], default="single")
     ap.add_argument("--envs", type=int, default=16)
     ap.add_argument("--steps", type=int, default=300)
@@ -145,8 +116,8 @@ def main():
     args = ap.parse_args()
 
     golden_path = args.golden or f"tools/vec_golden_{args.kind}.json"
-    fresh = run(args.impl, args.kind, args.envs, args.steps)
-    print(f"vec {args.kind} [{args.impl}]: {args.envs} envs x {args.steps} steps")
+    fresh = run(args.kind, args.envs, args.steps)
+    print(f"vec {args.kind}: {args.envs} envs x {args.steps} steps")
 
     if args.capture:
         with open(golden_path, "w") as f:

@@ -77,7 +77,7 @@ search depth/beam, etc.).
 ## Environment
 
 `tetrisenv/` is a subtree of [TFTetrisEnv](https://github.com/m-sher/TFTetrisEnv).
-It provides `PyTetrisEnv` and `PyTetris1v1Env` (tf-agents environments implementing modern
+It provides `PyTetrisEnv` and `PyTetris1v1Env` (gymnasium environments implementing modern
 Tetris: SRS rotation, hold, garbage, back-to-back/combo scoring) plus the C
 `b2b_search` core (a beam-search oracle and a PUCT MCTS engine) exposed to Python through
 `CB2BSearch` and `qtris.search.cmcts`.

@@ -34,8 +34,9 @@ setup(
     ext_modules=[pathfinder_module, hole_finder_module, b2b_search_module],
     install_requires=[
         "tensorflow",
-        "tf-agents",
+        "gymnasium",
         "numpy",
+        "pygame",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
