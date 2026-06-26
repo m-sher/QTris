@@ -1,7 +1,8 @@
 import tensorflow as tf
 from qtris.models.ar.model import PolicyModel
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from gymnasium.vector import SyncVectorEnv
+from TetrisEnv.tf_vec_env import TFVecEnv
 import pygame
 import pygame_widgets
 from pygame_widgets.slider import Slider
@@ -78,7 +79,7 @@ def main(cli_args):
         idx=0,
         num_row_tiers=num_row_tiers,
     )
-    env = TFPyEnvironment(py_env)
+    env = TFVecEnv(SyncVectorEnv([lambda: py_env]))
 
     # Layout constants
     board_w, board_h = 250, 600
@@ -280,7 +281,7 @@ def main(cli_args):
         draw_bcg(p2_x, p2_bcg_heatmaps, p2_stats, t, (255, 150, 100))
 
         # Check game end
-        if time_step.is_last() and winner is None:
+        if time_step.done and winner is None:
             win_reward = time_step.reward["win"].numpy()[0]
             if win_reward > 0:
                 winner = "P1 WINS"
@@ -304,7 +305,7 @@ def main(cli_args):
                 pygame.quit()
                 return
 
-        if time_step.is_last():
+        if time_step.done:
             break
 
     elapsed = time.time() - start

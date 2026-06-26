@@ -1,7 +1,8 @@
 import tensorflow as tf
 from qtris.models.flat.model import FlatPolicyModel
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from gymnasium.vector import SyncVectorEnv
+from TetrisEnv.tf_vec_env import TFVecEnv
 import pygame
 import time
 
@@ -73,7 +74,7 @@ def main(args):
         idx=0,
         num_row_tiers=num_row_tiers,
     )
-    env = TFPyEnvironment(py_env)
+    env = TFVecEnv(SyncVectorEnv([lambda: py_env]))
 
     screen_w = 870
     screen_h = 800
@@ -144,7 +145,7 @@ def main(args):
             stat_tracker.update(current_b2b_val, current_combo_val, attack)
         )
 
-        if time_step.is_last():
+        if time_step.done:
             death = t
             running_attacks = 0
             running_clears = 0

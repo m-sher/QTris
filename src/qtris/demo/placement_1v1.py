@@ -15,7 +15,8 @@ import pygame_widgets
 import tensorflow as tf
 from pygame_widgets.button import Button
 from pygame_widgets.slider import Slider
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from gymnasium.vector import SyncVectorEnv
+from TetrisEnv.tf_vec_env import TFVecEnv
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
@@ -88,7 +89,7 @@ def main(cli_args):
         idx=0,
         num_row_tiers=num_row_tiers,
     )
-    env = TFPyEnvironment(py_env)
+    env = TFVecEnv(SyncVectorEnv([lambda: py_env]))
     piece_display = load_piece_display()
 
     # Layout: [garbage | board | queue sidebar] per side, sidebars facing the center gap.
@@ -215,7 +216,7 @@ def main(cli_args):
             py_env._env2._get_total_garbage(),
         )
 
-        if time_step.is_last() and winner is None:
+        if time_step.done and winner is None:
             win_reward = time_step.reward["win"].numpy()[0]
             if win_reward > 0:
                 winner = "P1 WINS"
@@ -225,7 +226,7 @@ def main(cli_args):
                 winner = "P2 WINS"
 
         render(t)
-        if time_step.is_last():
+        if time_step.done:
             break
 
     elapsed = time.time() - start

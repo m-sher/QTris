@@ -6,7 +6,8 @@ from qtris.search.placement_search import SearchConfig, search_best_move
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from gymnasium.vector import SyncVectorEnv
+from TetrisEnv.tf_vec_env import TFVecEnv
 import pygame
 import numpy as np
 import time
@@ -115,7 +116,7 @@ def main(args):
         num_row_tiers=num_row_tiers,
         garbage_traces=garbage_traces,
     )
-    env = TFPyEnvironment(py_env)
+    env = TFVecEnv(SyncVectorEnv([lambda: py_env]))
     searcher = CB2BSearch()
     search_cfg = (
         SearchConfig(depth=args.depth, beam_width=args.beam, gate_k=args.gate)
@@ -212,7 +213,7 @@ def main(args):
             stat_tracker.update(current_b2b_val, current_combo_val, attack)
         )
 
-        if time_step.is_last():
+        if time_step.done:
             death = t
             running_attacks = 0
             running_clears = 0
