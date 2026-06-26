@@ -292,13 +292,7 @@ def main() -> None:
     else:
         from qtris.training.flat import main as run
 
-    import sys
-    import tf_agents
-
-    tf_agents.system.multiprocessing.handle_main(
-        lambda _argv: run(args),
-        argv=[sys.argv[0]],
-    )
+    run(args)
 
 
 if __name__ == "__main__":

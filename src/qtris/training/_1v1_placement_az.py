@@ -229,8 +229,8 @@ def _eval_vs_ref(
     both greedy, played to completion on fresh games. Batched over still-live games each round."""
     pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
     for e1, e2 in pairs:
-        e1._reset()
-        e2._reset()
+        e1.reset()
+        e2.reset()
     alive = [True] * n_games
     mc = np.zeros(n_games, dtype=np.int64)
     wins = losses = 0
@@ -415,8 +415,8 @@ def main(args):
     )  # lock-score core for committing the chosen move by descriptor
 
     for e1, e2 in pairs:
-        e1._reset()
-        e2._reset()
+        e1.reset()
+        e2.reset()
     move_count = np.zeros(num_games, dtype=np.int64)
     # Per-game pending positions for BOTH players, carried across gens until the game ends.
     pending = [{"p1": [], "p2": []} for _ in range(num_games)]
@@ -478,8 +478,8 @@ def main(args):
                         n_draw += 1
                     else:
                         p1_wins.append(p1_won)
-                e1._reset()
-                e2._reset()
+                e1.reset()
+                e2.reset()
                 move_count[g] = 0
                 pending[g] = {"p1": [], "p2": []}
 

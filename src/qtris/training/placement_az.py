@@ -212,15 +212,15 @@ def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_
     rewards = np.zeros((horizon, num_envs), dtype=np.float32)
     dones = np.zeros((horizon, num_envs), dtype=np.float32)
     for env in envs:
-        env._reset()
+        env.reset()
     for t in range(horizon):
         results = mcts.search(envs, 1.0, np.ones(num_envs, dtype=np.float32))
         for i, res in enumerate(results):
             if res["dead"]:
-                envs[i]._step(forced_drop.copy())
+                envs[i].step(forced_drop.copy())
                 rewards[t, i] = -mcts.cfg.w_death
                 dones[t, i] = 1.0
-                envs[i]._reset()
+                envs[i].reset()
                 continue
             _total, attack, _clear, died = placement_step(
                 envs[i], searcher, res["descriptor"]
@@ -231,7 +231,7 @@ def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_
             terminal = died or envs[i]._episode_ended
             if terminal:
                 dones[t, i] = 1.0
-                envs[i]._reset()
+                envs[i].reset()
     raw = compute_raw_returns(
         rewards[..., None], dones[..., None], gamma, horizon, num_envs
     )
@@ -348,7 +348,7 @@ def main(args):
     forced_drop[0], forced_drop[1] = Keys.START, Keys.HARD_DROP
 
     for env in envs:
-        env._reset()
+        env.reset()
     move_count = np.zeros(num_games, dtype=np.int64)
 
     # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
@@ -376,7 +376,7 @@ def main(args):
                 flush=True,
             )
             for env in envs:
-                env._reset()
+                env.reset()
             move_count = np.zeros(num_games, dtype=np.int64)
     elif return_scale_override is not None:
         print(
@@ -467,15 +467,13 @@ def main(args):
             results = mcts.search(envs, scale, temps)
             for i, res in enumerate(results):
                 if res["dead"]:
-                    ts = envs[i]._step(forced_drop.copy())
+                    _o, _r, _term, _trunc, info = envs[i].step(forced_drop.copy())
                     # Dead root = death: attack-only reward minus the death penalty.
-                    rewards[t, i] = (
-                        cfg.w_attack * float(ts.reward["attack"]) - cfg.w_death
-                    )
-                    attacks[t, i] = float(ts.reward["attack"])
-                    clears[t, i] = float(ts.reward["clear"])
+                    rewards[t, i] = cfg.w_attack * float(info["attack"]) - cfg.w_death
+                    attacks[t, i] = float(info["attack"])
+                    clears[t, i] = float(info["clear"])
                     dones[t, i] = 1.0
-                    envs[i]._reset()
+                    envs[i].reset()
                     move_count[i] = 0
                     continue
                 boards[t, i] = res["board"]
@@ -499,7 +497,7 @@ def main(args):
                 terminal = died or envs[i]._episode_ended
                 if terminal:
                     dones[t, i] = 1.0
-                    envs[i]._reset()
+                    envs[i].reset()
                     move_count[i] = 0
                 else:
                     move_count[i] += 1

@@ -250,10 +250,15 @@ def search_best_move(env, net, searcher, cfg):
                 if not np.any(seq == Keys.HARD_DROP):
                     continue
                 child = clone_sim_env(node["env"])
-                ts = child._step(seq.astype(np.int64))
+                _o, _r, terminated, truncated, _info = child.step(seq.astype(np.int64))
                 rm = node["root_move"] if node["root_move"] is not None else seq.copy()
                 kids.append(
-                    (child, rm, float(node["logits"][slot]), bool(ts.is_last()))
+                    (
+                        child,
+                        rm,
+                        float(node["logits"][slot]),
+                        bool(terminated or truncated),
+                    )
                 )
         if not kids:
             break
