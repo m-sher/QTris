@@ -1,8 +1,7 @@
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.Moves import Convert
 import tensorflow as tf
-from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from TetrisEnv.tf_vec_env import make_tf_vec_env
 import pygame
 from typing import Optional, Tuple, Any
 
@@ -64,10 +63,7 @@ class PyTetrisRunner:
             )
             for i in range(num_envs)
         ]
-        ppy_env = ParallelPyEnvironment(
-            constructors, start_serially=True, blocking=False
-        )
-        self.env = TFPyEnvironment(ppy_env)
+        self.env = make_tf_vec_env(constructors)
 
     def collect_trajectory(
         self, render: bool = False, progress: bool = False
@@ -176,6 +172,7 @@ class PyTetrisRunner:
         step_iter = range(self._num_steps)
         if progress:
             from tqdm import tqdm
+
             step_iter = tqdm(step_iter, desc="Collecting", unit="step")
 
         for t in step_iter:
@@ -201,11 +198,15 @@ class PyTetrisRunner:
 
             if self._pathfinding:
                 key_sequence, log_probs, masks, _ = self.p_model.predict(
-                    (board, pieces, b2b_combo_garbage), valid_sequences=valid_sequences, temperature=self._temperature
+                    (board, pieces, b2b_combo_garbage),
+                    valid_sequences=valid_sequences,
+                    temperature=self._temperature,
                 )
             else:
                 key_sequence, log_probs, masks, _ = self.p_model.predict(
-                    (board, pieces, b2b_combo_garbage), valid_sequences=Convert.tf_to_sequences[None, ...], temperature=self._temperature
+                    (board, pieces, b2b_combo_garbage),
+                    valid_sequences=Convert.tf_to_sequences[None, ...],
+                    temperature=self._temperature,
                 )
 
             matches = tf.reduce_all(
@@ -224,7 +225,7 @@ class PyTetrisRunner:
             total_reward = reward["total_reward"]
             garbage_pushed = reward["garbage_pushed"][..., None]
 
-            dones = tf.cast(time_step.is_last(), tf.float32)[..., None]
+            dones = tf.cast(time_step.done, tf.float32)[..., None]
 
             all_boards = all_boards.write(t, board)
             all_pieces = all_pieces.write(t, pieces)

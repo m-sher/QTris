@@ -12,10 +12,8 @@ from typing import Any, Optional
 import numpy as np
 import tensorflow as tf
 from tensorflow_probability import distributions
-from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
-
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
+from TetrisEnv.tf_vec_env import make_tf_vec_env
 from qtris.data.placement_features import build_placement_inference
 
 ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
@@ -68,10 +66,7 @@ class PlacementRunner:
             )
             for i in range(num_envs)
         ]
-        ppy_env = ParallelPyEnvironment(
-            constructors, start_serially=True, blocking=False
-        )
-        self.env = TFPyEnvironment(ppy_env)
+        self.env = make_tf_vec_env(constructors)
 
     def _build_candidates(self, cand_scores, cand_rows, cand_seqs, pieces):
         """Per-env: dense obs candidates -> (placements[N,128,18], mask[N,128],
@@ -160,7 +155,7 @@ class PlacementRunner:
             b["attack_reward"].append(reward["attack_reward"])
             b["total_reward"].append(reward["total_reward"])
             b["garbage_pushed"].append(reward["garbage_pushed"][..., None])
-            b["dones"].append(tf.cast(time_step.is_last(), tf.float32)[..., None])
+            b["dones"].append(tf.cast(time_step.done, tf.float32)[..., None])
 
         # bootstrap last value (state-only; no candidates needed)
         last_values = self.net.state_value(

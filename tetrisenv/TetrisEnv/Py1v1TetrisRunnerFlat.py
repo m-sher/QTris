@@ -1,7 +1,6 @@
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 import tensorflow as tf
-from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
-from tf_agents.environments.tf_py_environment import TFPyEnvironment
+from TetrisEnv.tf_vec_env import make_tf_vec_env
 import pygame
 from typing import Optional, Tuple, Any
 
@@ -50,89 +49,124 @@ class Py1v1TetrisRunnerFlat:
             )
             for i in range(num_envs)
         ]
-        ppy_env = ParallelPyEnvironment(
-            constructors, start_serially=True, blocking=False
-        )
-        self.env = TFPyEnvironment(ppy_env)
+        self.env = make_tf_vec_env(constructors)
 
     def collect_trajectory(
         self, render: bool = False, progress: bool = False
     ) -> Tuple[tf.Tensor, ...]:
         all_boards = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 24, 10, 1),
         )
         all_pieces = tf.TensorArray(
-            dtype=tf.int64, size=self._num_steps, dynamic_size=False,
+            dtype=tf.int64,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, self._queue_size + 2),
         )
         all_b2b_combo_garbage = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 3),
         )
         all_log_probs = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_valid_sequences = tf.TensorArray(
-            dtype=tf.int64, size=self._num_steps, dynamic_size=False,
+            dtype=tf.int64,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, self._num_sequences, self._max_len),
         )
         all_action_indices = tf.TensorArray(
-            dtype=tf.int64, size=self._num_steps, dynamic_size=False,
+            dtype=tf.int64,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_values = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 1),
         )
         all_attacks = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_net_attacks = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_clears = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_attack_reward = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_total_reward = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_dones = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 1),
         )
         all_garbage_pushed = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 1),
         )
         all_wins = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         all_losses = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs,),
         )
         # Opponent state for asymmetric value model training
         all_opp_boards = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 24, 10, 1),
         )
         all_opp_pieces = tf.TensorArray(
-            dtype=tf.int64, size=self._num_steps, dynamic_size=False,
+            dtype=tf.int64,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, self._queue_size + 2),
         )
         all_opp_b2b_combo_garbage = tf.TensorArray(
-            dtype=tf.float32, size=self._num_steps, dynamic_size=False,
+            dtype=tf.float32,
+            size=self._num_steps,
+            dynamic_size=False,
             element_shape=(self._num_envs, 3),
         )
 
@@ -149,6 +183,7 @@ class Py1v1TetrisRunnerFlat:
         step_iter = range(self._num_steps)
         if progress:
             from tqdm import tqdm
+
             step_iter = tqdm(step_iter, desc="Collecting", unit="step")
 
         for t in step_iter:
@@ -195,7 +230,14 @@ class Py1v1TetrisRunnerFlat:
 
             # --- Asymmetric value estimate (sees both boards) ---
             values = self.v_model.predict(
-                (board, pieces, b2b_combo_garbage, opp_board, opp_pieces, opp_b2b_combo_garbage)
+                (
+                    board,
+                    pieces,
+                    b2b_combo_garbage,
+                    opp_board,
+                    opp_pieces,
+                    opp_b2b_combo_garbage,
+                )
             )
 
             # --- Step env with combined actions ---
@@ -212,7 +254,7 @@ class Py1v1TetrisRunnerFlat:
             win = reward["win"]
             loss = reward["loss"]
 
-            dones = tf.cast(time_step.is_last(), tf.float32)[..., None]
+            dones = tf.cast(time_step.done, tf.float32)[..., None]
 
             all_boards = all_boards.write(t, board)
             all_pieces = all_pieces.write(t, pieces)
@@ -235,7 +277,9 @@ class Py1v1TetrisRunnerFlat:
 
             all_opp_boards = all_opp_boards.write(t, opp_board)
             all_opp_pieces = all_opp_pieces.write(t, opp_pieces)
-            all_opp_b2b_combo_garbage = all_opp_b2b_combo_garbage.write(t, opp_b2b_combo_garbage)
+            all_opp_b2b_combo_garbage = all_opp_b2b_combo_garbage.write(
+                t, opp_b2b_combo_garbage
+            )
 
         # Bootstrap
         board = time_step.observation["board"]
@@ -245,7 +289,14 @@ class Py1v1TetrisRunnerFlat:
         opp_pieces = time_step.observation["opp_pieces"]
         opp_b2b_combo_garbage = time_step.observation["opp_b2b_combo_garbage"]
         all_last_values = self.v_model.predict(
-            (board, pieces, b2b_combo_garbage, opp_board, opp_pieces, opp_b2b_combo_garbage)
+            (
+                board,
+                pieces,
+                b2b_combo_garbage,
+                opp_board,
+                opp_pieces,
+                opp_b2b_combo_garbage,
+            )
         )
 
         all_boards = all_boards.stack()
