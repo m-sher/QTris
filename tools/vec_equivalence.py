@@ -76,17 +76,16 @@ def _build_old(kind, num_envs):
 
 def _build_new(kind, num_envs):
     import tensorflow as tf
-    from gymnasium.vector import AsyncVectorEnv
 
-    from TetrisEnv.tf_vec_env import TFVecEnv  # created in Phase 2
+    from TetrisEnv.tf_vec_env import make_tf_vec_env
 
     constructors = [(lambda i=i: _make_env(kind, 2000 + i, i)) for i in range(num_envs)]
-    venv = TFVecEnv(AsyncVectorEnv(constructors))
+    venv = make_tf_vec_env(constructors)
 
     class NewVec:
         def reset(self):
-            obs = venv.reset()
-            return {k: np.asarray(tf.convert_to_tensor(v)) for k, v in obs.items()}
+            res = venv.reset()
+            return {k: np.asarray(v) for k, v in res.observation.items()}
 
         def step(self, actions):
             res = venv.step(tf.constant(actions))
