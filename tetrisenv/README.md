@@ -1,5 +1,5 @@
 # TFTetrisEnv
-TensorFlow environment for RL with Tetris SRS+
+Gymnasium environment for RL with Tetris SRS+
 
 ## Todo
 - Add usage to this README
