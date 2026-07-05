@@ -6,6 +6,9 @@ identical across orderings and the final board is a pure function of the first-b
 order), play 7 placements with the deployed MCTS config (greedy by visit count,
 hold allowed), and tally the resulting boards. Prints the most common final states.
 
+With --pre-clear, each ordering's tallied board is instead the state just before its
+first line clear (stopping there), or the 7-piece board if it never clears.
+
 Run from the repo root:
     uv run python scripts/sample_opener.py
 """
@@ -123,28 +126,36 @@ def set_opener(env, perm):
     env._tetrio_rng._t = TETRIO_T_FIXED
 
 
-def play_chunk(perms, env_pool, mcts, searcher, return_scale):
-    """Play 7 placements for each ordering in the chunk; return final boards + death count.
-    Reuses `env_pool` (reset per ordering) so envs aren't reconstructed every chunk."""
+def play_chunk(perms, env_pool, mcts, searcher, return_scale, pre_clear=False):
+    """Play up to 7 placements for each ordering in the chunk; return final boards + death
+    count. Reuses `env_pool` (reset per ordering) so envs aren't reconstructed every chunk.
+    With `pre_clear`, an ordering's saved board is the state just before its first line
+    clear (i.e. it stops there); orderings that never clear save the 7-piece board."""
     envs = env_pool[: len(perms)]
     for env, perm in zip(envs, perms):
         set_opener(env, perm)
     alive = [True] * len(perms)
+    saved = [None] * len(perms)  # pre-clear snapshot, set once an ordering clears
     for _ in range(7):
         results = mcts.search(envs, return_scale, 0.0)
         for i, res in enumerate(results):
-            if not alive[i]:
+            if not alive[i] or saved[i] is not None:
                 continue
             if res["dead"]:
                 alive[i] = False
                 continue
-            placement_step(envs[i], searcher, res["descriptor"])
+            pre = (envs[i]._board != 0).astype(np.uint8) if pre_clear else None
+            _, _, clears, _ = placement_step(envs[i], searcher, res["descriptor"])
+            if pre_clear and clears > 0:
+                saved[i] = pre
     boards, deaths = [], 0
-    for env, ok in zip(envs, alive):
-        if ok:
-            boards.append((env._board != 0).astype(np.uint8))
-        else:
+    for env, ok, snap in zip(envs, alive, saved):
+        if not ok:
             deaths += 1
+        elif snap is not None:
+            boards.append(snap)
+        else:
+            boards.append((env._board != 0).astype(np.uint8))
     return boards, deaths
 
 
@@ -193,6 +204,12 @@ def main():
     ap.add_argument("--per-row", type=int, default=6, help="boards per gallery row")
     ap.add_argument("--max-rows", type=int, default=12, help="board rows shown")
     ap.add_argument("--limit", type=int, default=0, help="cap orderings (0 = all 5040)")
+    ap.add_argument(
+        "--pre-clear",
+        action="store_true",
+        help="save the board just before each ordering's first line clear (or the "
+        "7-piece board if it never clears)",
+    )
     args = ap.parse_args()
 
     net, return_scale = build_net(args.checkpoint)
@@ -223,7 +240,9 @@ def main():
     with tqdm(total=len(perms), desc="openers", unit="ordering") as pbar:
         for start in range(0, len(perms), args.chunk):
             chunk = perms[start : start + args.chunk]
-            boards, d = play_chunk(chunk, env_pool, mcts, searcher, return_scale)
+            boards, d = play_chunk(
+                chunk, env_pool, mcts, searcher, return_scale, args.pre_clear
+            )
             deaths += d
             for occ in boards:
                 key = occ.tobytes()
@@ -237,7 +256,11 @@ def main():
     shown = distinct[:top_n]
     coverage = sum(c for _, c in shown)
 
-    print(f"\nOrderings: {len(perms)}  completed: {completed}  deaths: {deaths}")
+    mode = "pre-clear" if args.pre_clear else "7-piece"
+    print(
+        f"\nOrderings: {len(perms)}  completed: {completed}  deaths: {deaths}  "
+        f"board: {mode}"
+    )
     print(f"Distinct final boards: {len(distinct)}")
     print(
         f"Showing top {args.top_frac:.0%} = {top_n} states "
