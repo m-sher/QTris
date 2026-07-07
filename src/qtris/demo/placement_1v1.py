@@ -20,6 +20,7 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 from qtris.demo.constants import PIECE_COLORS
+from qtris.demo.panels import confirm_save
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
@@ -233,7 +234,8 @@ def main(cli_args):
     print(f"Time: {elapsed:.2f}s | Steps: {actual} | {elapsed / actual:.3f}s/step")
     print(f"Result: {winner or 'Timeout'}")
 
-    save_frames_as_video(frames, "DemoPlacement1v1.mp4")
+    if confirm_save(screen, font):
+        save_frames_as_video(frames, "DemoPlacement1v1.mp4")
 
     # Replay slider (mirrors ar_1v1)
     slider = Slider(

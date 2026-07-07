@@ -163,6 +163,32 @@ def draw_step_counter(screen, font, step, num_steps):
     screen.blit(text, (10, 25))
 
 
+def confirm_save(screen, font, message="Save video?   Y / N"):
+    """In-window save prompt; returns True to save, False to skip.
+
+    Keeps pumping events so the window stays responsive; closing it exits.
+    """
+    clock = pygame.time.Clock()
+    text = font.render(message, True, WHITE)
+    rect = text.get_rect(center=screen.get_rect().center)
+    box = rect.inflate(40, 30)
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                raise SystemExit
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_y, pygame.K_RETURN):
+                    return True
+                if event.key in (pygame.K_n, pygame.K_ESCAPE):
+                    return False
+        pygame.draw.rect(screen, (0, 0, 0), box)
+        pygame.draw.rect(screen, WHITE, box, 2)
+        screen.blit(text, rect)
+        pygame.display.update(box)
+        clock.tick(60)
+
+
 def run_replay(screen, font, frames, num_steps, draw_overlay):
     """Replay UI shared by the single-player demos; runs until window close.
 

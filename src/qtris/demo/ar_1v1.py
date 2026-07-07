@@ -9,6 +9,7 @@ from pygame_widgets.button import Button
 import time
 
 from qtris.demo.constants import BCG_LABELS, PIECE_COLORS
+from qtris.demo.panels import confirm_save
 from qtris.demo.rendering import compute_bcg_heatmaps, draw_garbage_bar
 from qtris.demo.utils import load_checkpoint, save_frames_as_video
 
@@ -314,7 +315,8 @@ def main(cli_args):
     )
     print(f"Result: {winner or 'Timeout'}")
 
-    save_frames_as_video(frames, "Demo1v1.mp4")
+    if confirm_save(screen, font):
+        save_frames_as_video(frames, "Demo1v1.mp4")
 
     # Replay slider
     slider = Slider(
