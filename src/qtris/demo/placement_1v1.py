@@ -306,6 +306,7 @@ def main(cli_args):
     )
 
     last_step_time = pygame.time.get_ticks()
+    clock = pygame.time.Clock()
 
     while True:
         events = pygame.event.get()
@@ -336,3 +337,4 @@ def main(cli_args):
         screen.blit(step_text, (10, 20))
 
         pygame.display.update()
+        clock.tick(60)

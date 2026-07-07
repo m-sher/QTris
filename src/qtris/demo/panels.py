@@ -248,6 +248,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     )
 
     last_step_time = pygame.time.get_ticks()
+    clock = pygame.time.Clock()
 
     while True:
         events = pygame.event.get()
@@ -281,3 +282,4 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
         draw_overlay(play_area, ind)
 
         pygame.display.update()
+        clock.tick(60)
