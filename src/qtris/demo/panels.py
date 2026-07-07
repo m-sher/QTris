@@ -275,13 +275,15 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
 
     last_step_time = pygame.time.get_ticks()
     clock = pygame.time.Clock()
+    prev_ind = -1
+    prev_paused = paused
 
     while True:
         events = pygame.event.get()
         for event in events:
             if event.type == pygame.QUIT:
                 pygame.quit()
-                exit()
+                return
 
         if not paused:
             current_time = pygame.time.get_ticks()
@@ -295,17 +297,17 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
                     paused = True
                     play_btn.setText("Play")
 
-        screen.fill((0, 0, 0))
-
         ind = slider.getValue()
-        pygame.surfarray.blit_array(play_area, frames[ind].swapaxes(0, 1))
-
-        speed_text = font.render(f"Speed: {speed_slider.getValue()} FPS", True, WHITE)
-        screen.blit(speed_text, (220, 33))
-
-        pygame_widgets.update(events)
-
-        draw_overlay(play_area, ind)
-
-        pygame.display.update()
+        # Repaint only on input or a state change; idle+paused stays idle so close is instant.
+        if events or not paused or ind != prev_ind or paused != prev_paused:
+            screen.fill((0, 0, 0))
+            pygame.surfarray.blit_array(play_area, frames[ind].swapaxes(0, 1))
+            speed_text = font.render(
+                f"Speed: {speed_slider.getValue()} FPS", True, WHITE
+            )
+            screen.blit(speed_text, (220, 33))
+            pygame_widgets.update(events)
+            draw_overlay(play_area, ind)
+            pygame.display.update()
+            prev_ind, prev_paused = ind, paused
         clock.tick(60)
