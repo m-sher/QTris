@@ -20,6 +20,7 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 from qtris.demo.constants import PIECE_COLORS
+from qtris.demo.panels import confirm_save
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
@@ -233,7 +234,8 @@ def main(cli_args):
     print(f"Time: {elapsed:.2f}s | Steps: {actual} | {elapsed / actual:.3f}s/step")
     print(f"Result: {winner or 'Timeout'}")
 
-    save_frames_as_video(frames, "DemoPlacement1v1.mp4")
+    if confirm_save(screen, font):
+        save_frames_as_video(frames, "DemoPlacement1v1.mp4")
 
     # Replay slider (mirrors ar_1v1)
     slider = Slider(
@@ -306,6 +308,9 @@ def main(cli_args):
     )
 
     last_step_time = pygame.time.get_ticks()
+    clock = pygame.time.Clock()
+    prev_ind = -1
+    prev_paused = paused
 
     while True:
         events = pygame.event.get()
@@ -327,12 +332,16 @@ def main(cli_args):
                     play_btn.setText("Play")
 
         ind = slider.getValue()
-        pygame.surfarray.blit_array(screen, frames[ind].swapaxes(0, 1))
-        pygame_widgets.update(events)
-
-        step_text = font.render(f"Step {ind + 1}/{len(frames)}", True, (255, 255, 255))
-        bg_rect = step_text.get_rect(topleft=(10, 20))
-        pygame.draw.rect(screen, (0, 0, 0), bg_rect.inflate(10, 4))
-        screen.blit(step_text, (10, 20))
-
-        pygame.display.update()
+        # Repaint only on input or a state change; idle+paused stays idle so close is instant.
+        if events or not paused or ind != prev_ind or paused != prev_paused:
+            pygame.surfarray.blit_array(screen, frames[ind].swapaxes(0, 1))
+            pygame_widgets.update(events)
+            step_text = font.render(
+                f"Step {ind + 1}/{len(frames)}", True, (255, 255, 255)
+            )
+            bg_rect = step_text.get_rect(topleft=(10, 20))
+            pygame.draw.rect(screen, (0, 0, 0), bg_rect.inflate(10, 4))
+            screen.blit(step_text, (10, 20))
+            pygame.display.update()
+            prev_ind, prev_paused = ind, paused
+        clock.tick(60)

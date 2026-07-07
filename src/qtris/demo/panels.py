@@ -163,6 +163,32 @@ def draw_step_counter(screen, font, step, num_steps):
     screen.blit(text, (10, 25))
 
 
+def confirm_save(screen, font, message="Save video?   Y / N"):
+    """In-window save prompt; returns True to save, False to skip.
+
+    Keeps pumping events so the window stays responsive; closing it exits.
+    """
+    clock = pygame.time.Clock()
+    text = font.render(message, True, WHITE)
+    rect = text.get_rect(center=screen.get_rect().center)
+    box = rect.inflate(40, 30)
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                raise SystemExit
+            if event.type == pygame.KEYDOWN:
+                if event.key in (pygame.K_y, pygame.K_RETURN):
+                    return True
+                if event.key in (pygame.K_n, pygame.K_ESCAPE):
+                    return False
+        pygame.draw.rect(screen, (0, 0, 0), box)
+        pygame.draw.rect(screen, WHITE, box, 2)
+        screen.blit(text, rect)
+        pygame.display.update(box)
+        clock.tick(60)
+
+
 def run_replay(screen, font, frames, num_steps, draw_overlay):
     """Replay UI shared by the single-player demos; runs until window close.
 
@@ -248,13 +274,16 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     )
 
     last_step_time = pygame.time.get_ticks()
+    clock = pygame.time.Clock()
+    prev_ind = -1
+    prev_paused = paused
 
     while True:
         events = pygame.event.get()
         for event in events:
             if event.type == pygame.QUIT:
                 pygame.quit()
-                exit()
+                return
 
         if not paused:
             current_time = pygame.time.get_ticks()
@@ -268,16 +297,17 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
                     paused = True
                     play_btn.setText("Play")
 
-        screen.fill((0, 0, 0))
-
         ind = slider.getValue()
-        pygame.surfarray.blit_array(play_area, frames[ind].swapaxes(0, 1))
-
-        speed_text = font.render(f"Speed: {speed_slider.getValue()} FPS", True, WHITE)
-        screen.blit(speed_text, (220, 33))
-
-        pygame_widgets.update(events)
-
-        draw_overlay(play_area, ind)
-
-        pygame.display.update()
+        # Repaint only on input or a state change; idle+paused stays idle so close is instant.
+        if events or not paused or ind != prev_ind or paused != prev_paused:
+            screen.fill((0, 0, 0))
+            pygame.surfarray.blit_array(play_area, frames[ind].swapaxes(0, 1))
+            speed_text = font.render(
+                f"Speed: {speed_slider.getValue()} FPS", True, WHITE
+            )
+            screen.blit(speed_text, (220, 33))
+            pygame_widgets.update(events)
+            draw_overlay(play_area, ind)
+            pygame.display.update()
+            prev_ind, prev_paused = ind, paused
+        clock.tick(60)

@@ -29,17 +29,12 @@ def load_piece_display(path="PieceDisplay.npy"):
     return np.load(path)
 
 
-def save_frames_as_video(
-    frames, output_path="Demo.mp4", fps=30, playback_fps=5, prompt=True
-):
+def save_frames_as_video(frames, output_path="Demo.mp4", fps=30, playback_fps=5):
     """Write recorded frames to an mp4 video via imageio.
 
-    If prompt=True, asks the user before saving. Each frame is repeated
-    (fps // playback_fps) times to achieve the target playback speed.
+    Each frame is repeated (fps // playback_fps) times to achieve the target
+    playback speed.
     """
-    if prompt:
-        if input("Save? ").lower() != "y":
-            return False
     import imageio
 
     writer = imageio.get_writer(output_path, fps=fps)
@@ -49,4 +44,3 @@ def save_frames_as_video(
             writer.append_data(frame)
     writer.close()
     print(f"Saved {len(frames)} frames to {output_path}", flush=True)
-    return True

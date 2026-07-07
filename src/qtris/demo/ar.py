@@ -8,6 +8,7 @@ import pygame
 from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS
 from qtris.demo.panels import (
     MaxStatTracker,
+    confirm_save,
     draw_bcg_panel,
     draw_board_area,
     draw_info_panel,
@@ -166,6 +167,7 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
+                return
 
         # A reachable placement is any sequence row that is not all-PAD.
         num_valid_seqs = int(
@@ -244,6 +246,7 @@ def main(args):
 
     print(f"Time taken: {time_taken:3.2f} seconds")
     print(f"Steps: {num_steps} | Time per step: {(time_taken / num_steps):1.3f}")
-    save_frames_as_video(frames, "Demo.mp4")
+    if confirm_save(screen, font):
+        save_frames_as_video(frames, "Demo.mp4")
 
     run_replay(screen, font, frames, num_steps, draw_bottom_panel)
