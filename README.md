@@ -7,7 +7,7 @@ added here as a subtree (mine).
 
 The current placement agent (AlphaZero-style MCTS, trained by 1v1 self-play), ranks env's legal candidate placements optimizing APP while handling incoming garbage:
 
-<img src="https://github.com/m-sher/QTris/blob/main/Demo.gif" width="400">
+https://github.com/user-attachments/assets/c9977fe0-0242-44c0-862b-2001b0db2b20
 
 ## Overview
 
