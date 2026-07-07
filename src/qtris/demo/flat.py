@@ -154,6 +154,7 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
+                return
 
         key_sequence, log_prob, action_index, scores = p_model.predict(
             (board, pieces, b2b_combo_garbage),

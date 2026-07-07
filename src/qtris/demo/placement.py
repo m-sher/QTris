@@ -222,6 +222,7 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
+                return
 
         # Enumerate legal placements from the live search, then let the model rank.
         queue = np.array([p.value for p in py_env._queue], dtype=np.int32)

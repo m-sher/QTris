@@ -167,6 +167,7 @@ def main(args):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
+                return
 
         # A reachable placement is any sequence row that is not all-PAD.
         num_valid_seqs = int(
