@@ -64,16 +64,17 @@ def _boards_from_play(seed: int, steps: int):
     """Yield observations from a random self-play rollout (varied stacks, tucks, overhangs)."""
     env = _pathfinding_env(seed)
     rng = np.random.default_rng(seed)
-    ts = env.reset()
+    obs, _ = env.reset()
     for _ in range(steps):
-        obs = ts.observation
         rows = _valid_rows(obs)
         if not rows:
             break
         yield env, obs
-        ts = env.step(rows[rng.integers(len(rows))])
-        if ts.is_last():
-            ts = env.reset()
+        obs, _reward, terminated, truncated, _info = env.step(
+            rows[rng.integers(len(rows))]
+        )
+        if terminated or truncated:
+            obs, _ = env.reset()
 
 
 def test_no_redundant_softdrop_before_harddrop():
