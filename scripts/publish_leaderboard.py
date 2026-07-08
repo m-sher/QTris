@@ -1,20 +1,24 @@
-"""Publish the 1v1 AZ ELO ratings to the Cloudflare leaderboard Worker.
+"""Publish the 1v1 AZ WHR ratings to the Cloudflare leaderboard Worker.
 
-Reads the trainer's `pool/elo.json`, builds a compact ranked payload, and POSTs it to the
-Worker's `/api/publish`. Stdlib only, so it runs as a bare cron job without the training env.
+Reads the trainer's `pool/ratings.json` (WHR batch-fit output: rating + sigma per
+player), builds a compact ranked payload, and POSTs it to the Worker's
+`/api/publish`. Stdlib only, so it runs as a bare cron job without the training env.
 
-Env (or flags): LEADERBOARD_URL (the Worker base URL), LEADERBOARD_TOKEN (the publish secret).
-Publishes only when the substantive payload changes, and not more than once per --min-interval,
-to stay under Workers KV's free-tier 1,000 writes/day.
+Env (or flags): LEADERBOARD_URL (the Worker base URL), LEADERBOARD_TOKEN (the publish
+secret). Publishes when the DISPLAYED content changes (ratings quantized to integers
+for the digest, so refit micro-jitter never burns a write), at most once per
+--min-interval, with an hourly force-publish so updated_at stays an honest liveness
+signal. Keeps well under Workers KV's free-tier 1,000 writes/day.
 """
 
 import argparse
 import glob
 import hashlib
+import http.client
 import json
+import math
 import os
 import time
-import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -48,29 +52,29 @@ def _present_gens(pool_dir):
 
 
 def build_payload(pool_dir):
-    """Ranked leaderboard payload from elo.json, or None if it is missing/mid-write."""
-    elo_path = os.path.join(pool_dir, "elo.json")
+    """Ranked leaderboard payload from ratings.json, or None if missing/mid-write."""
+    ratings_path = os.path.join(pool_dir, "ratings.json")
     try:
-        with open(elo_path) as f:
+        with open(ratings_path) as f:
             book = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
 
-    ratings, games = book["ratings"], book["games"]
     learner, anchor = book["learner"], book["anchor"]
     present = _present_gens(pool_dir)
 
     entries = [
         {
             "id": pid,
-            "rating": round(float(rating), 2),
-            "games": int(games.get(pid, 0)),
+            "rating": round(float(rec["rating"]), 1),
+            "sigma": round(float(rec["sigma"]), 1),
+            "games": int(rec.get("games", 0)),
             # learner and the pinned anchor are always live; other gens only if on disk.
             "present": pid in (learner, anchor) or pid in present,
             "is_learner": pid == learner,
             "is_reference": pid == anchor,
         }
-        for pid, rating in ratings.items()
+        for pid, rec in book["ratings"].items()
     ]
     entries.sort(key=lambda e: e["rating"], reverse=True)
 
@@ -79,14 +83,35 @@ def build_payload(pool_dir):
     ]
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "gen": book.get("fitted_at_gen"),
         "best_pool": max(pool) if pool else None,
+        # Tail of the learner trajectory for a future sparkline; pages may ignore it.
+        "trajectory": book.get("trajectory", [])[-200:],
         "entries": entries,
     }
 
 
+def _half_up(x):
+    """Round half away from zero for x >= 0, matching the page's Math.round."""
+    return int(math.floor(x + 0.5))
+
+
 def _digest(payload):
-    """Hash of the substantive content (ignores updated_at so the clock alone never publishes)."""
-    body = {k: v for k, v in payload.items() if k != "updated_at"}
+    """Hash of the DISPLAYED content only: integer-quantized ratings/sigmas,
+    bucketed game counts, and coarse gen, so refit micro-jitter and per-gen
+    counters never flip it."""
+    body = [
+        (
+            e["id"],
+            _half_up(e["rating"]),
+            _half_up(e["sigma"]),
+            e["games"] // 50,
+            e["present"],
+        )
+        for e in payload["entries"]
+    ]
+    gen = payload.get("gen")
+    body.append(gen // 25 if gen is not None else None)
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
 
@@ -106,51 +131,14 @@ def publish(payload, url, token):
         return resp.status
 
 
-def _seed_state(url):
-    """Resume (ema, last_raw) for the learner from the last published payload; (None, None)
-    if nothing has been published yet or the Worker is unreachable."""
-    try:
-        req = urllib.request.Request(
-            url.rstrip("/") + "/api/leaderboard", headers={"User-Agent": _USER_AGENT}
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except (urllib.error.URLError, ValueError, TimeoutError):
-        return None, None
-    for e in data.get("entries", []):
-        if e.get("is_learner"):
-            ema, raw = e.get("rating_ema"), e.get("rating")
-            return (
-                float(ema) if ema is not None else None,
-                float(raw) if raw is not None else None,
-            )
-    return None, None
-
-
-def _fold_ema(payload, ema, last_raw, alpha):
-    """Advance the learner's EMA on a changed raw rating and tag it onto the learner entry.
-
-    The EMA is recursive (ema = alpha*raw + (1-alpha)*ema_prev), so only the running value is
-    carried, not history. Advances only when the raw rating actually changed, so alpha measures
-    rating updates (~every 5 gens) rather than publish polls. Returns the new (ema, last_raw)."""
-    learner = next((e for e in payload["entries"] if e.get("is_learner")), None)
-    if learner is None:
-        return ema, last_raw
-    raw = learner["rating"]
-    if ema is None:
-        ema = raw  # cold start: begin at the current value
-    elif last_raw is not None and raw != last_raw:
-        ema = alpha * raw + (1.0 - alpha) * ema
-    learner["rating_ema"] = round(ema, 2)
-    return ema, raw
-
-
 def main():
     ap = argparse.ArgumentParser(
-        description="Publish ELO ratings to the leaderboard Worker."
+        description="Publish WHR ratings to the leaderboard Worker."
     )
     ap.add_argument(
-        "--pool-dir", default=DEFAULT_POOL, help="dir holding elo.json + gen_*.index"
+        "--pool-dir",
+        default=DEFAULT_POOL,
+        help="dir holding ratings.json + gen_*.index",
     )
     ap.add_argument("--url", default=None, help="Worker base URL (or LEADERBOARD_URL)")
     ap.add_argument(
@@ -168,14 +156,14 @@ def main():
     ap.add_argument(
         "--min-interval",
         type=int,
-        default=120,
-        help="min seconds between writes, KV free-tier guard (default 120)",
+        default=300,
+        help="min seconds between writes, KV free-tier guard (default 300)",
     )
     ap.add_argument(
-        "--ema-alpha",
-        type=float,
-        default=0.3,
-        help="EMA smoothing for the learner's displayed rating (0-1; lower = calmer)",
+        "--force-interval",
+        type=int,
+        default=3600,
+        help="publish at least this often even if unchanged, so updated_at stays live",
     )
     args = ap.parse_args()
 
@@ -189,33 +177,39 @@ def main():
             "or via --url/--token)."
         )
 
-    # Resume the smoothing from KV so restarts don't reset the learner's smoothed line.
-    ema, last_raw = _seed_state(url)
     last_digest = None
     last_write = 0.0
     while True:
+        published = False
         payload = build_payload(args.pool_dir)
         if payload is None:
-            print(f"no readable elo.json in {args.pool_dir}, skipping", flush=True)
+            print(f"no readable ratings.json in {args.pool_dir}, skipping", flush=True)
         else:
-            ema, last_raw = _fold_ema(payload, ema, last_raw, args.ema_alpha)
             digest = _digest(payload)
             now = time.monotonic()
-            if digest == last_digest:
-                pass
-            elif now - last_write < args.min_interval and not args.once:
-                pass  # changed, but hold off to respect the write cap
-            else:
-                status = publish(payload, url, token)
-                last_digest, last_write = digest, now
-                n = len(payload["entries"])
-                print(
-                    f"published {n} entries -> {status} at {payload['updated_at']}",
-                    flush=True,
-                )
+            stale = last_write and now - last_write >= args.force_interval
+            changed = digest != last_digest
+            if (changed or stale or args.once) and (
+                now - last_write >= args.min_interval or args.once or not last_write
+            ):
+                try:
+                    # URLError/TimeoutError are OSError; HTTPException covers
+                    # RemoteDisconnected etc. raised while reading the response.
+                    status = publish(payload, url, token)
+                except (OSError, http.client.HTTPException) as exc:
+                    retry = "" if args.once else "; retrying next cycle"
+                    print(f"publish failed ({exc}){retry}", flush=True)
+                else:
+                    published = True
+                    last_digest, last_write = digest, now
+                    n = len(payload["entries"])
+                    print(
+                        f"published {n} entries -> {status} at {payload['updated_at']}",
+                        flush=True,
+                    )
 
         if args.once:
-            break
+            raise SystemExit(0 if published else 1)
         time.sleep(args.interval)
 
 
