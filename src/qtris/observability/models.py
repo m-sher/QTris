@@ -262,12 +262,11 @@ class OneVsOnePlacementAZConfig(BaseModel):
     run_name: Optional[str] = None
     seed: Optional[int] = None
     save_states: Optional[str] = None
-    # Opponent-pool Elo
+    # Opponent-pool rating (WHR batch refit)
     elo_enabled: bool = True
     elo_init: float = 1500.0
-    elo_k_learner: float = 2.0
-    elo_k_opp: float = 0.5
-    elo_draw_weight: float = 0.5
+    whr_drift: float = 8.0
+    whr_tie_sigma: float = 70.0
 
 
 class OneVsOneAZLog(LogPayloadModel):
