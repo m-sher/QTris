@@ -33,7 +33,7 @@ from qtris.observability.backend import finish, init_run, log_step
 from qtris.observability.models import OneVsOneAZLog, OneVsOnePlacementAZConfig
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
-from qtris.training.elo import EloBook
+from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
 
 
@@ -201,7 +201,11 @@ def _pool_snaps(pool_dir):
 def _save_pool(net, gen, pool_dir, max_pool_size):
     """Snapshot the learner's weights into the pool, then FIFO-evict oldest (gen_0 pinned)."""
     os.makedirs(pool_dir, exist_ok=True)
-    net.save_weights(os.path.join(pool_dir, f"gen_{gen}"))
+    prefix = os.path.join(pool_dir, f"gen_{gen}")
+    if os.path.exists(prefix + ".index"):
+        # Overwriting would silently corrupt the WHR log's gen_k = learner-at-k identity.
+        raise FileExistsError(f"pool snapshot {prefix} already exists")
+    net.save_weights(prefix)
     snaps = _pool_snaps(pool_dir)
     while len(snaps) > max_pool_size:
         # Pin gen_0; evict the next-oldest snapshot.
@@ -225,8 +229,9 @@ def _sample_pool(opp_net, pool_dir):
 def _eval_vs_ref(
     learner_mcts, ref_mcts, n_games, queue_size, max_len, max_steps, rng, searcher
 ):
-    """Decisive (wins, losses) of the learner (player 1) vs the frozen reference (player 2),
-    both greedy, played to completion on fresh games. Batched over still-live games each round."""
+    """(wins, losses, draws) of the learner (player 1) vs the frozen reference (player 2),
+    both greedy, played to completion on fresh games. Batched over still-live games each
+    round. Draws (timeouts + double-KOs) are informative half-wins for the rating fit."""
     pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
     for e1, e2 in pairs:
         e1._reset()
@@ -262,8 +267,8 @@ def _eval_vs_ref(
                 losses += int(p1_died and not p2_died)
                 alive[g] = False
             elif mc[g] >= max_steps:
-                alive[g] = False  # timeout = draw, excluded from decisive WR
-    return wins, losses
+                alive[g] = False  # timeout = draw
+    return wins, losses, n_games - wins - losses
 
 
 def main(args):
@@ -292,12 +297,11 @@ def main(args):
     run_name = getattr(args, "run_name", None)
     seed = getattr(args, "seed", None)
     save_states_dir = getattr(args, "save_states", None)
-    # Opponent-pool Elo knobs.
+    # Opponent-pool rating (WHR) knobs.
     elo_enabled = getattr(args, "elo_enabled", True)
     elo_init = getattr(args, "elo_init", 1500.0)
-    elo_k_learner = getattr(args, "elo_k_learner", 2.0)
-    elo_k_opp = getattr(args, "elo_k_opp", 0.5)
-    elo_draw_weight = getattr(args, "elo_draw_weight", 0.5)
+    whr_drift = getattr(args, "whr_drift", 8.0)
+    whr_tie_sigma = getattr(args, "whr_tie_sigma", 70.0)
 
     if seed is not None:
         np.random.seed(seed)
@@ -349,22 +353,36 @@ def main(args):
     ref_prefix = os.path.join(pool_dir, "gen_0")
     ref_net.load_weights(ref_prefix).expect_partial()
 
-    # Opponent-pool Elo book (anchored at gen_0).
-    elo_path = os.path.join(pool_dir, "elo.json")
-    elo = None
+    # Opponent-pool WHR book (batch refit over pool/games.jsonl, anchored at gen_0).
+    games_path = os.path.join(pool_dir, "games.jsonl")
+    ratings_path = os.path.join(pool_dir, "ratings.json")
+    legacy_elo = os.path.join(pool_dir, "elo.json")
+    if os.path.exists(legacy_elo) and not os.path.exists(games_path):
+        os.remove(legacy_elo)  # so a stale publisher fails loudly, not silently
+        print("Migrated to WHR ratings: removed legacy elo.json.", flush=True)
+    whr = None
     if elo_enabled:
-        if os.path.exists(elo_path):
-            elo = EloBook.from_json(elo_path)
-            print(f"Resumed Elo book from {elo_path}.", flush=True)
-        else:
-            elo = EloBook(
-                init=elo_init,
-                k_learner=elo_k_learner,
-                k_opp=elo_k_opp,
-                draw_weight=elo_draw_weight,
-            )
-            for snap in _pool_snaps(pool_dir):
-                elo.seed(os.path.basename(snap))
+        whr = WHRBook(
+            games_path,
+            pool_dir=pool_dir,
+            init=elo_init,
+            drift=whr_drift,
+            tie_sigma=whr_tie_sigma,
+        )
+        if whr.last_gen >= 0:
+            print(f"Resumed WHR log from {games_path}.", flush=True)
+
+    # Resume-safe monotone generation: the append-only log and gen_k snapshot ids
+    # both key on it, so it must never restart at 0 (gen_0 seed excluded).
+    gen0 = 0
+    if whr is not None:
+        gen0 = max(gen0, whr.last_gen + 1)
+    for snap in _pool_snaps(pool_dir):
+        k = int(os.path.basename(snap).split("_")[1])
+        if k > 0:
+            gen0 = max(gen0, k + 1)
+    if gen0 > 0:
+        print(f"Resuming at global generation {gen0}.", flush=True)
 
     resumed = manager.latest_checkpoint is not None
     config = OneVsOnePlacementAZConfig(
@@ -395,9 +413,8 @@ def main(args):
         save_states=save_states_dir,
         elo_enabled=elo_enabled,
         elo_init=elo_init,
-        elo_k_learner=elo_k_learner,
-        elo_k_opp=elo_k_opp,
-        elo_draw_weight=elo_draw_weight,
+        whr_drift=whr_drift,
+        whr_tie_sigma=whr_tie_sigma,
     )
     run = init_run(
         project="Tetris",
@@ -427,8 +444,9 @@ def main(args):
     opp_temps = np.zeros(N, dtype=np.float32)  # greedy move selection for the opponent
     wr_ema = 0.5
     last_wr_ref = 0.5
+    last_ref_dec = 0  # decisive games in the most recent eval-vs-ref window
 
-    for gen in range(num_generations):
+    for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
         gen_pos = []  # (pos, z) for both players' positions whose game completed this gen
@@ -488,6 +506,34 @@ def main(args):
             shard = os.path.join(save_states_dir, f"shard_{gen}")
             save_states(state_recs, shard)
             print(f"Gen {gen}: saved {len(state_recs)} states to {shard}", flush=True)
+
+        # Rate this gen's games BEFORE the training-update skip paths, so the
+        # whole-history log never drops completed games (e.g. replay warmup).
+        decisive = len(p1_wins)
+        wins = int(sum(p1_wins))
+        if whr is not None and opp_tag is not None and decisive + n_draw > 0:
+            whr.record(gen, opp_tag, wins, decisive - wins, n_draw, ctx="pool")
+        if gen % eval_interval == 0:
+            ref_wins, ref_losses, ref_draws = _eval_vs_ref(
+                mcts,
+                ref_mcts,
+                eval_games,
+                queue_size,
+                max_len,
+                max_game_steps,
+                rng,
+                searcher,
+            )
+            last_ref_dec = ref_wins + ref_losses
+            if last_ref_dec:  # hold the previous value across all-draw evals
+                last_wr_ref = ref_wins / last_ref_dec
+            if whr is not None:
+                whr.record(gen, "gen_0", ref_wins, ref_losses, ref_draws, ctx="eval")
+        if whr is not None:
+            write_gen = gen % 5 == 0
+            whr.fit(gen=gen, full_sigma=write_gen)
+            if write_gen:
+                whr.to_json(ratings_path)
 
         n_new = len(gen_pos)
         if n_new == 0:
@@ -572,8 +618,7 @@ def main(args):
             update_kl = 0.0
 
         n_games = len(game_lens)
-        decisive = len(p1_wins)
-        win_rate = float(np.mean(p1_wins)) if decisive else 0.0
+        win_rate = wins / decisive if decisive else 0.0
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
         dec = (value_tgt != 0.0) & (policy_mask == 1.0)  # learner positions only
@@ -586,29 +631,11 @@ def main(args):
         else:
             value_calibration = 0.0
 
-        # Pool maintenance: EMA the decisive WR, grow the pool (gated), and periodically
-        # eval vs the frozen gen_0 reference. Elo folds in this gen's pool games and the
-        # eval-vs-ref (anchor) games.
+        # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
+        # bookkeeping already ran pre-skip; a new snapshot registers + refits here
+        # so ratings.json includes it immediately.
         if decisive > 0:
             wr_ema = 0.9 * wr_ema + 0.1 * win_rate
-        if elo is not None and opp_tag is not None and decisive + n_draw > 0:
-            wins = int(sum(p1_wins))
-            elo.update(opp_tag, wins, decisive - wins, n_draw)
-        if gen % eval_interval == 0:
-            ref_wins, ref_losses = _eval_vs_ref(
-                mcts,
-                ref_mcts,
-                eval_games,
-                queue_size,
-                max_len,
-                max_game_steps,
-                rng,
-                searcher,
-            )
-            ref_dec = ref_wins + ref_losses
-            last_wr_ref = ref_wins / ref_dec if ref_dec else 0.5
-            if elo is not None:
-                elo.update("gen_0", ref_wins, ref_losses, 0)
         if (
             gen > 0
             and gen % pool_interval == 0
@@ -617,22 +644,30 @@ def main(args):
         ):
             _save_pool(net, gen, pool_dir, max_pool_size)
             print(f"Saved opponent-pool gen_{gen} (wr_ema {wr_ema:.3f}).", flush=True)
-            if elo is not None:
-                elo.on_snapshot(f"gen_{gen}")
-                elo.to_json(elo_path)
+            if whr is not None:
+                whr.register_snapshot(f"gen_{gen}")
+                whr.fit(gen=gen, full_sigma=True)
+                whr.to_json(ratings_path)
 
-        # Per-opponent Elo fan; new series appear as the pool grows.
+        # Per-opponent rating fan; new series appear as the pool grows.
         present = [os.path.basename(p) for p in _pool_snaps(pool_dir)]
         elo_tags = {}
-        if elo is not None:
-            summ = elo.present_summary(present)
+        if whr is not None:
+            summ = whr.present_summary(present)
             elo_tags = {
-                "elo/learner": elo.ratings["learner"],
-                "elo/reference": elo.ratings["gen_0"],
+                "elo/learner": whr.ratings["learner"],
+                "elo/learner_sigma": whr.sigmas["learner"],
+                "elo/reference": whr.ratings["gen_0"],
                 "elo/best_pool": summ["best_pool"],
                 "elo/learner_minus_ref": summ["learner_minus_ref"],
                 "elo/gap_to_pool": summ["gap_to_pool"],
-                **{f"elo/pool/{g}": elo.ratings[g] for g in present if g != "gen_0"},
+                "elo/ctx_offset": whr.ctx_offset,
+                "elo/ref_decisive": float(last_ref_dec),
+                **{
+                    f"elo/pool/{g}": whr.ratings[g]
+                    for g in present
+                    if g != "gen_0" and g in whr.ratings
+                },
             }
 
         log_step(
@@ -675,7 +710,5 @@ def main(args):
 
         if gen % 5 == 0:
             manager.save()
-            if elo is not None:
-                elo.to_json(elo_path)
 
     finish(run)

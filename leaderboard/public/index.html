@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>QTris ELO Leaderboard</title>
+    <title>QTris Rating Leaderboard</title>
     <style>
       :root {
         --bg: #0e1116;
@@ -48,7 +48,7 @@
       .tag.live { color: var(--good); border-color: rgba(63,185,80,.4); }
       .name-tags { display: inline-flex; gap: 6px; align-items: center; }
       .rank { color: var(--muted); }
-      .raw-hint { cursor: help; }
+      .sigma { color: var(--muted); font-size: 12px; }
       footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
       a { color: var(--ref); }
       .status { color: var(--muted); }
@@ -56,21 +56,20 @@
   </head>
   <body>
     <div class="wrap">
-      <h1>QTris ELO Leaderboard</h1>
-      <div class="sub">1v1 AlphaZero opponent pool &middot; anchored Elo (gen_0 = 1500)</div>
+      <h1>QTris Rating Leaderboard</h1>
+      <div class="sub">1v1 AlphaZero opponent pool &middot; whole-history rating (gen_0 anchored at 1500)</div>
 
       <div id="cards" class="cards"></div>
       <div id="content"><p class="status">Loading&hellip;</p></div>
 
       <footer>
         Auto-refreshes every 30s &middot; <span id="updated">&mdash;</span><br />
-        Learner ELO is smoothed (EMA); hover it for the raw value.
+        Ratings are whole-history (WHR) MAP estimates &plusmn;1&sigma;; gen_0 is the fixed anchor.
       </footer>
     </div>
 
     <script>
       const POLL_MS = 30000;
-      const fmt = (n) => (n == null ? "—" : Number(n).toFixed(1));
 
       function ago(iso) {
         if (!iso) return "no data yet";
@@ -96,21 +95,39 @@
           return;
         }
 
-        // The learner's displayed rating is its smoothed EMA; everyone else uses raw.
-        const shown = (e) => (e.is_learner && e.rating_ema != null ? e.rating_ema : e.rating);
-        const entries = data.entries.slice().sort((a, b) => shown(b) - shown(a));
+        // sigma is null-safe: old payloads still in KV carry no sigma field.
+        const sig = (e) =>
+          e.sigma == null || e.is_reference ? "" : ` <span class="sigma">&plusmn;${Math.round(e.sigma)}</span>`;
+        const genOf = (id) => (id.startsWith("gen_") ? Number(id.slice(4)) : Infinity);
+        const entries = data.entries
+          .slice()
+          .sort((a, b) => b.rating - a.rating || genOf(b.id) - genOf(a.id));
         const learner = entries.find((e) => e.is_learner);
         const reference = entries.find((e) => e.is_reference);
         const pool = entries.filter((e) => !e.is_learner && !e.is_reference);
         const best = pool.length ? Math.max(...pool.map((e) => e.rating)) : null;
 
-        const lr = learner ? shown(learner) : null;
+        const lr = learner ? learner.rating : null;
+        const lsig = learner && learner.sigma != null ? learner.sigma : null;
         const delta = lr != null && reference ? lr - reference.rating : null;
-        const deltaStr = delta == null ? "—" : (delta >= 0 ? "+" : "") + fmt(delta);
+        // Color the delta only when it clears the learner's own sigma; inside
+        // that band the posterior calls it a coin flip, so stay neutral.
+        const deltaStr =
+          delta == null
+            ? "—"
+            : (delta >= 0 ? "+" : "") + Math.round(delta) + (lsig != null ? ` ±${Math.round(lsig)}` : "");
+        const deltaCls =
+          delta == null || lsig == null
+            ? ""
+            : delta > lsig
+              ? "delta-pos"
+              : delta < -lsig
+                ? "delta-neg"
+                : "";
         cards.innerHTML =
-          card("Learner", lr == null ? "—" : fmt(lr)) +
-          card("vs reference", deltaStr, delta == null ? "" : delta >= 0 ? "delta-pos" : "delta-neg") +
-          card("Best pool", best == null ? "—" : fmt(best));
+          card("Learner", lr == null ? "—" : Math.round(lr) + (learner ? sig(learner) : "")) +
+          card("vs reference", deltaStr, deltaCls) +
+          card("Best pool", best == null ? "—" : Math.round(best));
 
         const rows = entries
           .map((e, i) => {
@@ -121,21 +138,18 @@
             return `<tr class="${cls}">
               <td class="rank">${i + 1}</td>
               <td><span class="name-tags">${e.id} ${tags.join(" ")}</span></td>
-              <td${
-                e.is_learner && e.rating_ema != null
-                  ? ` class="raw-hint" title="raw ${fmt(e.rating)}"`
-                  : ""
-              }>${fmt(shown(e))}</td>
+              <td>${Math.round(e.rating)}${sig(e)}</td>
               <td>${e.games ?? 0}</td>
             </tr>`;
           })
           .join("");
 
         content.innerHTML = `<table>
-          <thead><tr><th>#</th><th>Checkpoint</th><th>ELO</th><th>Games</th></tr></thead>
+          <thead><tr><th>#</th><th>Checkpoint</th><th>Rating</th><th>Games</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>`;
-        updated.textContent = ago(data.updated_at);
+        const genStr = data.gen != null ? `gen ${data.gen} · ` : "";
+        updated.textContent = genStr + ago(data.updated_at);
       }
 
       async function tick() {
