@@ -49,6 +49,26 @@
       .name-tags { display: inline-flex; gap: 6px; align-items: center; }
       .rank { color: var(--muted); }
       .sigma { color: var(--muted); font-size: 12px; }
+      .table-wrap { overflow-x: auto; }
+      td.line { width: 190px; min-width: 150px; }
+      /* Per-row uncertainty bar on a shared Elo axis (position = rating, bar
+         length = 2 sigma). No axis ticks; the only mark is each row's own point. */
+      .track { position: relative; display: block; height: 16px; }
+      .track::before {
+        content: ""; position: absolute; left: 0; right: 0; top: 50%;
+        height: 1px; background: var(--line);
+      }
+      .rng { position: absolute; top: 50%; transform: translateY(-50%); height: 8px; border-radius: 4px; }
+      .dot {
+        position: absolute; top: 50%; transform: translate(-50%, -50%);
+        width: 3px; height: 12px; border-radius: 2px; box-shadow: 0 0 0 1.5px var(--bg);
+      }
+      .b-learner { background: var(--accent); }
+      .b-ref { background: var(--ref); }
+      .b-pool { background: var(--muted); }
+      .rng.b-learner { background: rgba(245, 166, 35, .35); }
+      .rng.b-ref { background: rgba(88, 166, 255, .35); }
+      .rng.b-pool { background: rgba(139, 148, 158, .28); }
       footer { color: var(--muted); font-size: 12px; margin-top: 18px; }
       a { color: var(--ref); }
       .status { color: var(--muted); }
@@ -107,6 +127,27 @@
         const pool = entries.filter((e) => !e.is_learner && !e.is_reference);
         const best = pool.length ? Math.max(...pool.map((e) => e.rating)) : null;
 
+        // Shared Elo axis for the per-row bars: span every entry's rating ± sigma,
+        // padded so the widest bar never touches the column edges. sigma-null
+        // (old payloads) and the reference (sigma 0) collapse to a bare point.
+        const sigOf = (e) => (e.sigma == null ? 0 : e.sigma);
+        let lo = Math.min(...entries.map((e) => e.rating - sigOf(e)));
+        let hi = Math.max(...entries.map((e) => e.rating + sigOf(e)));
+        const pad = Math.max((hi - lo) * 0.08, 5);
+        lo -= pad;
+        hi += pad;
+        const span = Math.max(hi - lo, 1);
+        const pct = (v) => ((v - lo) / span) * 100;
+        const line = (e) => {
+          const kind = e.is_learner ? "b-learner" : e.is_reference ? "b-ref" : "b-pool";
+          const s = sigOf(e);
+          const bar =
+            s > 0
+              ? `<span class="rng ${kind}" style="left:${pct(e.rating - s)}%;width:${(2 * s / span) * 100}%"></span>`
+              : "";
+          return `<span class="track">${bar}<span class="dot ${kind}" style="left:${pct(e.rating)}%"></span></span>`;
+        };
+
         const lr = learner ? learner.rating : null;
         const lsig = learner && learner.sigma != null ? learner.sigma : null;
         const delta = lr != null && reference ? lr - reference.rating : null;
@@ -139,15 +180,16 @@
               <td class="rank">${i + 1}</td>
               <td><span class="name-tags">${e.id} ${tags.join(" ")}</span></td>
               <td>${Math.round(e.rating)}${sig(e)}</td>
+              <td class="line">${line(e)}</td>
               <td>${e.games ?? 0}</td>
             </tr>`;
           })
           .join("");
 
-        content.innerHTML = `<table>
-          <thead><tr><th>#</th><th>Checkpoint</th><th>Rating</th><th>Games</th></tr></thead>
+        content.innerHTML = `<div class="table-wrap"><table>
+          <thead><tr><th>#</th><th>Checkpoint</th><th>Rating</th><th>range</th><th>Games</th></tr></thead>
           <tbody>${rows}</tbody>
-        </table>`;
+        </table></div>`;
         const genStr = data.gen != null ? `gen ${data.gen} · ` : "";
         updated.textContent = genStr + ago(data.updated_at);
       }
