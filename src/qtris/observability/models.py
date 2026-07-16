@@ -293,14 +293,28 @@ class OneVsOneAZLog(LogPayloadModel):
     avg_combo: float
     surge_rate: float
 
-    # Search
+    # Search (from stored root visit pi / cand_mask / visits — no extra search)
     avg_visits: float
     visit_perplexity: (
         float  # exp(H(visit pi)): effective candidates searched; 1 = tunnel vision
     )
     top1_visit_share: float
+    top2_visit_share: float  # second-largest visit mass (peak sharpness with top1)
     visit_coverage: float  # fraction of legal candidates that got >=1 visit
     dead_rate: float
+    # Prior vs search on the update_kl learner slice (reuses that net forward; 0 if skipped)
+    prior_max: (
+        float  # max legal prior mass (sharpness of the net before the gen's updates)
+    )
+    prior_perplexity: float  # exp(H(prior)); 1 = delta prior
+    prior_search_agree: float  # fraction where argmax(prior) == argmax(visit pi)
+
+    # Value diagnostics (from stored v_root vs value_target; no extra net call)
+    value_sign_agree: float  # decisive learner: sign(v_root) == sign(z)
+    value_abs_err: float  # decisive learner: mean |v_root - z|
+
+    # Gameplay extras from BCG already on the batch
+    avg_pending_garbage: float
 
     # Training progress
     updates: int
@@ -337,14 +351,26 @@ class OneVsOneAZLog(LogPayloadModel):
             "draw_rate",
             "app",
             "value_calibration",
+            "value_sign_agree",
+            "value_abs_err",
         ),
-        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "gameplay": (
+            "avg_b2b",
+            "max_b2b",
+            "avg_combo",
+            "surge_rate",
+            "avg_pending_garbage",
+        ),
         "search": (
             "avg_visits",
             "visit_perplexity",
             "top1_visit_share",
+            "top2_visit_share",
             "visit_coverage",
             "dead_rate",
+            "prior_max",
+            "prior_perplexity",
+            "prior_search_agree",
         ),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
     }

@@ -555,9 +555,13 @@ def main(args):
         visits = np.array([p["visits"] for p, _z, _m in gen_pos], dtype=np.float32)
         # Search exploration: how the root visit mass spreads over legal candidates.
         # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
+        # All from stored pi/cand_mask — no extra search or net call.
         p_nz = np.where(pi_tgt > 0.0, pi_tgt, 1.0)  # 0*log(0) = 0
         visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
         top1_visit_share = pi_tgt.max(axis=1)
+        # Second-largest visit mass (0 when fewer than 2 legal with mass).
+        pi_second = np.partition(pi_tgt, -2, axis=1)[:, -2]
+        top2_visit_share = pi_second
         visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
 
         replay.append(
@@ -595,6 +599,7 @@ def main(args):
         )
 
         # update_kl over a fixed-size slice of this gen's new LEARNER positions (one trace).
+        # Same forward also yields free prior-vs-search diagnostics (no extra call).
         learner_idx = np.flatnonzero(policy_mask == 1.0)[:mini_batch_size]
         measure_kl = len(learner_idx) >= mini_batch_size
         if measure_kl:
@@ -606,6 +611,18 @@ def main(args):
                 tf.constant(cand_mk[learner_idx]),
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
+            # Masked prior from the pre-update net (training-time policy, not root-noised).
+            prior = np.exp(lp_before)
+            prior_max = float(prior.max(axis=1).mean())
+            pr_nz = np.where(prior > 0.0, prior, 1.0)
+            prior_perplexity = float(
+                np.exp(-(prior * np.log(pr_nz)).sum(axis=1)).mean()
+            )
+            prior_search_agree = float(
+                (prior.argmax(axis=1) == pi_tgt[learner_idx].argmax(axis=1)).mean()
+            )
+        else:
+            prior_max = prior_perplexity = prior_search_agree = 0.0
 
         updates = 0
         step_out = None
@@ -637,6 +654,14 @@ def main(args):
             value_calibration = float(np.corrcoef(v_root[dec], value_tgt[dec])[0, 1])
         else:
             value_calibration = 0.0
+        if dec.sum() >= 1:
+            value_sign_agree = float(
+                (np.sign(v_root[dec]) == np.sign(value_tgt[dec])).mean()
+            )
+            value_abs_err = float(np.abs(v_root[dec] - value_tgt[dec]).mean())
+        else:
+            value_sign_agree = 0.0
+            value_abs_err = 0.0
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -692,15 +717,22 @@ def main(args):
                 draw_rate=draw_rate,
                 app=app,
                 value_calibration=value_calibration,
+                value_sign_agree=value_sign_agree,
+                value_abs_err=value_abs_err,
                 avg_b2b=float(bcg[:, 0].mean()),
                 max_b2b=float(bcg[:, 0].max()),
                 avg_combo=float(bcg[:, 1].mean()),
                 surge_rate=float((bcg[:, 0] >= 4).mean()),
+                avg_pending_garbage=float(bcg[:, 2].mean()),
                 avg_visits=float(visits.mean()),
                 visit_perplexity=float(visit_perplexity.mean()),
                 top1_visit_share=float(top1_visit_share.mean()),
+                top2_visit_share=float(top2_visit_share.mean()),
                 visit_coverage=float(visit_coverage.mean()),
                 dead_rate=dead_searches / total_searches if total_searches else 0.0,
+                prior_max=prior_max,
+                prior_perplexity=prior_perplexity,
+                prior_search_agree=prior_search_agree,
                 updates=updates,
                 buffer_size=replay_size,
                 completed_games=n_games,
