@@ -3500,11 +3500,9 @@ static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
     }
 }
 
-// b2b potential for the w_b2b shaping: Phi = min(max(0, b2b), CAP).
-#define B2B_POTENTIAL_CAP 12
+// b2b potential for the w_b2b shaping: Phi = max(0, b2b).
 static inline float b2b_phi(int b2b) {
-    int p = b2b > 0 ? b2b : 0;
-    return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
+    return (float)(b2b > 0 ? b2b : 0);
 }
 
 static float mcts_scale_reward(const MConfig* cfg, float reward) {
