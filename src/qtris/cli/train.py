@@ -161,9 +161,9 @@ def main() -> None:
     az.add_argument(
         "--w-b2b",
         type=float,
-        default=0.06,
+        default=0.0,
         help="placement 1v1 only: potential-based b2b-build search shaping "
-        "(Phi=min(b2b,12); builds toward surges instead of cashing out; 0=off).",
+        "(0=off / pure-AZ edges; leave 0 with w_attack=0 so Q stays in outcome units).",
     )
     az.add_argument(
         "--replay-capacity",
