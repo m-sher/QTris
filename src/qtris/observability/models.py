@@ -293,25 +293,31 @@ class OneVsOneAZLog(LogPayloadModel):
     avg_combo: float
     surge_rate: float
 
-    # Search (from stored root visit pi / cand_mask / visits — no extra search)
+    # Search (from stored root visit pi / cand_mask / visits — no extra search).
+    # None on 0-visit rows / skipped slices so a missing measurement is not logged as data.
     avg_visits: float
-    visit_perplexity: (
-        float  # exp(H(visit pi)): effective candidates searched; 1 = tunnel vision
-    )
-    top1_visit_share: float
-    top2_visit_share: float  # second-largest visit mass (peak sharpness with top1)
-    visit_coverage: float  # fraction of legal candidates that got >=1 visit
+    visit_perplexity: Optional[
+        float
+    ]  # exp(H(visit pi)): effective candidates; 1 = tunnel vision
+    top1_visit_share: Optional[float]
+    top2_visit_share: Optional[
+        float
+    ]  # second-largest visit mass (peak sharpness with top1)
+    visit_coverage: Optional[float]  # fraction of legal candidates with >=1 visit
     dead_rate: float
-    # Prior vs search on the update_kl learner slice (reuses that net forward; 0 if skipped)
-    prior_max: (
-        float  # max legal prior mass (sharpness of the net before the gen's updates)
-    )
-    prior_perplexity: float  # exp(H(prior)); 1 = delta prior
-    prior_search_agree: float  # fraction where argmax(prior) == argmax(visit pi)
+    # Prior vs search on the update_kl learner slice (reuses that forward; None if KL skipped)
+    prior_max: Optional[
+        float
+    ]  # max legal prior mass (net sharpness before the gen's updates)
+    prior_perplexity: Optional[float]  # exp(H(prior)); 1 = delta prior
+    prior_search_agree: Optional[
+        float
+    ]  # fraction where argmax(prior) == argmax(visit pi)
 
-    # Value diagnostics (from stored v_root vs value_target; no extra net call)
-    value_sign_agree: float  # decisive learner: sign(v_root) == sign(z)
-    value_abs_err: float  # decisive learner: mean |v_root - z|
+    # Value diagnostics: v_root vs the TD(lambda) value target on decisive learner
+    # positions (== outcome z only at lambda=1); None when no decisive learner data.
+    value_sign_agree: Optional[float]  # sign(v_root) == sign(TD target)
+    value_abs_err: Optional[float]  # mean |v_root - TD target|
 
     # Gameplay extras from BCG already on the batch
     avg_pending_garbage: float

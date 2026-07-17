@@ -34,6 +34,7 @@ from qtris.observability.backend import finish, init_run, log_step
 from qtris.observability.models import OneVsOneAZLog, OneVsOnePlacementAZConfig
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
+from qtris.training.az_metrics import perplexity, visit_metrics
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
 
@@ -553,16 +554,9 @@ def main(args):
         policy_mask = np.array([m for _p, _z, m in gen_pos], dtype=np.float32)
         v_root = np.array([p["v_root"] for p, _z, _m in gen_pos], dtype=np.float32)
         visits = np.array([p["visits"] for p, _z, _m in gen_pos], dtype=np.float32)
-        # Search exploration: how the root visit mass spreads over legal candidates.
-        # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
-        # All from stored pi/cand_mask — no extra search or net call.
-        p_nz = np.where(pi_tgt > 0.0, pi_tgt, 1.0)  # 0*log(0) = 0
-        visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
-        top1_visit_share = pi_tgt.max(axis=1)
-        # Second-largest visit mass (0 when fewer than 2 legal with mass).
-        pi_second = np.partition(pi_tgt, -2, axis=1)[:, -2]
-        top2_visit_share = pi_second
-        visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
+        # Root-visit exploration means (excludes 0-visit rows where pi falls back to
+        # the prior). From stored pi/cand_mask/visits — no extra search or net call.
+        vm = visit_metrics(pi_tgt, cand_mk, visits) or {}
 
         replay.append(
             {
@@ -614,15 +608,12 @@ def main(args):
             # Masked prior from the pre-update net (training-time policy, not root-noised).
             prior = np.exp(lp_before)
             prior_max = float(prior.max(axis=1).mean())
-            pr_nz = np.where(prior > 0.0, prior, 1.0)
-            prior_perplexity = float(
-                np.exp(-(prior * np.log(pr_nz)).sum(axis=1)).mean()
-            )
+            prior_perplexity = float(perplexity(prior).mean())
             prior_search_agree = float(
                 (prior.argmax(axis=1) == pi_tgt[learner_idx].argmax(axis=1)).mean()
             )
         else:
-            prior_max = prior_perplexity = prior_search_agree = 0.0
+            prior_max = prior_perplexity = prior_search_agree = None
 
         updates = 0
         step_out = None
@@ -660,8 +651,8 @@ def main(args):
             )
             value_abs_err = float(np.abs(v_root[dec] - value_tgt[dec]).mean())
         else:
-            value_sign_agree = 0.0
-            value_abs_err = 0.0
+            value_sign_agree = None
+            value_abs_err = None
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -725,10 +716,10 @@ def main(args):
                 surge_rate=float((bcg[:, 0] >= 4).mean()),
                 avg_pending_garbage=float(bcg[:, 2].mean()),
                 avg_visits=float(visits.mean()),
-                visit_perplexity=float(visit_perplexity.mean()),
-                top1_visit_share=float(top1_visit_share.mean()),
-                top2_visit_share=float(top2_visit_share.mean()),
-                visit_coverage=float(visit_coverage.mean()),
+                visit_perplexity=vm.get("visit_perplexity"),
+                top1_visit_share=vm.get("top1_visit_share"),
+                top2_visit_share=vm.get("top2_visit_share"),
+                visit_coverage=vm.get("visit_coverage"),
                 dead_rate=dead_searches / total_searches if total_searches else 0.0,
                 prior_max=prior_max,
                 prior_perplexity=prior_perplexity,
