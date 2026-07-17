@@ -73,11 +73,10 @@ def main(args):
 
     load_checkpoint(p_model, args.checkpoint)
 
-    # MCTS search must use the SAME return_scale the value head was trained at - it normalizes
-    # the per-edge attack / b2b / death terms against the learned value. At the default 1.0 the
-    # immediate reward terms dwarf the value head (~return_scale x too large), so the search
-    # cashes out / breaks b2b instead of hoarding. Restore it from the (AZ) checkpoint; BC/PPO
-    # checkpoints have no return_scale -> fall back to 1.0.
+    # MCTS search must use the SAME return_scale the value head was trained at - it scales the
+    # only surviving edge term (terminal -w_death) against the learned value (w_attack=w_b2b=0).
+    # At the default 1.0 the death penalty can dwarf a [-1,1] value head. Restore it from the (AZ)
+    # checkpoint; BC/PPO checkpoints have no return_scale -> fall back to 1.0.
     mcts_return_scale = 1.0
     try:
         _ck = tf.train.latest_checkpoint(args.checkpoint)

@@ -31,7 +31,8 @@ from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Pieces import PieceType
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 
-# Model + search params mirror tetrio/triangle_integration_placement.py (the deployed bot).
+# Net + search params mirror the deployed 1v1 bot; value_activation="tanh" matches the 1v1 AZ
+# outcome-z head so the value leaf reads in [-1,1] (loading it linear = raw pre-tanh logits).
 PIECE_DIM = 8
 DEPTH = 64
 NUM_HEADS = 4
@@ -67,6 +68,7 @@ def build_net(checkpoint):
         num_heads=NUM_HEADS,
         num_layers=NUM_LAYERS,
         dropout_rate=0.0,
+        value_activation="tanh",
     )
     net(
         (

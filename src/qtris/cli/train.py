@@ -150,7 +150,8 @@ def main() -> None:
         "--w-attack",
         type=float,
         default=1.0,
-        help="per-edge search reward weight on attack (also scales the realized return).",
+        help="single mode only: per-edge search reward weight on attack (also scales "
+        "the realized return); 1v1 hardcodes pure-AZ w_attack=0 and ignores this.",
     )
     az.add_argument(
         "--w-death",

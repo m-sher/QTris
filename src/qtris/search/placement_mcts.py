@@ -34,7 +34,7 @@ class MCTSConfig:
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
-    w_b2b: float = 0.0  # potential-based b2b-build shaping; Phi=min(b2b,12), 0=off
+    w_b2b: float = 0.0  # potential-based b2b-build shaping; Phi=max(0,b2b), 0=off
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
