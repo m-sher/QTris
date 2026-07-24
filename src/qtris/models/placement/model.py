@@ -197,17 +197,17 @@ class PlacementPolicyValueNet(QtrisModelBase):
                 tf.TensorSpec(shape=(None, None), dtype=tf.int64),
                 tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
                 tf.TensorSpec(
-                    shape=(None, None, PLACEMENT_FEATURE_DIM),
+                    shape=(None, MCTS_CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM),
                     dtype=tf.float32,
                 ),
-                tf.TensorSpec(shape=(None, None), dtype=tf.bool),
+                tf.TensorSpec(shape=(None, MCTS_CANDIDATE_CAPACITY), dtype=tf.bool),
             )
         ],
     )
     def policy_value(self, inputs):
         """Jit inference forward: (logits, value) from one encoder pass, training=False.
-        The candidate axis is dynamic (MCTS packs MCTS_CANDIDATE_CAPACITY slots, the
-        dense path CANDIDATE_CAPACITY); XLA compiles one executable per width seen.
+        The candidate axis is pinned to MCTS_CANDIDATE_CAPACITY; narrower packings
+        (dense-path CANDIDATE_CAPACITY) are mask-padded up to it by callers.
         Same compute as call() at eval, minus the training flag - so XLA never sees dropout."""
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
         piece_dec, board_dec, _ = self.process_obs(

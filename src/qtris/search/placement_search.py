@@ -14,7 +14,10 @@ import tensorflow as tf
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.Pieces import PieceType
-from qtris.data.placement_features import build_placement_inference
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY,
+    build_placement_inference,
+)
 
 ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 _FORCED_DROP = np.array([Keys.START, Keys.HARD_DROP] + [Keys.PAD] * 13, dtype=np.int64)
@@ -239,13 +242,20 @@ def enumerate_node(env, searcher, cfg):
 
 
 def _policy_value_batch(net, boards, pieces, bcgs, placements, masks):
+    # Pad the dense-path packing up to the net's pinned candidate width.
+    pl = np.stack(placements)
+    mk = np.stack(masks)
+    pad = MCTS_CANDIDATE_CAPACITY - pl.shape[1]
+    if pad > 0:
+        pl = np.pad(pl, ((0, 0), (0, pad), (0, 0)))
+        mk = np.pad(mk, ((0, 0), (0, pad)))
     logits, value = net.policy_value(
         (
             tf.constant(np.concatenate(boards), tf.float32),
             tf.constant(np.concatenate(pieces), tf.int64),
             tf.constant(np.concatenate(bcgs), tf.float32),
-            tf.constant(np.stack(placements), tf.float32),
-            tf.constant(np.stack(masks), tf.bool),
+            tf.constant(pl, tf.float32),
+            tf.constant(mk, tf.bool),
         )
     )
     return logits.numpy(), value.numpy()[:, 0]
