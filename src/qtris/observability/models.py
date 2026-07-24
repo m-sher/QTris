@@ -295,6 +295,11 @@ class OneVsOneAZLog(LogPayloadModel):
 
     # Search
     avg_visits: float
+    visit_perplexity: (
+        float  # exp(H(visit pi)): effective candidates searched; 1 = tunnel vision
+    )
+    top1_visit_share: float
+    visit_coverage: float  # fraction of legal candidates that got >=1 visit
     dead_rate: float
 
     # Training progress
@@ -334,7 +339,13 @@ class OneVsOneAZLog(LogPayloadModel):
             "value_calibration",
         ),
         "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
-        "search": ("avg_visits", "dead_rate"),
+        "search": (
+            "avg_visits",
+            "visit_perplexity",
+            "top1_visit_share",
+            "visit_coverage",
+            "dead_rate",
+        ),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
     }
 

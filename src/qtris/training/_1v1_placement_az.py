@@ -555,6 +555,12 @@ def main(args):
         policy_mask = np.array([m for _p, _z, m in gen_pos], dtype=np.float32)
         v_root = np.array([p["v_root"] for p, _z, _m in gen_pos], dtype=np.float32)
         visits = np.array([p["visits"] for p, _z, _m in gen_pos], dtype=np.float32)
+        # Search exploration: how the root visit mass spreads over legal candidates.
+        # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
+        p_nz = np.where(pi_tgt > 0.0, pi_tgt, 1.0)  # 0*log(0) = 0
+        visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
+        top1_visit_share = pi_tgt.max(axis=1)
+        visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
 
         replay.append(
             {
@@ -693,6 +699,9 @@ def main(args):
                 avg_combo=float(bcg[:, 1].mean()),
                 surge_rate=float((bcg[:, 0] >= 4).mean()),
                 avg_visits=float(visits.mean()),
+                visit_perplexity=float(visit_perplexity.mean()),
+                top1_visit_share=float(top1_visit_share.mean()),
+                visit_coverage=float(visit_coverage.mean()),
                 dead_rate=dead_searches / total_searches if total_searches else 0.0,
                 updates=updates,
                 buffer_size=replay_size,
