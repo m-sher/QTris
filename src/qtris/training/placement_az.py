@@ -25,7 +25,10 @@ from tensorflow import keras
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY as CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+)
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
 from qtris.observability.backend import finish, init_run, log_step

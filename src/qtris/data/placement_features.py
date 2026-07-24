@@ -12,8 +12,13 @@ import numpy as np
 
 PLACEMENT_FEATURE_DIM = 18
 MODEL_ROWS = 24  # model-visible board height (net input is (MODEL_ROWS, 10, 1))
+# Dense-path packing (BC / PPO / pretrain): top-K per hold/no-hold branch.
 BRANCH_CAPACITY = 64
 CANDIDATE_CAPACITY = 2 * BRANCH_CAPACITY  # 128
+# Placement MCTS slot capacity; keep in sync with C MCAP in b2b_search.c (handshake in cmcts).
+# The multi-landing enum packs up to MCTS_BRANCH_CAPACITY placements per hold/no-hold branch.
+MCTS_BRANCH_CAPACITY = 128
+MCTS_CANDIDATE_CAPACITY = 2 * MCTS_BRANCH_CAPACITY  # 256
 SENTINEL = np.float32(-1e30)  # score for empty/masked slots
 PAD = 11  # key-sequence padding token
 

@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import tensorflow as tf
 
-from qtris.data.placement_features import CANDIDATE_CAPACITY
+from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 from qtris.search.cmcts import CMCTS
 
 
@@ -124,7 +124,7 @@ class PlacementMCTS:
             if nv:
                 boards, pieces, bcg, pls, masks, tree_ids = req
                 logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
-                noise = np.zeros((nv, CANDIDATE_CAPACITY), dtype=np.float32)
+                noise = np.zeros((nv, MCTS_CANDIDATE_CAPACITY), dtype=np.float32)
                 for k in range(nv):
                     ls = np.flatnonzero(masks[k])
                     if ls.size:

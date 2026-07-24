@@ -3224,9 +3224,18 @@ void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
                                  int piece_type, int start_row, int start_col, int start_rot,
                                  int max_len, int is_hold,
                                  int64_t* out_sequences, int32_t* out_landing_rows);
+// Every unique resting placement (rot, norm_col, landing_row, spin); returns count written.
+int find_unique_placements_c(const uint16_t* board_rows, int board_height,
+                             int piece_type, int start_row, int start_col, int start_rot,
+                             int max_len, int is_hold, int max_out,
+                             int32_t* out_rot, int32_t* out_norm_col,
+                             int32_t* out_landing_row, int32_t* out_spin,
+                             int64_t* out_sequences);
 
-#define MCAP 128          // candidate capacity (slots)
-#define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
+// Keep in sync with MCTS_CANDIDATE_CAPACITY / MCTS_BRANCH_CAPACITY (Python).
+#define MCAP 256          // candidate capacity (slots)
+#define MBRANCH 128       // per-branch cap (no-hold 0..127, hold 128..255)
+#define MENUM_MAX 512     // enum scratch capacity per branch
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
 #define MCLIP 10.0f       // reward clip
@@ -3382,35 +3391,40 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     return attack;
 }
 
-// --- enumerate candidates into node (reuse env pathfinder); false if dead (no legal) ---
+// --- enumerate candidates into node: every unique resting placement per hold/no-hold
+//     branch, packed in BFS first-seen order, truncated at MBRANCH; false if dead ---
 static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
-    static __thread int32_t lr_nh[160], lr_h[160];
-    static __thread int64_t seq_scratch[160 * 32];   // discarded; max_len<=32
+    static __thread int32_t erot[MENUM_MAX], encol[MENUM_MAX], elr[MENUM_MAX], espin[MENUM_MAX];
     const uint16_t* board = node->st.board;
     int ml = cfg->max_len;
-    find_placement_candidates_c(board, cfg->board_height, node->st.active, SPAWN_ROW, 3, 0,
-                                ml, 0, seq_scratch, lr_nh);
+    int n_nh = find_unique_placements_c(board, cfg->board_height, node->st.active,
+                                        SPAWN_ROW, 3, 0, ml, 0, MENUM_MAX,
+                                        erot, encol, elr, espin, NULL);
     int holdpiece = node->st.hold != PIECE_N ? node->st.hold : node->st.queue[0];
-    find_placement_candidates_c(board, cfg->board_height, holdpiece, SPAWN_ROW, 3, 0,
-                                ml, 1, seq_scratch, lr_h);
+    // Second call reuses the same TLS buffers after packing no-hold.
     node->n_legal = 0;
-    int cnt = 0;
-    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
-        if (lr_nh[i] < 0) continue;
-        int slot = cnt++;
+    int pack_nh = n_nh < MBRANCH ? n_nh : MBRANCH;
+    for (int i = 0; i < pack_nh; i++) {
+        int slot = i;
         node->legal[node->n_legal++] = slot;
-        node->desc[slot][0] = 0; node->desc[slot][1] = i / 40;
-        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_nh[i];
-        node->desc[slot][4] = i % 4;
+        node->desc[slot][0] = 0;
+        node->desc[slot][1] = erot[i];
+        node->desc[slot][2] = encol[i];
+        node->desc[slot][3] = elr[i];
+        node->desc[slot][4] = espin[i];
     }
-    cnt = 0;
-    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
-        if (lr_h[i] < 0) continue;
-        int slot = MBRANCH + cnt++;
+    int n_h = find_unique_placements_c(board, cfg->board_height, holdpiece,
+                                       SPAWN_ROW, 3, 0, ml, 1, MENUM_MAX,
+                                       erot, encol, elr, espin, NULL);
+    int pack_h = n_h < MBRANCH ? n_h : MBRANCH;
+    for (int i = 0; i < pack_h; i++) {
+        int slot = MBRANCH + i;
         node->legal[node->n_legal++] = slot;
-        node->desc[slot][0] = 1; node->desc[slot][1] = i / 40;
-        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_h[i];
-        node->desc[slot][4] = i % 4;
+        node->desc[slot][0] = 1;
+        node->desc[slot][1] = erot[i];
+        node->desc[slot][2] = encol[i];
+        node->desc[slot][3] = elr[i];
+        node->desc[slot][4] = espin[i];
     }
     return node->n_legal > 0;
 }
@@ -3785,6 +3799,10 @@ void mcts_destroy(void* h) {
     free(e->trees);
     free(e);
 }
+
+// Capacity handshake for Python CMCTS (must match MCTS_CANDIDATE_CAPACITY).
+int mcts_candidate_capacity(void) { return MCAP; }
+int mcts_branch_capacity(void) { return MBRANCH; }
 
 // --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
 //     deterministic core after a subtree re-sync re-applies these edits) ---

@@ -67,6 +67,24 @@ class CKeySequenceFinder(KeySequenceFinder):
             ]
             self._lib.find_placement_candidates_c.restype = None
 
+            self._lib.find_unique_placements_c.argtypes = [
+                np.ctypeslib.ndpointer(dtype=np.uint16, ndim=1, flags="C_CONTIGUOUS"),
+                ctypes.c_int,  # board_height
+                ctypes.c_int,  # piece_type
+                ctypes.c_int,  # start_row
+                ctypes.c_int,  # start_col
+                ctypes.c_int,  # start_rot
+                ctypes.c_int,  # max_len
+                ctypes.c_int,  # is_hold
+                ctypes.c_int,  # max_out
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"),
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"),
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"),
+                np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS"),
+                ctypes.c_void_p,  # out_sequences nullable
+            ]
+            self._lib.find_unique_placements_c.restype = ctypes.c_int
+
         self._col_bits = (
             np.uint16(1) << np.arange(10, dtype=np.uint16)
         ).astype(np.uint16)
@@ -148,3 +166,68 @@ class CKeySequenceFinder(KeySequenceFinder):
             landing_rows,
         )
         return sequences.reshape((160, max_len)), landing_rows
+
+    def find_unique_placements(
+        self,
+        board: np.ndarray,
+        piece: Piece,
+        max_len: int,
+        is_hold: bool,
+        max_out: int = 512,
+        with_sequences: bool = False,
+    ):
+        """Every unique resting placement: (rot, norm_col, landing_row, spin)[, sequences].
+
+        Distinct landing rows are separate entries; BFS rules match
+        find_placement_candidates.
+        """
+        if not self._lib:
+            raise RuntimeError("C Library not loaded")
+
+        occupied = (board != 0).astype(np.uint16)
+        mask_rows = (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
+        if not mask_rows.flags["C_CONTIGUOUS"]:
+            mask_rows = np.ascontiguousarray(mask_rows)
+        board_height = board.shape[0]
+
+        out_rot = np.zeros(max_out, dtype=np.int32)
+        out_ncol = np.zeros(max_out, dtype=np.int32)
+        out_lr = np.zeros(max_out, dtype=np.int32)
+        out_spin = np.zeros(max_out, dtype=np.int32)
+        seqs = np.full(max_out * max_len, Keys.PAD, dtype=np.int64) if with_sequences else None
+        seq_arg = (
+            seqs.ctypes.data_as(ctypes.c_void_p) if with_sequences else ctypes.c_void_p(0)
+        )
+
+        n = int(
+            self._lib.find_unique_placements_c(
+                mask_rows,
+                board_height,
+                piece.piece_type.value,
+                int(piece.loc[0]),
+                int(piece.loc[1]),
+                int(piece.r),
+                max_len,
+                int(is_hold),
+                max_out,
+                out_rot,
+                out_ncol,
+                out_lr,
+                out_spin,
+                seq_arg,
+            )
+        )
+        if with_sequences:
+            return (
+                out_rot[:n].copy(),
+                out_ncol[:n].copy(),
+                out_lr[:n].copy(),
+                out_spin[:n].copy(),
+                seqs.reshape(max_out, max_len)[:n].copy(),
+            )
+        return (
+            out_rot[:n].copy(),
+            out_ncol[:n].copy(),
+            out_lr[:n].copy(),
+            out_spin[:n].copy(),
+        )

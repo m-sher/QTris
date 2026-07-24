@@ -24,6 +24,7 @@ from qtris.demo.panels import confirm_save
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
 from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
+from qtris.search.placement_search import descriptor_key_sequence
 from qtris.training._1v1_placement_az import _build_net
 
 # Model params (match the 1v1 AZ trainer)
@@ -118,17 +119,17 @@ def main(cli_args):
     winner = None
 
     def mcts_keys(sub_env, mcts, side):
-        """MCTS-chosen placement -> key sequence (via the env pathfinder), like the solo demo."""
+        """MCTS-chosen placement -> key sequence (full descriptor, multi-landing-safe)."""
         res = mcts.search([sub_env], 1.0, 0.0)[0]
         if res["dead"]:
             forced = np.full(max_len, Keys.PAD, dtype=np.int64)
             forced[0], forced[1] = Keys.START, Keys.HARD_DROP
             return tf.constant(forced[None], dtype=tf.int64)
         side["value"] = res["value"]
-        is_hold, rot, norm_col, _landing, spin = res["descriptor"]
-        action_index = is_hold * 160 + rot * 40 + norm_col * 4 + spin
-        _, _, cand_seqs = sub_env._enumerate_placement_candidates()
-        return tf.constant(cand_seqs[action_index][None], dtype=tf.int64)
+        return tf.constant(
+            descriptor_key_sequence(sub_env, res["descriptor"], max_len)[None],
+            dtype=tf.int64,
+        )
 
     def blit_scaled(rgb, x, y, w, h):
         surf = pygame.Surface((rgb.shape[1], rgb.shape[0]))

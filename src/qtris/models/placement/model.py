@@ -5,7 +5,10 @@ from tensorflow_probability import distributions
 from qtris.nn.transformer import CrossAttentionLayer, DecoderLayer, PosEncoding
 from qtris.models.encoders import make_patches
 from qtris.models.base import QtrisModelBase
-from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+)
 from TetrisEnv.Moves import Keys
 
 HARD_DROP_ID = Keys.HARD_DROP
@@ -27,7 +30,7 @@ class PlacementPolicyValueNet(QtrisModelBase):
         num_heads,
         num_layers,
         dropout_rate,
-        candidate_capacity=CANDIDATE_CAPACITY,
+        candidate_capacity=MCTS_CANDIDATE_CAPACITY,
         value_activation=None,
     ):
         super().__init__()
@@ -194,15 +197,17 @@ class PlacementPolicyValueNet(QtrisModelBase):
                 tf.TensorSpec(shape=(None, None), dtype=tf.int64),
                 tf.TensorSpec(shape=(None, 3), dtype=tf.float32),
                 tf.TensorSpec(
-                    shape=(None, CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM),
+                    shape=(None, None, PLACEMENT_FEATURE_DIM),
                     dtype=tf.float32,
                 ),
-                tf.TensorSpec(shape=(None, CANDIDATE_CAPACITY), dtype=tf.bool),
+                tf.TensorSpec(shape=(None, None), dtype=tf.bool),
             )
         ],
     )
     def policy_value(self, inputs):
-        """Jit inference forward for MCTS: (logits, value) from one encoder pass, training=False.
+        """Jit inference forward: (logits, value) from one encoder pass, training=False.
+        The candidate axis is dynamic (MCTS packs MCTS_CANDIDATE_CAPACITY slots, the
+        dense path CANDIDATE_CAPACITY); XLA compiles one executable per width seen.
         Same compute as call() at eval, minus the training flag - so XLA never sees dropout."""
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
         piece_dec, board_dec, _ = self.process_obs(

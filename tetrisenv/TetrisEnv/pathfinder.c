@@ -766,3 +766,103 @@ void find_placement_candidates_c(
                    meta, visited, queue, &tail);
     }
 }
+
+// Every unique resting placement (rot, norm_col, landing_row, spin) reachable from the
+// start state; distinct landing rows are separate entries. BFS rules match
+// find_placement_candidates_c (max_len-derived depth, 4-way spin detection, no
+// visibility filter). Returns the count written (capped at max_out). out_sequences may
+// be NULL; when non-NULL it is a caller-PAD-filled [max_out * max_len] buffer receiving
+// one key sequence per placement.
+int find_unique_placements_c(
+    const uint16_t* board_rows,
+    const int board_height,
+    const int piece_type,
+    const int start_row,
+    const int start_col,
+    const int start_rot,
+    const int max_len,
+    const int is_hold,
+    const int max_out,
+    int32_t* out_rot,
+    int32_t* out_norm_col,
+    int32_t* out_landing_row,
+    int32_t* out_spin,
+    int64_t* out_sequences
+) {
+    if (!initialized) init_pieces();
+    if (max_out <= 0 || !out_rot || !out_norm_col || !out_landing_row || !out_spin)
+        return 0;
+
+    StateMeta meta[STATE_SPACE];
+    bool visited[STATE_SPACE];
+    int queue[QUEUE_CAPACITY];
+
+    for (int i = 0; i < STATE_SPACE; i++) {
+        visited[i] = false;
+        meta[i].parent = -1;
+    }
+
+    int start_state = encode_state(start_row, start_col, start_rot, piece_type);
+    if (start_state == -1 ||
+        check_collision(board_rows, board_height, piece_type, start_rot, start_row,
+                        start_col)) {
+        return 0;
+    }
+
+    int head = 0, tail = 0;
+    queue[tail++] = start_state;
+    visited[start_state] = true;
+    meta[start_state].depth = 0;
+    meta[start_state].last_move = KEY_START;
+    meta[start_state].delta_r = 0;
+
+    int max_seq = is_hold ? max_len : max_len - 1;
+    int max_depth = max_seq - 2;
+    int n_out = 0;
+
+    while (head != tail) {
+        int curr_state = queue[head++];
+        head %= QUEUE_CAPACITY;
+
+        int r, c, rot;
+        decode_state(curr_state, &r, &c, &rot, piece_type);
+        int depth = meta[curr_state].depth;
+
+        int land_r = hard_drop_row(board_rows, board_height, piece_type, rot, r, c);
+
+        if (r == land_r) {
+            int delta_sum =
+                abs(meta[curr_state].delta_row) + abs(meta[curr_state].delta_col);
+            int spin_type = compute_spin_type(board_rows, board_height, piece_type, rot,
+                                              land_r, c, meta[curr_state].delta_r,
+                                              delta_sum);
+            int norm_col = c + PIECES[piece_type].orientations[rot].min_col;
+
+            bool dup = false;
+            for (int i = 0; i < n_out; i++) {
+                if (out_rot[i] == rot && out_norm_col[i] == norm_col &&
+                    out_landing_row[i] == land_r && out_spin[i] == spin_type) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup && n_out < max_out) {
+                out_rot[n_out] = rot;
+                out_norm_col[n_out] = norm_col;
+                out_landing_row[n_out] = land_r;
+                out_spin[n_out] = spin_type;
+                if (out_sequences) {
+                    write_sequence(meta, curr_state, is_hold, max_len,
+                                   &out_sequences[(size_t)n_out * max_len]);
+                }
+                n_out++;
+            }
+        }
+
+        if (depth >= max_depth) continue;
+
+        bfs_expand(board_rows, board_height, piece_type, curr_state, r, c, rot, depth,
+                   meta, visited, queue, &tail);
+    }
+    return n_out;
+}
