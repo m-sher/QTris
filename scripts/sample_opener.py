@@ -221,7 +221,6 @@ def main():
         gamma=1.0,
         w_attack=0.05,
         w_death=1.0,
-        w_b2b=0.06,
     )
     mcts = PlacementMCTS(net, cfg)
     searcher = CB2BSearch()
