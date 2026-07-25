@@ -75,7 +75,6 @@ def main(cli_args):
         gamma=1.0,
         w_attack=0.05,
         w_death=1.0,
-        w_b2b=0.06,
     )
     mcts1 = PlacementMCTS(p1_net, cfg)
     mcts2 = PlacementMCTS(p2_net, cfg)

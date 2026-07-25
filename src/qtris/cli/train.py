@@ -159,13 +159,6 @@ def main() -> None:
         help="terminal-edge death penalty (raw attack units; also the realized death reward).",
     )
     az.add_argument(
-        "--w-b2b",
-        type=float,
-        default=0.06,
-        help="placement 1v1 only: potential-based b2b-build search shaping "
-        "(Phi=min(b2b,12); builds toward surges instead of cashing out; 0=off).",
-    )
-    az.add_argument(
         "--replay-capacity",
         type=int,
         default=25_000,

@@ -5,8 +5,8 @@ frozen past snapshots, via decoupled per-player MCTS: each player searches its o
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
 `PyTetris1v1Env` does. The value head regresses the realized game outcome z in {-1, 0, +1}
-(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
-w_b2b=0.06; own-death = -1 is the only in-search terminal.
+(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05;
+own-death = -1 is the only in-search terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
 on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
@@ -310,8 +310,8 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # Outcome-z value target; search reward = small attack credit + b2b-build shaping,
-    # own-death = -1, undiscounted, scale 1.
+    # Outcome-z value target; search reward = small attack credit, own-death = -1,
+    # undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -321,7 +321,6 @@ def main(args):
         temp_moves=getattr(args, "temp_moves", 12),
         w_attack=0.05,
         w_death=1.0,
-        w_b2b=getattr(args, "w_b2b", 0.06),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -397,7 +396,6 @@ def main(args):
         dirichlet_alpha=cfg.dirichlet_alpha,
         dirichlet_eps=cfg.dirichlet_eps,
         temp_moves=cfg.temp_moves,
-        w_b2b=cfg.w_b2b,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,

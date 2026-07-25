@@ -43,7 +43,6 @@ def _load_lib():
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
-        + [ctypes.c_float]  # w_b2b
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
@@ -105,7 +104,6 @@ class CMCTS:
         num_simulations=64,
         leaves_per_round=4,
         vloss=1.0,
-        w_b2b=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -143,7 +141,6 @@ class CMCTS:
             + 1,  # arena: root + ~one node per simulation (+L headroom)
             self.lpr,
             vloss,
-            w_b2b,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
