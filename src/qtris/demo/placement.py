@@ -62,6 +62,7 @@ def main(args):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
+        value_activation="tanh",
     )
 
     p_model(
