@@ -292,6 +292,20 @@ class OneVsOneAZLog(LogPayloadModel):
     avg_combo: float
     surge_rate: float
 
+    # Learner b2b economics; None when the gen produced no qualifying event.
+    b2b_at_death: Optional[float]  # learner b2b carried into its fatal placement
+    b2b_at_cashout: Optional[
+        float
+    ]  # b2b entering a surge break (trivial clear at b2b>=4)
+    episode_max_b2b: Optional[float]  # mean per-episode peak b2b
+    chain_clear_share: Optional[float]  # share of clears difficult and 2nd+ consecutive
+    chain_run_len: Optional[
+        float
+    ]  # mean length of a run of consecutive difficult clears
+    post_break_combo: Optional[
+        float
+    ]  # peak combo reached in the clears following a b2b break
+
     # Search
     avg_visits: float
     visit_perplexity: (
@@ -299,6 +313,7 @@ class OneVsOneAZLog(LogPayloadModel):
     )
     top1_visit_share: float
     visit_coverage: float  # fraction of legal candidates that got >=1 visit
+    root_cands_visited: Optional[float]  # mean root candidates receiving visit mass
     dead_rate: float
 
     # Training progress
@@ -337,12 +352,24 @@ class OneVsOneAZLog(LogPayloadModel):
             "app",
             "value_calibration",
         ),
-        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "gameplay": (
+            "avg_b2b",
+            "max_b2b",
+            "avg_combo",
+            "surge_rate",
+            "b2b_at_death",
+            "b2b_at_cashout",
+            "episode_max_b2b",
+            "chain_clear_share",
+            "chain_run_len",
+            "post_break_combo",
+        ),
         "search": (
             "avg_visits",
             "visit_perplexity",
             "top1_visit_share",
             "visit_coverage",
+            "root_cands_visited",
             "dead_rate",
         ),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),

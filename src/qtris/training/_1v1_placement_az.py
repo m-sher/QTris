@@ -145,6 +145,11 @@ def _td_lambda(values, z, lam):
     return targets
 
 
+def _mean_or_none(xs):
+    """Mean of a per-generation sample, or None when the generation had no events."""
+    return float(np.mean(xs)) if xs else None
+
+
 def _episode(pend, p1_died, p2_died, lam):
     """Stamp each player's TD(lambda) value targets on its pending positions and return both
     players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
@@ -438,6 +443,11 @@ def main(args):
     move_count = np.zeros(num_games, dtype=np.int64)
     # Per-game pending positions for BOTH players, carried across gens until the game ends.
     pending = [{"p1": [], "p2": []} for _ in range(num_games)]
+    # Per-game peak b2b for the current episode, carried across gens like `pending`.
+    ep_max_b2b = [-1] * num_games
+    # Run of consecutive difficult clears, and the combo peak after a b2b break (-1 = idle).
+    cur_chain = [0] * num_games
+    post_break_peak = [-1] * num_games
 
     replay = deque()
     replay_size = 0
@@ -456,6 +466,10 @@ def main(args):
         n_draw = 0
         total_attack = total_placements = 0
         dead_searches = total_searches = 0
+        # Learner b2b/combo economics, from p1's scorer around each committed placement.
+        b2b_at_death, b2b_at_cashout, episode_max_b2b = [], [], []
+        chain_runs, post_break_combos = [], []
+        n_clears = n_chain_clears = 0
 
         for _t in range(horizon):
             temps_p1 = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(
@@ -471,6 +485,8 @@ def main(args):
                 e1, e2 = pairs[g]
 
                 if a["dead"] or b["dead"]:
+                    if a["dead"]:
+                        b2b_at_death.append(e1._scorer._b2b)
                     ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
                 else:
                     pending[g]["p1"].append(_pos(a))
@@ -478,9 +494,34 @@ def main(args):
                     if save_states_dir:
                         state_recs.append(_state_record(e1))
                         state_recs.append(_state_record(e2))
+                    pre_b2b = e1._scorer._b2b
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
+                    if post_combo >= 0:  # combo resets to -1 on a no-clear
+                        n_clears += 1
+                        if post_b2b == pre_b2b + 1 and post_combo >= 1:
+                            n_chain_clears += 1
+                        if pre_b2b >= 4 and post_b2b == -1:
+                            b2b_at_cashout.append(pre_b2b)
+                    if post_b2b == pre_b2b + 1:
+                        cur_chain[g] += 1
+                    else:
+                        if cur_chain[g] > 0:
+                            chain_runs.append(cur_chain[g])
+                        cur_chain[g] = 0
+                    if pre_b2b >= 4 and post_b2b == -1:
+                        post_break_peak[g] = post_combo
+                    elif post_break_peak[g] >= 0:
+                        if post_combo >= 0:
+                            post_break_peak[g] = max(post_break_peak[g], post_combo)
+                        else:
+                            post_break_combos.append(post_break_peak[g])
+                            post_break_peak[g] = -1
+                    ep_max_b2b[g] = max(ep_max_b2b[g], post_b2b)
+                    if p1_died:
+                        b2b_at_death.append(pre_b2b)
                     total_attack += atk1 + atk2
                     total_placements += 2
                     move_count[g] += 1
@@ -497,6 +538,14 @@ def main(args):
                         n_draw += 1
                     else:
                         p1_wins.append(p1_won)
+                episode_max_b2b.append(ep_max_b2b[g])
+                ep_max_b2b[g] = -1
+                if cur_chain[g] > 0:
+                    chain_runs.append(cur_chain[g])
+                cur_chain[g] = 0
+                if post_break_peak[g] >= 0:
+                    post_break_combos.append(post_break_peak[g])
+                post_break_peak[g] = -1
                 e1._reset()
                 e2._reset()
                 move_count[g] = 0
@@ -559,6 +608,7 @@ def main(args):
         visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
         top1_visit_share = pi_tgt.max(axis=1)
         visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
+        root_cands_visited = (pi_tgt > 0.0).sum(axis=1)
 
         replay.append(
             {
@@ -628,6 +678,7 @@ def main(args):
         win_rate = wins / decisive if decisive else 0.0
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
+        chain_clear_share = n_chain_clears / n_clears if n_clears else None
         dec = (value_tgt != 0.0) & (policy_mask == 1.0)  # learner positions only
         if (
             dec.sum() >= 2
@@ -696,10 +747,17 @@ def main(args):
                 max_b2b=float(bcg[:, 0].max()),
                 avg_combo=float(bcg[:, 1].mean()),
                 surge_rate=float((bcg[:, 0] >= 4).mean()),
+                b2b_at_death=_mean_or_none(b2b_at_death),
+                b2b_at_cashout=_mean_or_none(b2b_at_cashout),
+                episode_max_b2b=_mean_or_none(episode_max_b2b),
+                chain_clear_share=chain_clear_share,
+                chain_run_len=_mean_or_none(chain_runs),
+                post_break_combo=_mean_or_none(post_break_combos),
                 avg_visits=float(visits.mean()),
                 visit_perplexity=float(visit_perplexity.mean()),
                 top1_visit_share=float(top1_visit_share.mean()),
                 visit_coverage=float(visit_coverage.mean()),
+                root_cands_visited=float(root_cands_visited.mean()),
                 dead_rate=dead_searches / total_searches if total_searches else 0.0,
                 updates=updates,
                 buffer_size=replay_size,
