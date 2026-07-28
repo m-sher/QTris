@@ -255,7 +255,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     pool_wr_gate: float = 0.55
     eval_interval: int = 10
     eval_games: int = 8
-    td_lambda: float = 0.9
+    td_lambda: float = 1.0
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
