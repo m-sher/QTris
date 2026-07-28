@@ -3315,6 +3315,7 @@ static int mstate_draw(MState* s) {
     return p;
 }
 static int mstate_pop(MState* s) {
+    if (s->qlen <= 0) return PIECE_N;
     int p = s->queue[0];
     for (int i = 0; i < s->qlen - 1; i++) s->queue[i] = s->queue[i + 1];
     s->qlen--;
@@ -3644,6 +3645,7 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
     memset(s, 0, sizeof(*s));
     for (int r = 0; r < e->cfg.board_height; r++) s->board[r] = board[r];
     s->active = active; s->hold = hold;
+    if (qlen > MAXVQ) qlen = MAXVQ;
     s->qlen = qlen; for (int i = 0; i < qlen; i++) s->queue[i] = queue[i];
     s->b2b = b2b; s->combo = combo;
     s->rng.t = rng_t;

@@ -102,7 +102,9 @@ class PlacementMCTS:
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),
-            auto_fill_queue=int(e0._auto_fill_queue),
+            # The sim extends its own queue from the mirrored bag RNG; the env flag only
+            # says who refills the real queue between moves.
+            auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,
@@ -189,7 +191,9 @@ class PlacementMCTS:
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),
-            auto_fill_queue=int(e0._auto_fill_queue),
+            # The sim extends its own queue from the mirrored bag RNG; the env flag only
+            # says who refills the real queue between moves.
+            auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,
