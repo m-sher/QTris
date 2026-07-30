@@ -1,7 +1,5 @@
 """Multi-landing placement enum + MCTS packing tests."""
 
-import numpy as np
-
 from TetrisEnv.CKeySequences import CKeySequenceFinder
 from TetrisEnv.Pieces import PieceType
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
@@ -103,19 +101,11 @@ def test_mcts_packs_multiple_landings_and_handshake():
         n_legal = int(req[4][0].sum())
         assert n_legal > 68
         pi, counts, desc, dead = engine.result()
-        landings = {
-            int(desc[0, j, 3])
-            for j in range(MCTS_CAP)
-            if desc[0, j, 0] >= 0
-        }
+        landings = {int(desc[0, j, 3]) for j in range(MCTS_CAP) if desc[0, j, 0] >= 0}
         assert len(landings) > 1
         # resolve sequence for a no-hold mid-height landing when present
         nh_lands = sorted(
-            {
-                int(desc[0, j, 3])
-                for j in range(MCTS_CAP)
-                if desc[0, j, 0] == 0
-            }
+            {int(desc[0, j, 3]) for j in range(MCTS_CAP) if desc[0, j, 0] == 0}
         )
         assert nh_lands
         target = nh_lands[len(nh_lands) // 2]
