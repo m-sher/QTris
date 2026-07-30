@@ -83,6 +83,9 @@ typedef struct {
     int min_row;
     int max_row;
     int row_offsets[4];
+    // row_masks shifted to the bounding box origin, 4 bits per row. Equal shape_key means
+    // identical cells once anchored: I/S/Z rot r == rot r+2, all four O rotations.
+    uint16_t shape_key;
 } PieceOrientation;
 
 typedef struct {
@@ -583,6 +586,18 @@ static void b2b_init_pieces(void) {
     int8_t ik31[5][2] = {{0,-1}, {-2,-1}, {-1,-1}, {-2,0}, {-1,0}};
     for (int i = 0; i < 5; i++) { B2B_I_KICKS[3][1][i][0] = ik31[i][0]; B2B_I_KICKS[3][1][i][1] = ik31[i][1]; }
 
+    // shape_key: row_masks shifted to the bounding box origin, packed 4 bits per row.
+    for (int p = 0; p < 8; p++) {
+        for (int r = 0; r < 4; r++) {
+            PieceOrientation* o = &B2B_PIECES[p].orientations[r];
+            uint16_t k = 0;
+            for (int j = 0; j + o->min_row <= o->max_row && j < 4; j++) {
+                k |= (uint16_t)(((o->row_masks[o->min_row + j] >> o->min_col) & 0xF) << (4 * j));
+            }
+            o->shape_key = k;
+        }
+    }
+
     b2b_initialized = true;
 }
 
@@ -960,11 +975,18 @@ static int find_placements(const uint16_t* board_rows, int board_height,
                 }
             }
 
-            // Check for duplicate placement (same rot, col, landing_row, spin)
+            // Dedup on occupied cells: equal shape_key at the same normalised anchor and
+            // spin type is the same placement.
+            const PieceOrientation* ori = &B2B_PIECES[piece_type].orientations[rot];
+            int norm_col_k = c + ori->min_col;
+            int norm_row_k = land_r + ori->min_row;
             bool dup = false;
             for (int i = 0; i < num_placements; i++) {
-                if (out[i].rot == rot && out[i].col == c &&
-                    out[i].landing_row == land_r && out[i].spin_type == spin) {
+                const PieceOrientation* oi = &B2B_PIECES[piece_type].orientations[out[i].rot];
+                if (out[i].spin_type == spin &&
+                    out[i].col + oi->min_col == norm_col_k &&
+                    out[i].landing_row + oi->min_row == norm_row_k &&
+                    oi->shape_key == ori->shape_key) {
                     dup = true;
                     break;
                 }
