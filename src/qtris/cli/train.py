@@ -105,6 +105,33 @@ def main() -> None:
         help="virtual-loss magnitude (scaled-Q units).",
     )
     az.add_argument(
+        "--w-row",
+        type=float,
+        default=0.10,
+        help="placement 1v1 only: row-price potential weight (0 = off). Charges clears "
+        "w_row per row spent, credits stacking 0.4*w_row.",
+    )
+    az.add_argument(
+        "--h-cap",
+        type=int,
+        default=5,
+        help="row-price saturation in rows of cells (10*h_cap cells); above it clears "
+        "are progressively free (survival valve).",
+    )
+    az.add_argument(
+        "--w-bank",
+        type=float,
+        default=0.05,
+        help="placement 1v1 only: b2b bank potential weight (0 = off). Prepays the +1 "
+        "deferred surge per difficult clear.",
+    )
+    az.add_argument(
+        "--b-cap",
+        type=int,
+        default=0,
+        help="bank potential cap (0 = uncapped).",
+    )
+    az.add_argument(
         "--dirichlet-alpha",
         type=float,
         default=0.3,

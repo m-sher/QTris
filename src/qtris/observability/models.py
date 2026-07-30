@@ -253,6 +253,11 @@ class OneVsOnePlacementAZConfig(BaseModel):
     max_pool_size: int = 30
     pool_interval: int = 10
     pool_wr_gate: float = 0.55
+    # Row-price potential weights (0/0 disables; b_cap 0 = uncapped).
+    w_row: float = 0.10
+    h_cap: int = 5
+    w_bank: float = 0.05
+    b_cap: int = 0
     eval_interval: int = 10
     eval_games: int = 8
     td_lambda: float = 1.0

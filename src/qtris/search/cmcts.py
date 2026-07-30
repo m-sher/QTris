@@ -19,7 +19,9 @@ import TetrisEnv
 
 from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 
-CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY  # MCTS slot width; not BC CANDIDATE_CAPACITY
+CANDIDATE_CAPACITY = (
+    MCTS_CANDIDATE_CAPACITY  # MCTS slot width; not BC CANDIDATE_CAPACITY
+)
 FEATURE_DIM = 18
 _NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
@@ -43,10 +45,30 @@ def _load_lib():
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
+        + [
+            ctypes.c_float,
+            ctypes.c_int,
+            ctypes.c_float,
+            ctypes.c_int,
+        ]  # w_row, h_cap, w_bank, b_cap
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
     lib.mcts_candidate_capacity.restype = ctypes.c_int
+    # Arity handshake: a stale .so silently reads garbage for missing trailing args.
+    try:
+        lib.mcts_create_arity.argtypes = []
+        lib.mcts_create_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_create_arity); rebuild tetrisenv"
+        ) from None
+    arity = int(lib.mcts_create_arity())
+    if arity != len(lib.mcts_create.argtypes):
+        raise RuntimeError(
+            f"mcts_create arity mismatch: .so has {arity}, wrapper passes "
+            f"{len(lib.mcts_create.argtypes)}. Rebuild tetrisenv."
+        )
     lib.mcts_set_root.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -104,6 +126,10 @@ class CMCTS:
         num_simulations=64,
         leaves_per_round=4,
         vloss=1.0,
+        w_row=0.0,
+        h_cap=5,
+        w_bank=0.0,
+        b_cap=0,
     ):
         global _LIB
         if _LIB is None:
@@ -141,6 +167,10 @@ class CMCTS:
             + 1,  # arena: root + ~one node per simulation (+L headroom)
             self.lpr,
             vloss,
+            w_row,
+            h_cap,
+            w_bank,
+            b_cap,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr

@@ -138,6 +138,10 @@ def main(args):
                 gamma=1.0,
                 w_attack=0.05,
                 w_death=1.0,
+                w_row=getattr(args, "w_row", 0.10),
+                h_cap=getattr(args, "h_cap", 5),
+                w_bank=getattr(args, "w_bank", 0.05),
+                b_cap=getattr(args, "b_cap", 0),
             ),
         )
         if getattr(args, "num_simulations", 0) > 0

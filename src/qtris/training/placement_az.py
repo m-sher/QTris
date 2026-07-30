@@ -287,6 +287,10 @@ def main(args):
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
+        # Shaping stays off here: this trainer mirrors the C edge reward in Python for
+        # its value targets, and the potential is not mirrored.
+        w_row=0.0,
+        w_bank=0.0,
     )
 
     net = PlacementPolicyValueNet(

@@ -328,6 +328,10 @@ def main(args):
         w_death=1.0,
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
+        w_row=getattr(args, "w_row", 0.10),
+        h_cap=getattr(args, "h_cap", 5),
+        w_bank=getattr(args, "w_bank", 0.05),
+        b_cap=getattr(args, "b_cap", 0),
     )
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
@@ -401,6 +405,10 @@ def main(args):
         dirichlet_alpha=cfg.dirichlet_alpha,
         dirichlet_eps=cfg.dirichlet_eps,
         temp_moves=cfg.temp_moves,
+        w_row=cfg.w_row,
+        h_cap=cfg.h_cap,
+        w_bank=cfg.w_bank,
+        b_cap=cfg.b_cap,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,

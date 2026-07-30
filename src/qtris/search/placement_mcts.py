@@ -38,6 +38,13 @@ class MCTSConfig:
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
     vloss: float = 1.0  # virtual-loss magnitude (scaled-Q units)
+    # Row-price potential: Phi = w_row*min(cells/10, h_cap) + w_bank*max(0, b2b+1),
+    # applied as a per-edge difference with Phi(terminal) = 0. Weights 0/0 disable;
+    # b_cap > 0 caps the bank term (0 = uncapped).
+    w_row: float = 0.10
+    h_cap: int = 5
+    w_bank: float = 0.05
+    b_cap: int = 0
 
 
 class PlacementMCTS:
@@ -114,6 +121,10 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
+            w_row=self.cfg.w_row,
+            h_cap=self.cfg.h_cap,
+            w_bank=self.cfg.w_bank,
+            b_cap=self.cfg.b_cap,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -203,6 +214,10 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
+            w_row=self.cfg.w_row,
+            h_cap=self.cfg.h_cap,
+            w_bank=self.cfg.w_bank,
+            b_cap=self.cfg.b_cap,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

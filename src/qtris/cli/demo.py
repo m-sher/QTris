@@ -57,6 +57,24 @@ def main() -> None:
         "sequential. Default 4.",
     )
     parser.add_argument(
+        "--w-row",
+        type=float,
+        default=0.10,
+        help="MCTS row-price potential weight (0 = off).",
+    )
+    parser.add_argument(
+        "--h-cap", type=int, default=5, help="row-price saturation in rows of cells."
+    )
+    parser.add_argument(
+        "--w-bank",
+        type=float,
+        default=0.05,
+        help="MCTS b2b bank potential weight (0 = off).",
+    )
+    parser.add_argument(
+        "--b-cap", type=int, default=0, help="bank potential cap (0 = uncapped)."
+    )
+    parser.add_argument(
         "--garbage-chance",
         type=float,
         default=0.15,
