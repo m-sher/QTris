@@ -73,6 +73,7 @@ def train_step(net, batch, value_coef):
         loss = policy_loss + value_coef * value_loss
 
     grads = tape.gradient(loss, net.trainable_variables)
+    grad_norm = tf.linalg.global_norm(grads)  # pre-clip; the optimizer clips at 0.5
     net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
 
     probs = tf.nn.softmax(masked, axis=-1)
@@ -96,6 +97,8 @@ def train_step(net, batch, value_coef):
         "policy_kl": policy_loss - tgt_entropy,
         "explained_var": explained_var,
         "value_mean": tf.reduce_mean(values[:, 0]),
+        "value_target_var": ret_var,
+        "grad_norm": grad_norm,
     }
 
 

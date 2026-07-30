@@ -284,42 +284,54 @@ class OneVsOneAZLog(LogPayloadModel):
     update_kl: float
     explained_var: float
     value_mean: float
+    value_target_var: float  # spread of the value target itself; read EV against this
+    grad_norm: float  # global grad norm before the optimizer's clipnorm
 
-    # Outcomes / gameplay (over games that completed this generation)
+    # Outcomes / gameplay.
     avg_game_len: float
     win_rate: float  # learner's decisive WR vs the sampled pool opponent
     win_rate_vs_ref: float  # learner's decisive WR vs the frozen gen_0 reference
     draw_rate: float
-    app: float
+    app: float  # both players' attack per placement, gross, garbage exchange on
+    app_learner: float  # learner-only attack per learner placement
     value_calibration: float
     avg_b2b: float
     max_b2b: float
     avg_combo: float
-    surge_rate: float
+    surge_rate: float  # share of learner positions SITTING at b2b>=4 (occupancy)
 
     # Learner b2b economics; None when the gen produced no qualifying event.
     b2b_at_death: Optional[float]  # learner b2b carried into its fatal placement
     b2b_at_cashout: Optional[
         float
-    ]  # b2b entering a surge break (trivial clear at b2b>=4)
+    ]  # b2b entering a surge break (trivial clear at b2b>=4); floored at 4
     episode_max_b2b: Optional[float]  # mean per-episode peak b2b
-    chain_clear_share: Optional[float]  # share of clears difficult and 2nd+ consecutive
     chain_run_len: Optional[
         float
-    ]  # mean length of a run of consecutive difficult clears
+    ]  # difficult clears in a row; ANY other placement flushes
+    bank_run_len: Optional[
+        float
+    ]  # difficult clears per b2b streak, tolerating stacking between them (the hoard)
     post_break_combo: Optional[
         float
-    ]  # peak combo reached in the clears following a b2b break
+    ]  # peak combo over a surge break, including combo carried into it
+    post_break_clears: Optional[float]  # clears chained AFTER a surge break
+
+    # Event counts.
+    n_difficult_clears: int
+    n_chain_runs: int
+    n_breaks: int
+    n_cashouts: int
+    n_deaths: int
+    decisive_games: int
 
     # Search
-    avg_visits: float
     visit_perplexity: (
         float  # exp(H(visit pi)): effective candidates searched; 1 = tunnel vision
     )
     top1_visit_share: float
     visit_coverage: float  # fraction of legal candidates that got >=1 visit
     root_cands_visited: Optional[float]  # mean root candidates receiving visit mass
-    dead_rate: float
 
     # Training progress
     updates: int
@@ -348,6 +360,8 @@ class OneVsOneAZLog(LogPayloadModel):
             "update_kl",
             "explained_var",
             "value_mean",
+            "value_target_var",
+            "grad_norm",
         ),
         "outcomes": (
             "avg_game_len",
@@ -355,6 +369,7 @@ class OneVsOneAZLog(LogPayloadModel):
             "win_rate_vs_ref",
             "draw_rate",
             "app",
+            "app_learner",
             "value_calibration",
         ),
         "gameplay": (
@@ -365,17 +380,24 @@ class OneVsOneAZLog(LogPayloadModel):
             "b2b_at_death",
             "b2b_at_cashout",
             "episode_max_b2b",
-            "chain_clear_share",
             "chain_run_len",
+            "bank_run_len",
             "post_break_combo",
+            "post_break_clears",
+        ),
+        "counts": (
+            "n_difficult_clears",
+            "n_chain_runs",
+            "n_breaks",
+            "n_cashouts",
+            "n_deaths",
+            "decisive_games",
         ),
         "search": (
-            "avg_visits",
             "visit_perplexity",
             "top1_visit_share",
             "visit_coverage",
             "root_cands_visited",
-            "dead_rate",
         ),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
     }
