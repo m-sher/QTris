@@ -61,7 +61,7 @@ def draw_garbage_bar(env_instance, height=24, width=4):
 def colorize_piece_sidebar(piece_display, pieces_array, piece_colors):
     """Color the 7-piece sidebar (28, 5, 3) using piece type colors.
 
-    piece_display: (7, 4, 5) binary array from PieceDisplay.npy
+    piece_display: (8, 4, 5) binary array (empty + 7 pieces)
     pieces_array: (7,) int array of piece type IDs
     piece_colors: (N, 3) color palette indexed by piece type
     """

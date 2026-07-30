@@ -1,6 +1,5 @@
 """Shared utility functions for Tetris demos."""
 
-import numpy as np
 import tensorflow as tf
 
 
@@ -22,11 +21,6 @@ def load_checkpoint(model, checkpoint_path, max_to_keep=3):
     ckpt.restore(mgr.latest_checkpoint).expect_partial()
     print(f"Loaded checkpoint from {checkpoint_path}", flush=True)
     return True
-
-
-def load_piece_display(path="PieceDisplay.npy"):
-    """Load the (7, 4, 5) piece shape display array."""
-    return np.load(path)
 
 
 def save_frames_as_video(frames, output_path="Demo.mp4", fps=30, playback_fps=5):

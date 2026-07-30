@@ -19,10 +19,10 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
-from qtris.demo.constants import PIECE_COLORS
+from qtris.demo.constants import PIECE_COLORS, PIECE_DISPLAY
 from qtris.demo.panels import confirm_save
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
-from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
+from qtris.demo.utils import load_checkpoint, save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.training._1v1_placement_az import _build_net
 
@@ -90,7 +90,7 @@ def main(cli_args):
         num_row_tiers=num_row_tiers,
     )
     env = TFPyEnvironment(py_env)
-    piece_display = load_piece_display()
+    piece_display = PIECE_DISPLAY
 
     # Layout: [garbage | board | queue sidebar] per side, sidebars facing the center gap.
     board_w, board_h = 250, 600
