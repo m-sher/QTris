@@ -253,6 +253,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     max_pool_size: int = 30
     pool_interval: int = 10
     pool_wr_gate: float = 0.55
+    pool_min_decisive: int = 24  # decisive games over the interval, not one generation
+    elo_fit_interval: int = 5
     # Row-price potential weights (0/0 disables; b_cap 0 = uncapped).
     w_row: float = 0.10
     h_cap: int = 5

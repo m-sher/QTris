@@ -294,6 +294,8 @@ def main(args):
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
+    pool_min_decisive = getattr(args, "pool_min_decisive", 24)
+    elo_fit_interval = getattr(args, "elo_fit_interval", 5)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
     td_lambda = getattr(args, "td_lambda", 0.9)
@@ -416,6 +418,8 @@ def main(args):
         max_pool_size=max_pool_size,
         pool_interval=pool_interval,
         pool_wr_gate=pool_wr_gate,
+        pool_min_decisive=pool_min_decisive,
+        elo_fit_interval=elo_fit_interval,
         eval_interval=eval_interval,
         eval_games=eval_games,
         td_lambda=td_lambda,
@@ -467,6 +471,7 @@ def main(args):
     wr_ema = 0.5
     last_wr_ref = 0.5
     last_ref_dec = 0  # decisive games in the most recent eval-vs-ref window
+    decisive_window = deque(maxlen=pool_interval)  # pool-admission data sufficiency
 
     for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
@@ -602,11 +607,11 @@ def main(args):
                 last_wr_ref = ref_wins / last_ref_dec
             if whr is not None:
                 whr.record(gen, "gen_0", ref_wins, ref_losses, ref_draws, ctx="eval")
-        if whr is not None:
-            write_gen = gen % 5 == 0
-            whr.fit(gen=gen, full_sigma=write_gen)
-            if write_gen:
-                whr.to_json(ratings_path)
+        # WHR batch refit is expensive; fit and publish only every elo_fit_interval gens.
+        fit_gen = whr is not None and gen % elo_fit_interval == 0
+        if fit_gen:
+            whr.fit(gen=gen, full_sigma=True)
+            whr.to_json(ratings_path)
 
         n_new = len(gen_pos)
         if n_new == 0:
@@ -725,10 +730,12 @@ def main(args):
         # so ratings.json includes it immediately.
         if decisive > 0:
             wr_ema = 0.9 * wr_ema + 0.1 * win_rate
+        # Pool admission judges decisive-game sufficiency over the whole interval.
+        decisive_window.append(decisive)
         if (
             gen > 0
             and gen % pool_interval == 0
-            and decisive >= 8
+            and sum(decisive_window) >= pool_min_decisive
             and wr_ema >= pool_wr_gate
         ):
             _save_pool(net, gen, pool_dir, max_pool_size)
@@ -741,7 +748,7 @@ def main(args):
         # Per-opponent rating fan; new series appear as the pool grows.
         present = [os.path.basename(p) for p in _pool_snaps(pool_dir)]
         elo_tags = {}
-        if whr is not None:
+        if fit_gen:
             summ = whr.present_summary(present)
             elo_tags = {
                 "elo/learner": whr.ratings["learner"],
