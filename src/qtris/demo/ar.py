@@ -5,7 +5,7 @@ from TetrisEnv.Moves import Keys
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 import pygame
 
-from qtris.demo.constants import PIECE_COLORS, READABLE_KEYS
+from qtris.demo.constants import PIECE_COLORS, PIECE_DISPLAY, READABLE_KEYS
 from qtris.demo.panels import (
     MaxStatTracker,
     confirm_save,
@@ -21,7 +21,7 @@ from qtris.demo.rendering import (
     compute_bcg_heatmaps,
     draw_garbage_bar,
 )
-from qtris.demo.utils import load_checkpoint, load_piece_display, save_frames_as_video
+from qtris.demo.utils import load_checkpoint, save_frames_as_video
 import time
 
 # Model params
@@ -111,7 +111,7 @@ def main(args):
     running_clears = 0
     stat_tracker = MaxStatTracker()
 
-    piece_display = load_piece_display()
+    piece_display = PIECE_DISPLAY
 
     def draw_bottom_panel(surface, ind):
         draw_info_panel(
