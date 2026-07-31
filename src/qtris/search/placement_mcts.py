@@ -49,6 +49,27 @@ class MCTSConfig:
     w_chain: float = 0.06
 
 
+def denoise_visits(counts, logits, noise, eps, mask):
+    """Visit distribution with the Dirichlet-attributable share removed: each root child's
+    visits are rescaled by the ratio of its noise-free prior to the mixed prior the search
+    ran with, then renormalized. Returns None when no child was visited."""
+    legal = np.flatnonzero(mask)
+    n = counts[legal].astype(np.float64)
+    if n.sum() <= 0:
+        return None
+    z = logits[legal] - logits[legal].max()
+    p = np.exp(z)
+    p /= p.sum()
+    mixed = (1.0 - eps) * p + eps * noise[legal].astype(np.float64)
+    kept = n * p / np.maximum(mixed, 1e-12)
+    total = kept.sum()
+    if total <= 0:
+        return None
+    out = np.zeros_like(counts, dtype=np.float32)
+    out[legal] = (kept / total).astype(np.float32)
+    return out
+
+
 class PlacementMCTS:
     def __init__(self, net, cfg: MCTSConfig):
         self.net = net
@@ -156,6 +177,8 @@ class PlacementMCTS:
                         "value": float(
                             values[k]
                         ),  # net root value, for the AZ return bootstrap
+                        "logits": logits[k].copy(),
+                        "noise": noise[k].copy(),
                     }
 
             lpr = max(1, self.cfg.leaves_per_round)
@@ -179,10 +202,18 @@ class PlacementMCTS:
                 continue
             legal = np.flatnonzero(desc[i, :, 0] >= 0)
             slot = self._select_action(legal, counts[i], pi[i], float(temps[i]))
+            pi_clean = denoise_visits(
+                counts[i],
+                obs[i]["logits"],
+                obs[i]["noise"],
+                self.cfg.dirichlet_eps,
+                obs[i]["cand_mask"],
+            )
             results.append(
                 {
                     "dead": False,
                     "pi": pi[i],
+                    "pi_clean": pi_clean if pi_clean is not None else pi[i],
                     "slot": slot,
                     "descriptor": tuple(int(x) for x in desc[i, slot]),
                     "visits": int(counts[i].sum()),
