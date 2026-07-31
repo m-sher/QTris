@@ -333,6 +333,7 @@ def main(args):
         h_cap=getattr(args, "h_cap", 5),
         w_bank=getattr(args, "w_bank", 0.05),
         b_cap=getattr(args, "b_cap", 0),
+        w_chain=getattr(args, "w_chain", 0.06),
     )
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
@@ -410,6 +411,7 @@ def main(args):
         h_cap=cfg.h_cap,
         w_bank=cfg.w_bank,
         b_cap=cfg.b_cap,
+        w_chain=cfg.w_chain,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,

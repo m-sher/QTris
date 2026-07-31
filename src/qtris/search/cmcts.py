@@ -50,7 +50,8 @@ def _load_lib():
             ctypes.c_int,
             ctypes.c_float,
             ctypes.c_int,
-        ]  # w_row, h_cap, w_bank, b_cap
+            ctypes.c_float,
+        ]  # w_row, h_cap, w_bank, b_cap, w_chain
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
@@ -130,6 +131,7 @@ class CMCTS:
         h_cap=5,
         w_bank=0.0,
         b_cap=0,
+        w_chain=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -171,6 +173,7 @@ class CMCTS:
             h_cap,
             w_bank,
             b_cap,
+            w_chain,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr

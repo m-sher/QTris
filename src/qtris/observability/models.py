@@ -260,6 +260,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     h_cap: int = 5
     w_bank: float = 0.05
     b_cap: int = 0
+    w_chain: float = 0.06
     eval_interval: int = 10
     eval_games: int = 8
     td_lambda: float = 1.0

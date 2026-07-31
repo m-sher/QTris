@@ -75,6 +75,12 @@ def main() -> None:
         "--b-cap", type=int, default=0, help="bank potential cap (0 = uncapped)."
     )
     parser.add_argument(
+        "--w-chain",
+        type=float,
+        default=0.06,
+        help="MCTS bonus on a chained difficult clear (0 = off).",
+    )
+    parser.add_argument(
         "--garbage-chance",
         type=float,
         default=0.15,

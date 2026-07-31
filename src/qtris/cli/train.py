@@ -132,6 +132,13 @@ def main() -> None:
         help="bank potential cap (0 = uncapped).",
     )
     az.add_argument(
+        "--w-chain",
+        type=float,
+        default=0.06,
+        help="placement 1v1 only: bonus on a chained difficult clear (predecessor "
+        "also cleared); 0 = off.",
+    )
+    az.add_argument(
         "--dirichlet-alpha",
         type=float,
         default=0.3,

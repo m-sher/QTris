@@ -294,6 +294,7 @@ def main(args):
         # its value targets, and the potential is not mirrored.
         w_row=0.0,
         w_bank=0.0,
+        w_chain=0.0,
     )
 
     net = PlacementPolicyValueNet(

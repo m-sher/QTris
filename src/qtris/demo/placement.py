@@ -142,6 +142,7 @@ def main(args):
                 h_cap=getattr(args, "h_cap", 5),
                 w_bank=getattr(args, "w_bank", 0.05),
                 b_cap=getattr(args, "b_cap", 0),
+                w_chain=getattr(args, "w_chain", 0.06),
             ),
         )
         if getattr(args, "num_simulations", 0) > 0

@@ -45,6 +45,8 @@ class MCTSConfig:
     h_cap: int = 5
     w_bank: float = 0.05
     b_cap: int = 0
+    # Bonus on a chained difficult clear (predecessor also cleared); 0 = off.
+    w_chain: float = 0.06
 
 
 class PlacementMCTS:
@@ -125,6 +127,7 @@ class PlacementMCTS:
             h_cap=self.cfg.h_cap,
             w_bank=self.cfg.w_bank,
             b_cap=self.cfg.b_cap,
+            w_chain=self.cfg.w_chain,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -218,6 +221,7 @@ class PlacementMCTS:
             h_cap=self.cfg.h_cap,
             w_bank=self.cfg.w_bank,
             b_cap=self.cfg.b_cap,
+            w_chain=self.cfg.w_chain,
         )
         out = np.zeros(n, dtype=np.float32)
         try:
