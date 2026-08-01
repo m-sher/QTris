@@ -233,9 +233,9 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
 
-    Outcome value target (z in {-1,0,+1}); search reward w_attack=0.05,
+    Value target = the search's unshaped return estimate; search reward w_attack=0.05,
     w_death=1, gamma=1, return_scale=1. The learner duels frozen snapshots sampled from a
-    disk pool; both players' trajectories are trained (each labeled with its own outcome)."""
+    disk pool; both players' trajectories are trained."""
 
     num_games: int
     horizon: int
@@ -263,7 +263,6 @@ class OneVsOnePlacementAZConfig(BaseModel):
     w_chain: float = 0.06
     eval_interval: int = 10
     eval_games: int = 8
-    td_lambda: float = 1.0
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None

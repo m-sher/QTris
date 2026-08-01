@@ -3294,6 +3294,7 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
+    float W_real[MCAP], edge_reward_real[MCAP];  // return without potentials/bonuses
     struct MNode* child[MCAP];
 } MNode;
 
@@ -3512,11 +3513,14 @@ static int mcts_select(const MNode* node, const MConfig* cfg) {
 static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
+    float g_real = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
+        g_real = node->edge_reward_real[slot] + cfg->gamma * g_real;
         node->N[slot] += 1.0f;
         node->W[slot] += g;
+        node->W_real[slot] += g_real;
         node->Q[slot] = node->W[slot] / node->N[slot];
     }
 }
@@ -3604,6 +3608,9 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                         mcts_scale_reward(cfg, cfg->w_attack * attack
                                                - mcts_phi(cfg, &node->st))
                         - cfg->w_death / (cfg->return_scale + 1e-8f);
+                    node->edge_reward_real[slot] =
+                        mcts_scale_reward(cfg, cfg->w_attack * attack)
+                        - cfg->w_death / (cfg->return_scale + 1e-8f);
                     mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
@@ -3614,6 +3621,8 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     mcts_scale_reward(cfg, cfg->w_attack * attack + chain_bonus
                                            + mcts_phi(cfg, &leaf->st)
                                            - mcts_phi(cfg, &node->st));
+                node->edge_reward_real[slot] =
+                    mcts_scale_reward(cfg, cfg->w_attack * attack);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3849,6 +3858,22 @@ int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes
 // (a mismatched call silently reads garbage for the missing args).
 int mcts_create_arity(void) { return 21; }
+
+// Per-slot root return without potentials or bonuses; q_out is [num_trees * MCAP],
+// 0 for empty and unvisited slots.
+void mcts_root_q_real(void* h, float* q_out) {
+    MEngine* e = (MEngine*)h;
+    for (int i = 0; i < e->num_trees; i++) {
+        float* q = &q_out[(size_t)i * MCAP];
+        for (int j = 0; j < MCAP; j++) q[j] = 0.0f;
+        MNode* root = e->trees[i].root;
+        if (root == NULL) continue;
+        for (int k = 0; k < root->n_legal; k++) {
+            int slot = root->legal[k];
+            if (root->N[slot] > 0.0f) q[slot] = root->W_real[slot] / root->N[slot];
+        }
+    }
+}
 
 // --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
 //     deterministic core after a subtree re-sync re-applies these edits) ---

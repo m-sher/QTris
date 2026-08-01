@@ -4,11 +4,12 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses the realized game outcome z in {-1, 0, +1}
-(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05;
-own-death = -1 is the only in-search terminal.
+`PyTetris1v1Env` does. The value head regresses the search's return estimate for each
+position's most-visited root move, computed without the shaping potentials or bonuses. The
+search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05; own-death = -1 is the
+only in-search terminal.
 
-Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
+Both players' trajectories are trained. The pool lives
 on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
 reference for the periodic `win_rate_vs_ref` eval. Opponents are sampled recency-weighted per
 generation; the pool grows (gated on the learner's decisive win-rate EMA) and evicts oldest
@@ -76,6 +77,7 @@ def _pos(r):
         "cand_mask": r["cand_mask"],
         "pi": r["pi_clean"],
         "v_root": r["value"],
+        "value_search": r["value_search"],
     }
 
 
@@ -129,52 +131,31 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _td_lambda(values, z, lam):
-    """TD(lambda) value targets for one trajectory (gamma=1, no intermediate reward): the
-    terminal position gets the outcome z, each earlier position mixes the next position's
-    root value with the lambda-weighted future return. lam=1 recovers the raw outcome z on
-    every position (the Monte-Carlo target); lower lam bootstraps toward near-term value."""
-    n = len(values)
-    targets = [0.0] * n
-    g = z
-    targets[n - 1] = g
-    for t in range(n - 2, -1, -1):
-        g = (1.0 - lam) * values[t + 1] + lam * g
-        targets[t] = g
-    return targets
-
-
 def _mean_or_none(xs):
     """Mean of a per-generation sample, or None when the generation had no events."""
     return float(np.mean(xs)) if xs else None
 
 
-def _episode(pend, p1_died, p2_died, lam):
-    """Stamp each player's TD(lambda) value targets on its pending positions and return both
-    players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
-    is_draw) keyed on the learner's (player-1) outcome, or None if nothing was collected."""
+def _episode(pend, p1_died, p2_died):
+    """Flush both players' pending positions as training rows. Each position's value target
+    is the search's return estimate for its most-visited root move; the game outcome keys
+    only the win/draw bookkeeping. Returns (rows[(pos, target, policy_mask)], game_len,
+    p1_won, is_draw), or None if nothing was collected."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
-    if p1_died and not p2_died:
-        z1, z2 = -1.0, 1.0
-    elif p2_died and not p1_died:
-        z1, z2 = 1.0, -1.0
-    else:
-        z1, z2 = 0.0, 0.0
-    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions train
-    # the value only. Value targets are TD(lambda) bootstrapped from each root value.
+    p1_won = p2_died and not p1_died
+    is_draw = p1_died == p2_died
+    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions
+    # train the value only.
     rows = []
-    for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
-        if not positions:
-            continue
-        targets = _td_lambda([p["v_root"] for p in positions], z, lam)
-        rows += [(p, t, mask) for p, t in zip(positions, targets)]
-    return rows, glen, z1 > 0.0, z1 == 0.0
+    for positions, mask in ((pend["p1"], 1.0), (pend["p2"], 0.0)):
+        rows += [(p, p["value_search"], mask) for p in positions]
+    return rows, glen, p1_won, is_draw
 
 
 def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
-    """A tanh-value PlacementPolicyValueNet with its variables built (ready for restore)."""
+    """A PlacementPolicyValueNet with its variables built (ready for restore)."""
     net = PlacementPolicyValueNet(
         batch_size=batch_size,
         piece_dim=piece_dim,
@@ -182,7 +163,7 @@ def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=0.0,
-        value_activation="tanh",  # bound the value to the outcome target's [-1, 1]
+        value_activation=None,  # return-unit value, unbounded
     )
     net(
         (
@@ -298,7 +279,6 @@ def main(args):
     elo_fit_interval = getattr(args, "elo_fit_interval", 5)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
-    td_lambda = getattr(args, "td_lambda", 0.9)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -316,8 +296,7 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # Outcome-z value target; search reward = small attack credit, own-death = -1,
-    # undiscounted, scale 1.
+    # Search reward = small attack credit, own-death = -1, undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -424,7 +403,6 @@ def main(args):
         elo_fit_interval=elo_fit_interval,
         eval_interval=eval_interval,
         eval_games=eval_games,
-        td_lambda=td_lambda,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -504,7 +482,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
+                    ep = _episode(pending[g], a["dead"], b["dead"])
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -554,7 +532,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
+                    ep = _episode(pending[g], p1_died, p2_died)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep

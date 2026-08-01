@@ -192,6 +192,7 @@ class PlacementMCTS:
                 engine.apply_leaves(logits, values)
 
             pi, counts, desc, dead = engine.result()
+            q_real = engine.root_q_real()
         finally:
             engine.destroy()
 
@@ -209,11 +210,15 @@ class PlacementMCTS:
                 self.cfg.dirichlet_eps,
                 obs[i]["cand_mask"],
             )
+            best = int(legal[np.argmax(counts[i][legal])])
             results.append(
                 {
                     "dead": False,
                     "pi": pi[i],
                     "pi_clean": pi_clean if pi_clean is not None else pi[i],
+                    "value_search": float(q_real[i][best])
+                    if counts[i][legal].sum() > 0
+                    else float(obs[i]["value"]),
                     "slot": slot,
                     "descriptor": tuple(int(x) for x in desc[i, slot]),
                     "visits": int(counts[i].sum()),

@@ -99,6 +99,8 @@ def _load_lib():
     lib.mcts_apply_leaves.restype = None
     lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32]
     lib.mcts_result.restype = None
+    lib.mcts_root_q_real.argtypes = [ctypes.c_void_p, _F32]
+    lib.mcts_root_q_real.restype = None
     lib.mcts_destroy.argtypes = [ctypes.c_void_p]
     lib.mcts_destroy.restype = None
     return lib
@@ -188,6 +190,7 @@ class CMCTS:
         self._counts = np.zeros(num_trees * self.cap, np.float32)
         self._desc = np.zeros(num_trees * self.cap * 5, np.int32)
         self._dead = np.zeros(num_trees, np.int32)
+        self._q_real = np.zeros(num_trees * self.cap, np.float32)
 
     def set_root(self, tree, env):
         occ = (env._board != 0).astype(np.uint16)
@@ -272,6 +275,10 @@ class CMCTS:
         desc = self._desc.reshape(self.n, self.cap, 5).copy()
         dead = self._dead.astype(bool).copy()
         return pi, counts, desc, dead
+
+    def root_q_real(self):
+        self.lib.mcts_root_q_real(self.h, self._q_real)
+        return self._q_real.reshape(self.n, self.cap).copy()
 
     def destroy(self):
         if self.h:
