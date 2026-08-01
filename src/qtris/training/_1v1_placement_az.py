@@ -4,10 +4,11 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses the search's return estimate for each
-position's most-visited root move, computed without the shaping potentials or bonuses. The
-search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05; own-death = -1 is the
-only in-search terminal.
+`PyTetris1v1Env` does. The value head regresses a TD target: each position's realized
+attack reward plus the discounted unshaped search return of the next position; a dying
+player's final position takes the death penalty instead of a bootstrap. The search runs at
+w_death=1, gamma=1, return_scale=1, w_attack=0.05; own-death = -1 is the only in-search
+terminal.
 
 Both players' trajectories are trained. The pool lives
 on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
@@ -39,6 +40,11 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
+
+
+# Value-target composition: realized reward now, discounted search return next.
+VALUE_GAMMA = 0.95
+W_ATTACK, W_DEATH = 0.05, 1.0
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -138,7 +144,9 @@ def _mean_or_none(xs):
 
 def _episode(pend, p1_died, p2_died):
     """Flush both players' pending positions as training rows. Each position's value target
-    is the search's return estimate for its most-visited root move; the game outcome keys
+    is its realized attack reward plus the discounted search return of the next position;
+    a dying player's final position takes the death penalty instead of a bootstrap, a
+    surviving player's final position keeps its own search return. The game outcome keys
     only the win/draw bookkeeping. Returns (rows[(pos, target, policy_mask)], game_len,
     p1_won, is_draw), or None if nothing was collected."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
@@ -149,8 +157,20 @@ def _episode(pend, p1_died, p2_died):
     # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions
     # train the value only.
     rows = []
-    for positions, mask in ((pend["p1"], 1.0), (pend["p2"], 0.0)):
-        rows += [(p, p["value_search"], mask) for p in positions]
+    for positions, died, mask in (
+        (pend["p1"], p1_died, 1.0),
+        (pend["p2"], p2_died, 0.0),
+    ):
+        n = len(positions)
+        for t, p in enumerate(positions):
+            r = p.get("r_real", 0.0)
+            if t + 1 < n:
+                tgt = r + VALUE_GAMMA * positions[t + 1]["value_search"]
+            elif died:
+                tgt = r - W_DEATH
+            else:
+                tgt = p["value_search"]
+            rows.append((p, tgt, mask))
     return rows, glen, p1_won, is_draw
 
 
@@ -391,6 +411,7 @@ def main(args):
         w_bank=cfg.w_bank,
         b_cap=cfg.b_cap,
         w_chain=cfg.w_chain,
+        value_gamma=VALUE_GAMMA,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -493,6 +514,8 @@ def main(args):
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    pending[g]["p1"][-1]["r_real"] = W_ATTACK * atk1
+                    pending[g]["p2"][-1]["r_real"] = W_ATTACK * atk2
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
