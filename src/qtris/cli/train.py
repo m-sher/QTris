@@ -78,6 +78,13 @@ def main() -> None:
         help="placement 1v1 only: games per win_rate_vs_ref eval.",
     )
     az.add_argument(
+        "--td-lambda",
+        type=float,
+        default=1.0,
+        help="placement 1v1 only: TD(lambda) for the value target (1=raw outcome z on "
+        "every position; lower bootstraps toward near-term root value).",
+    )
+    az.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
     )
     az.add_argument(
@@ -96,40 +103,6 @@ def main() -> None:
         type=float,
         default=1.0,
         help="virtual-loss magnitude (scaled-Q units).",
-    )
-    az.add_argument(
-        "--w-row",
-        type=float,
-        default=0.10,
-        help="placement 1v1 only: row-price potential weight (0 = off). Charges clears "
-        "w_row per row spent, credits stacking 0.4*w_row.",
-    )
-    az.add_argument(
-        "--h-cap",
-        type=int,
-        default=5,
-        help="row-price saturation in rows of cells (10*h_cap cells); above it clears "
-        "are progressively free (survival valve).",
-    )
-    az.add_argument(
-        "--w-bank",
-        type=float,
-        default=0.05,
-        help="placement 1v1 only: b2b bank potential weight (0 = off). Prepays the +1 "
-        "deferred surge per difficult clear.",
-    )
-    az.add_argument(
-        "--b-cap",
-        type=int,
-        default=0,
-        help="bank potential cap (0 = uncapped).",
-    )
-    az.add_argument(
-        "--w-chain",
-        type=float,
-        default=0.06,
-        help="placement 1v1 only: bonus on a chained difficult clear (predecessor "
-        "also cleared); 0 = off.",
     )
     az.add_argument(
         "--dirichlet-alpha",
@@ -184,6 +157,13 @@ def main() -> None:
         type=float,
         default=100.0,
         help="terminal-edge death penalty (raw attack units; also the realized death reward).",
+    )
+    az.add_argument(
+        "--w-b2b",
+        type=float,
+        default=0.06,
+        help="placement 1v1 only: potential-based b2b-build search shaping "
+        "(Phi=min(max(0,b2b),12); 0=off).",
     )
     az.add_argument(
         "--replay-capacity",

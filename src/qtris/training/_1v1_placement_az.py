@@ -4,13 +4,11 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses a TD target: each position's realized
-attack reward plus the discounted unshaped search return of the next position; a dying
-player's final position takes the death penalty instead of a bootstrap. The search runs at
-w_death=1, gamma=1, return_scale=1, w_attack=0.05; own-death = -1 is the only in-search
-terminal.
+`PyTetris1v1Env` does. The value head regresses the realized game outcome z in {-1, 0, +1}
+(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
+w_b2b=0.06; own-death = -1 is the only in-search terminal.
 
-Both players' trajectories are trained. The pool lives
+Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
 on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
 reference for the periodic `win_rate_vs_ref` eval. Opponents are sampled recency-weighted per
 generation; the pool grows (gated on the learner's decisive win-rate EMA) and evicts oldest
@@ -40,11 +38,6 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
-
-
-# Value-target composition: realized reward now, discounted search return next.
-VALUE_GAMMA = 0.95
-W_ATTACK, W_DEATH = 0.05, 1.0
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -83,7 +76,6 @@ def _pos(r):
         "cand_mask": r["cand_mask"],
         "pi": r["pi_clean"],
         "v_root": r["value"],
-        "value_search": r["value_search"],
     }
 
 
@@ -137,45 +129,52 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
+def _td_lambda(values, z, lam):
+    """TD(lambda) value targets for one trajectory (gamma=1, no intermediate reward): the
+    terminal position gets the outcome z, each earlier position mixes the next position's
+    root value with the lambda-weighted future return. lam=1 recovers the raw outcome z on
+    every position (the Monte-Carlo target); lower lam bootstraps toward near-term value."""
+    n = len(values)
+    targets = [0.0] * n
+    g = z
+    targets[n - 1] = g
+    for t in range(n - 2, -1, -1):
+        g = (1.0 - lam) * values[t + 1] + lam * g
+        targets[t] = g
+    return targets
+
+
 def _mean_or_none(xs):
     """Mean of a per-generation sample, or None when the generation had no events."""
     return float(np.mean(xs)) if xs else None
 
 
-def _episode(pend, p1_died, p2_died):
-    """Flush both players' pending positions as training rows. Each position's value target
-    is its realized attack reward plus the discounted search return of the next position;
-    a dying player's final position takes the death penalty instead of a bootstrap, a
-    surviving player's final position keeps its own search return. The game outcome keys
-    only the win/draw bookkeeping. Returns (rows[(pos, target, policy_mask)], game_len,
-    p1_won, is_draw), or None if nothing was collected."""
+def _episode(pend, p1_died, p2_died, lam):
+    """Stamp each player's TD(lambda) value targets on its pending positions and return both
+    players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
+    is_draw) keyed on the learner's (player-1) outcome, or None if nothing was collected."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
-    p1_won = p2_died and not p1_died
-    is_draw = p1_died == p2_died
-    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions
-    # train the value only.
+    if p1_died and not p2_died:
+        z1, z2 = -1.0, 1.0
+    elif p2_died and not p1_died:
+        z1, z2 = 1.0, -1.0
+    else:
+        z1, z2 = 0.0, 0.0
+    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions train
+    # the value only. Value targets are TD(lambda) bootstrapped from each root value.
     rows = []
-    for positions, died, mask in (
-        (pend["p1"], p1_died, 1.0),
-        (pend["p2"], p2_died, 0.0),
-    ):
-        n = len(positions)
-        for t, p in enumerate(positions):
-            r = p.get("r_real", 0.0)
-            if t + 1 < n:
-                tgt = r + VALUE_GAMMA * positions[t + 1]["value_search"]
-            elif died:
-                tgt = r - W_DEATH
-            else:
-                tgt = p["value_search"]
-            rows.append((p, tgt, mask))
-    return rows, glen, p1_won, is_draw
+    for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
+        if not positions:
+            continue
+        targets = _td_lambda([p["v_root"] for p in positions], z, lam)
+        rows += [(p, t, mask) for p, t in zip(positions, targets)]
+    return rows, glen, z1 > 0.0, z1 == 0.0
 
 
 def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
-    """A PlacementPolicyValueNet with its variables built (ready for restore)."""
+    """A tanh-value PlacementPolicyValueNet with its variables built (ready for restore)."""
     net = PlacementPolicyValueNet(
         batch_size=batch_size,
         piece_dim=piece_dim,
@@ -183,7 +182,7 @@ def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=0.0,
-        value_activation=None,  # return-unit value, unbounded
+        value_activation="tanh",  # bound the value to the outcome target's [-1, 1]
     )
     net(
         (
@@ -295,10 +294,9 @@ def main(args):
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
-    pool_min_decisive = getattr(args, "pool_min_decisive", 24)
-    elo_fit_interval = getattr(args, "elo_fit_interval", 5)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
+    td_lambda = getattr(args, "td_lambda", 1.0)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -316,7 +314,8 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # Search reward = small attack credit, own-death = -1, undiscounted, scale 1.
+    # Outcome-z value target; search reward = small attack credit + b2b-build shaping,
+    # own-death = -1, undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -326,13 +325,9 @@ def main(args):
         temp_moves=getattr(args, "temp_moves", 12),
         w_attack=0.05,
         w_death=1.0,
+        w_b2b=getattr(args, "w_b2b", 0.06),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
-        w_row=getattr(args, "w_row", 0.10),
-        h_cap=getattr(args, "h_cap", 5),
-        w_bank=getattr(args, "w_bank", 0.05),
-        b_cap=getattr(args, "b_cap", 0),
-        w_chain=getattr(args, "w_chain", 0.06),
     )
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
@@ -406,12 +401,7 @@ def main(args):
         dirichlet_alpha=cfg.dirichlet_alpha,
         dirichlet_eps=cfg.dirichlet_eps,
         temp_moves=cfg.temp_moves,
-        w_row=cfg.w_row,
-        h_cap=cfg.h_cap,
-        w_bank=cfg.w_bank,
-        b_cap=cfg.b_cap,
-        w_chain=cfg.w_chain,
-        value_gamma=VALUE_GAMMA,
+        w_b2b=cfg.w_b2b,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -420,10 +410,9 @@ def main(args):
         max_pool_size=max_pool_size,
         pool_interval=pool_interval,
         pool_wr_gate=pool_wr_gate,
-        pool_min_decisive=pool_min_decisive,
-        elo_fit_interval=elo_fit_interval,
         eval_interval=eval_interval,
         eval_games=eval_games,
+        td_lambda=td_lambda,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -472,7 +461,6 @@ def main(args):
     wr_ema = 0.5
     last_wr_ref = 0.5
     last_ref_dec = 0  # decisive games in the most recent eval-vs-ref window
-    decisive_window = deque(maxlen=pool_interval)  # pool-admission data sufficiency
 
     for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
@@ -503,7 +491,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"])
+                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -514,8 +502,6 @@ def main(args):
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
-                    pending[g]["p1"][-1]["r_real"] = W_ATTACK * atk1
-                    pending[g]["p2"][-1]["r_real"] = W_ATTACK * atk2
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
@@ -555,7 +541,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died)
+                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
@@ -610,11 +596,11 @@ def main(args):
                 last_wr_ref = ref_wins / last_ref_dec
             if whr is not None:
                 whr.record(gen, "gen_0", ref_wins, ref_losses, ref_draws, ctx="eval")
-        # WHR batch refit is expensive; fit and publish only every elo_fit_interval gens.
-        fit_gen = whr is not None and gen % elo_fit_interval == 0
-        if fit_gen:
-            whr.fit(gen=gen, full_sigma=True)
-            whr.to_json(ratings_path)
+        if whr is not None:
+            write_gen = gen % 5 == 0
+            whr.fit(gen=gen, full_sigma=write_gen)
+            if write_gen:
+                whr.to_json(ratings_path)
 
         n_new = len(gen_pos)
         if n_new == 0:
@@ -733,12 +719,10 @@ def main(args):
         # so ratings.json includes it immediately.
         if decisive > 0:
             wr_ema = 0.9 * wr_ema + 0.1 * win_rate
-        # Pool admission judges decisive-game sufficiency over the whole interval.
-        decisive_window.append(decisive)
         if (
             gen > 0
             and gen % pool_interval == 0
-            and sum(decisive_window) >= pool_min_decisive
+            and decisive >= 8
             and wr_ema >= pool_wr_gate
         ):
             _save_pool(net, gen, pool_dir, max_pool_size)
@@ -751,7 +735,7 @@ def main(args):
         # Per-opponent rating fan; new series appear as the pool grows.
         present = [os.path.basename(p) for p in _pool_snaps(pool_dir)]
         elo_tags = {}
-        if fit_gen:
+        if whr is not None:
             summ = whr.present_summary(present)
             elo_tags = {
                 "elo/learner": whr.ratings["learner"],

@@ -7,10 +7,10 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 `apply_leaves` until the budget is spent, and read out per-root visit counts.
 
 Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
-attack), clipped, with an unclipped `-w_death` on terminal edges; the leaf bootstrap is the
-net value directly. PUCT uses Q in raw return_scale units (no per-tree min-max) so the death
-penalty isn't flattened to one normalized unit and `w_death` actually bites. Dirichlet noise
-+ sampling stay in Python.
+attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
+with `Phi = min(max(0, b2b), 12)`; terminal edges add an unclipped `-w_death` and carry
+`Phi(terminal) = 0`. The leaf bootstrap is the net value directly. PUCT uses Q in raw
+return_scale units. Dirichlet noise + sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -34,19 +34,11 @@ class MCTSConfig:
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
+    w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
     vloss: float = 1.0  # virtual-loss magnitude (scaled-Q units)
-    # Row-price potential: Phi = w_row*min(cells/10, h_cap) + w_bank*max(0, b2b+1),
-    # applied as a per-edge difference with Phi(terminal) = 0. Weights 0/0 disable;
-    # b_cap > 0 caps the bank term (0 = uncapped).
-    w_row: float = 0.10
-    h_cap: int = 5
-    w_bank: float = 0.05
-    b_cap: int = 0
-    # Bonus on a chained difficult clear (predecessor also cleared); 0 = off.
-    w_chain: float = 0.06
 
 
 def denoise_visits(counts, logits, noise, eps, mask):
@@ -116,9 +108,10 @@ class PlacementMCTS:
     def search(self, real_envs, return_scale, temperatures):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
-        {dead: True} or {dead: False, pi, slot, descriptor, visits, board, pieces, bcg,
-        cand_placements, cand_mask}. `descriptor` = (is_hold, rot, norm_col, landing_row,
-        spin); commit the real move via `placement_step(env, searcher, descriptor)`."""
+        {dead: True} or {dead: False, pi, pi_clean, slot, descriptor, visits, value, board,
+        pieces, bcg, cand_placements, cand_mask, logits, noise}. `descriptor` = (is_hold, rot,
+        norm_col, landing_row, spin); commit the real move via
+        `placement_step(env, searcher, descriptor)`."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -144,11 +137,7 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
-            w_row=self.cfg.w_row,
-            h_cap=self.cfg.h_cap,
-            w_bank=self.cfg.w_bank,
-            b_cap=self.cfg.b_cap,
-            w_chain=self.cfg.w_chain,
+            w_b2b=self.cfg.w_b2b,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -192,7 +181,6 @@ class PlacementMCTS:
                 engine.apply_leaves(logits, values)
 
             pi, counts, desc, dead = engine.result()
-            q_real = engine.root_q_real()
         finally:
             engine.destroy()
 
@@ -210,15 +198,11 @@ class PlacementMCTS:
                 self.cfg.dirichlet_eps,
                 obs[i]["cand_mask"],
             )
-            best = int(legal[np.argmax(counts[i][legal])])
             results.append(
                 {
                     "dead": False,
                     "pi": pi[i],
                     "pi_clean": pi_clean if pi_clean is not None else pi[i],
-                    "value_search": float(q_real[i][best])
-                    if counts[i][legal].sum() > 0
-                    else float(obs[i]["value"]),
                     "slot": slot,
                     "descriptor": tuple(int(x) for x in desc[i, slot]),
                     "visits": int(counts[i].sum()),
@@ -253,11 +237,7 @@ class PlacementMCTS:
             num_simulations=self.cfg.num_simulations,
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
-            w_row=self.cfg.w_row,
-            h_cap=self.cfg.h_cap,
-            w_bank=self.cfg.w_bank,
-            b_cap=self.cfg.b_cap,
-            w_chain=self.cfg.w_chain,
+            w_b2b=self.cfg.w_b2b,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

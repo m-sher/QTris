@@ -19,9 +19,7 @@ import TetrisEnv
 
 from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 
-CANDIDATE_CAPACITY = (
-    MCTS_CANDIDATE_CAPACITY  # MCTS slot width; not BC CANDIDATE_CAPACITY
-)
+CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY  # MCTS slot width, not the BC one
 FEATURE_DIM = 18
 _NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
@@ -45,18 +43,12 @@ def _load_lib():
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
-        + [
-            ctypes.c_float,
-            ctypes.c_int,
-            ctypes.c_float,
-            ctypes.c_int,
-            ctypes.c_float,
-        ]  # w_row, h_cap, w_bank, b_cap, w_chain
+        + [ctypes.c_float]  # w_b2b
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
     lib.mcts_candidate_capacity.restype = ctypes.c_int
-    # Arity handshake: a stale .so silently reads garbage for missing trailing args.
+    # Arity handshake: the .so's mcts_create must take exactly the args passed below.
     try:
         lib.mcts_create_arity.argtypes = []
         lib.mcts_create_arity.restype = ctypes.c_int
@@ -99,8 +91,6 @@ def _load_lib():
     lib.mcts_apply_leaves.restype = None
     lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32]
     lib.mcts_result.restype = None
-    lib.mcts_root_q_real.argtypes = [ctypes.c_void_p, _F32]
-    lib.mcts_root_q_real.restype = None
     lib.mcts_destroy.argtypes = [ctypes.c_void_p]
     lib.mcts_destroy.restype = None
     return lib
@@ -129,11 +119,7 @@ class CMCTS:
         num_simulations=64,
         leaves_per_round=4,
         vloss=1.0,
-        w_row=0.0,
-        h_cap=5,
-        w_bank=0.0,
-        b_cap=0,
-        w_chain=0.0,
+        w_b2b=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -171,11 +157,7 @@ class CMCTS:
             + 1,  # arena: root + ~one node per simulation (+L headroom)
             self.lpr,
             vloss,
-            w_row,
-            h_cap,
-            w_bank,
-            b_cap,
-            w_chain,
+            w_b2b,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
@@ -190,7 +172,6 @@ class CMCTS:
         self._counts = np.zeros(num_trees * self.cap, np.float32)
         self._desc = np.zeros(num_trees * self.cap * 5, np.int32)
         self._dead = np.zeros(num_trees, np.int32)
-        self._q_real = np.zeros(num_trees * self.cap, np.float32)
 
     def set_root(self, tree, env):
         occ = (env._board != 0).astype(np.uint16)
@@ -275,10 +256,6 @@ class CMCTS:
         desc = self._desc.reshape(self.n, self.cap, 5).copy()
         dead = self._dead.astype(bool).copy()
         return pi, counts, desc, dead
-
-    def root_q_real(self):
-        self.lib.mcts_root_q_real(self.h, self._q_real)
-        return self._q_real.reshape(self.n, self.cap).copy()
 
     def destroy(self):
         if self.h:

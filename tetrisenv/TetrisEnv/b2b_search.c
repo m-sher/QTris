@@ -3237,8 +3237,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*attack (clipped) with an unclipped -w_death on terminal edges; the leaf
-// bootstrap is the net value directly. Dirichlet noise + final sampling stay in Python.
+// w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)), with an unclipped
+// -w_death on terminal edges; the leaf bootstrap is the net value directly. Dirichlet noise
+// + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -3277,13 +3278,10 @@ typedef struct {
 typedef struct {
     int board_height, queue_size, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
-    float c_puct, gamma, w_attack, w_death, return_scale;
+    float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
-    float w_row, w_bank;         // row-price potential: Phi = w_row*min(cells/10, h_cap)
-    int h_cap, b_cap;            //   + w_bank*max(0,b2b+1); w=0 off, b_cap 0 = uncapped
-    float w_chain;               // bonus on a difficult clear whose predecessor cleared
 } MConfig;
 
 typedef struct MNode {
@@ -3294,7 +3292,6 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
-    float W_real[MCAP], edge_reward_real[MCAP];  // return without potentials/bonuses
     struct MNode* child[MCAP];
 } MNode;
 
@@ -3513,14 +3510,11 @@ static int mcts_select(const MNode* node, const MConfig* cfg) {
 static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
-    float g_real = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
-        g_real = node->edge_reward_real[slot] + cfg->gamma * g_real;
         node->N[slot] += 1.0f;
         node->W[slot] += g;
-        node->W_real[slot] += g_real;
         node->Q[slot] = node->W[slot] / node->N[slot];
     }
 }
@@ -3544,31 +3538,17 @@ static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
     }
 }
 
+// b2b potential for the w_b2b shaping: Phi = min(max(0, b2b), CAP).
+#define B2B_POTENTIAL_CAP 12
+static inline float b2b_phi(int b2b) {
+    int p = b2b > 0 ? b2b : 0;
+    return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
+}
+
 static float mcts_scale_reward(const MConfig* cfg, float reward) {
     float r = reward / (cfg->return_scale + 1e-8f);
     if (r > MCLIP) r = MCLIP; else if (r < -MCLIP) r = -MCLIP;
     return r;
-}
-
-// Row-price potential: filled cells priced as stored rows, plus the b2b bank pricing its
-// deferred surge. Applied as a per-edge difference (telescopes along any path).
-static float mcts_phi(const MConfig* cfg, const MState* s) {
-    if (cfg->w_row == 0.0f && cfg->w_bank == 0.0f) return 0.0f;
-    float phi = 0.0f;
-    if (cfg->w_row != 0.0f) {
-        int n = 0;
-        for (int r = 0; r < cfg->board_height; r++) n += __builtin_popcount(s->board[r]);
-        float rows = (float)n / 10.0f;
-        if (rows > (float)cfg->h_cap) rows = (float)cfg->h_cap;
-        phi += cfg->w_row * rows;
-    }
-    if (cfg->w_bank != 0.0f) {
-        int bank = s->b2b + 1;
-        if (bank < 0) bank = 0;
-        if (cfg->b_cap > 0 && bank > cfg->b_cap) bank = cfg->b_cap;
-        phi += cfg->w_bank * (float)bank;
-    }
-    return phi;
 }
 
 // --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
@@ -3603,26 +3583,21 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
-                    // Phi(terminal) = 0: dying forfeits the accumulated potential.
+                    // Phi(terminal) = 0, so the shaping term is -w_b2b*Phi(parent).
                     node->edge_reward[slot] =
-                        mcts_scale_reward(cfg, cfg->w_attack * attack
-                                               - mcts_phi(cfg, &node->st))
-                        - cfg->w_death / (cfg->return_scale + 1e-8f);
-                    node->edge_reward_real[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
-                        - cfg->w_death / (cfg->return_scale + 1e-8f);
+                        - cfg->w_death / (cfg->return_scale + 1e-8f)
+                        - cfg->w_b2b * b2b_phi(node->st.b2b)
+                              / (cfg->return_scale + 1e-8f);
                     mtree_backup(cfg, path, plen, 0.0f);
                     break;
                 }
-                float chain_bonus =
-                    (leaf->st.b2b == node->st.b2b + 1 && leaf->st.combo >= 1)
-                        ? cfg->w_chain : 0.0f;
+                // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)).
                 node->edge_reward[slot] =
-                    mcts_scale_reward(cfg, cfg->w_attack * attack + chain_bonus
-                                           + mcts_phi(cfg, &leaf->st)
-                                           - mcts_phi(cfg, &node->st));
-                node->edge_reward_real[slot] =
-                    mcts_scale_reward(cfg, cfg->w_attack * attack);
+                    mcts_scale_reward(cfg, cfg->w_attack * attack)
+                    + cfg->w_b2b
+                          * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                          / (cfg->return_scale + 1e-8f);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3651,8 +3626,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss,
-                  float w_row, int h_cap, float w_bank, int b_cap, float w_chain) {
+                  int leaves_per_round, float vloss, float w_b2b) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3681,15 +3655,12 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.auto_push_garbage = auto_push_garbage; e->cfg.auto_fill_queue = auto_fill_queue;
     e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
-    e->cfg.return_scale = return_scale;
+    e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
     e->cfg.leaves_per_round = leaves_per_round;
     e->cfg.vloss = vloss;
-    e->cfg.w_row = w_row; e->cfg.w_bank = w_bank; e->cfg.w_chain = w_chain;
-    e->cfg.h_cap = h_cap > 0 ? h_cap : 0;
-    e->cfg.b_cap = b_cap > 0 ? b_cap : 0;
     e->trees = (MTree*)calloc(num_trees, sizeof(MTree));
     for (int i = 0; i < num_trees; i++) {
         e->trees[i].pool = (MNode*)calloc((size_t)max_nodes, sizeof(MNode));
@@ -3813,6 +3784,7 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             leaf->expanded = true;
             leaf->awaiting_eval = false;
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
+            // Bootstrap is the net value directly; the bank is priced per-edge by Phi.
             float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
             mtree_backup(cfg, t->path[p], t->path_len[p], boot);
@@ -3855,25 +3827,8 @@ void mcts_destroy(void* h) {
 // Capacity handshake for Python CMCTS (must match MCTS_CANDIDATE_CAPACITY).
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
-// ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes
-// (a mismatched call silently reads garbage for the missing args).
-int mcts_create_arity(void) { return 21; }
-
-// Per-slot root return without potentials or bonuses; q_out is [num_trees * MCAP],
-// 0 for empty and unvisited slots.
-void mcts_root_q_real(void* h, float* q_out) {
-    MEngine* e = (MEngine*)h;
-    for (int i = 0; i < e->num_trees; i++) {
-        float* q = &q_out[(size_t)i * MCAP];
-        for (int j = 0; j < MCAP; j++) q[j] = 0.0f;
-        MNode* root = e->trees[i].root;
-        if (root == NULL) continue;
-        for (int k = 0; k < root->n_legal; k++) {
-            int slot = root->legal[k];
-            if (root->N[slot] > 0.0f) q[slot] = root->W_real[slot] / root->N[slot];
-        }
-    }
-}
+// ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
+int mcts_create_arity(void) { return 17; }
 
 // --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
 //     deterministic core after a subtree re-sync re-applies these edits) ---

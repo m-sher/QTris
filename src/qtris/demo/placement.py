@@ -77,8 +77,8 @@ def main(args):
 
     load_checkpoint(p_model, args.checkpoint)
 
-    # return_scale normalizes the per-edge attack and death terms against the value head.
-    # Read from the AZ checkpoint; BC/PPO checkpoints have none and use 1.0.
+    # return_scale normalizes the per-edge attack, b2b and death terms against the value
+    # head. Read from the AZ checkpoint; BC/PPO checkpoints have none and use 1.0.
     mcts_return_scale = 1.0
     try:
         _ck = tf.train.latest_checkpoint(args.checkpoint)
@@ -138,11 +138,7 @@ def main(args):
                 gamma=1.0,
                 w_attack=0.05,
                 w_death=1.0,
-                w_row=getattr(args, "w_row", 0.10),
-                h_cap=getattr(args, "h_cap", 5),
-                w_bank=getattr(args, "w_bank", 0.05),
-                b_cap=getattr(args, "b_cap", 0),
-                w_chain=getattr(args, "w_chain", 0.06),
+                w_b2b=0.06,
             ),
         )
         if getattr(args, "num_simulations", 0) > 0

@@ -93,6 +93,7 @@ def test_mcts_packs_multiple_landings_and_handshake():
         num_simulations=32,
         leaves_per_round=4,
         vloss=1.0,
+        w_b2b=0.06,
     )
     try:
         engine.set_root(0, env)

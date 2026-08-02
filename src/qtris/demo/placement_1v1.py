@@ -75,17 +75,8 @@ def main(cli_args):
         gamma=1.0,
         w_attack=0.05,
         w_death=1.0,
-        w_row=getattr(cli_args, "w_row", 0.10),
-        h_cap=getattr(cli_args, "h_cap", 5),
-        w_bank=getattr(cli_args, "w_bank", 0.05),
-        b_cap=getattr(cli_args, "b_cap", 0),
-        w_chain=getattr(cli_args, "w_chain", 0.06),
+        w_b2b=0.06,
     )
-    if cfg.w_row or cfg.w_bank or cfg.w_chain:
-        print(
-            f"shaping ON: w_row={cfg.w_row} h_cap={cfg.h_cap} "
-            f"w_bank={cfg.w_bank} b_cap={cfg.b_cap} w_chain={cfg.w_chain}"
-        )
     mcts1 = PlacementMCTS(p1_net, cfg)
     mcts2 = PlacementMCTS(p2_net, cfg)
 

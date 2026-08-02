@@ -233,10 +233,9 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
 
-    Value target = realized attack reward + discounted next-position unshaped search
-    return; search reward w_attack=0.05,
+    Outcome value target (z in {-1,0,+1}); search shaping w_attack=0.05, w_b2b=0.06;
     w_death=1, gamma=1, return_scale=1. The learner duels frozen snapshots sampled from a
-    disk pool; both players' trajectories are trained."""
+    disk pool; both players' trajectories are trained (each labeled with its own outcome)."""
 
     num_games: int
     horizon: int
@@ -246,6 +245,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     dirichlet_alpha: float
     dirichlet_eps: float
     temp_moves: int
+    w_b2b: float = 0.0
     mini_batch_size: int
     num_epochs: int
     value_coef: float
@@ -254,17 +254,9 @@ class OneVsOnePlacementAZConfig(BaseModel):
     max_pool_size: int = 30
     pool_interval: int = 10
     pool_wr_gate: float = 0.55
-    pool_min_decisive: int = 24  # decisive games over the interval, not one generation
-    elo_fit_interval: int = 5
-    # Row-price potential weights (0/0 disables; b_cap 0 = uncapped).
-    w_row: float = 0.10
-    h_cap: int = 5
-    w_bank: float = 0.05
-    b_cap: int = 0
-    w_chain: float = 0.06
-    value_gamma: float = 0.95  # Value-target TD discount.
     eval_interval: int = 10
     eval_games: int = 8
+    td_lambda: float = 1.0
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
