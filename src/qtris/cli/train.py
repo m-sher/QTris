@@ -80,7 +80,7 @@ def main() -> None:
     az.add_argument(
         "--td-lambda",
         type=float,
-        default=1.0,
+        default=0.9,
         help="placement 1v1 only: TD(lambda) for the value target (1=raw outcome z on "
         "every position; lower bootstraps toward near-term root value).",
     )

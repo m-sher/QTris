@@ -4,8 +4,9 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses the realized game outcome z in {-1, 0, +1}
-(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
+`PyTetris1v1Env` does. The value head regresses TD(lambda) targets built from the realized
+game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recovers raw z
+on every position). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
 w_b2b=0.06; own-death = -1 is the only in-search terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
@@ -308,7 +309,7 @@ def main(args):
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
-    td_lambda = getattr(args, "td_lambda", 1.0)
+    td_lambda = getattr(args, "td_lambda", 0.9)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
