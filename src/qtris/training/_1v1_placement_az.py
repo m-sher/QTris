@@ -173,6 +173,18 @@ def _episode(pend, p1_died, p2_died, lam):
     return rows, glen, z1 > 0.0, z1 == 0.0
 
 
+def warm_start_full(net, warm):
+    """Restore a BC checkpoint into `net`, value head included; returns whether the
+    checkpoint carried one.
+
+    The placement pretrainer trains its value head with a tanh activation against a
+    centered bounded label, matching this net's head, so it transfers as an ordering
+    prior for the gen-0 leaf bootstraps. A policy-only checkpoint has no value head and
+    restores partial, leaving it fresh."""
+    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
+    return any("value_top" in name for name, _ in tf.train.list_variables(warm))
+
+
 def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
     """A tanh-value PlacementPolicyValueNet with its variables built (ready for restore)."""
     net = PlacementPolicyValueNet(
@@ -348,9 +360,12 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            # Policy warm-start only; the value head restores partial (left fresh).
-            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-            print(f"Warm-started policy from BC checkpoint {warm}.", flush=True)
+            warm_value = warm_start_full(net, warm)
+            print(
+                f"Warm-started from BC checkpoint {warm} "
+                f"(value head {'restored' if warm_value else 'fresh'}).",
+                flush=True,
+            )
 
     # Seed the pool with gen_0 = the warm-started learner.
     if not _pool_snaps(pool_dir):

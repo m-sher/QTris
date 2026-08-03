@@ -53,6 +53,10 @@ class PretrainConfig(BaseModel):
     batch_size: int = 128
     epochs: int = 10
     learning_rate: float = 3e-4
+    # Placement value label tanh((v - median) / scale): scale puts the value_anchor_q
+    # quantile of the oracle score at value_anchor_t.
+    value_anchor_q: float = 0.95
+    value_anchor_t: float = 0.8
 
 
 class DataGenConfig(BaseModel):

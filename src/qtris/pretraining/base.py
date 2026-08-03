@@ -6,6 +6,7 @@ below was a fix for a reward-shaping change in the env - see surge_correction
 docstring.
 """
 
+import math
 import os
 
 import tensorflow as tf
@@ -65,9 +66,23 @@ class PretrainerBase:
     `_train_step` and `train`; everything here is identical across both.
     """
 
-    def __init__(self, dataset_path, policy_only=False):
+    def __init__(
+        self,
+        dataset_path,
+        policy_only=False,
+        value_anchor_q=_pretrain_cfg.value_anchor_q,
+        value_anchor_t=_pretrain_cfg.value_anchor_t,
+    ):
+        if not 0.0 < value_anchor_t < 1.0:
+            raise ValueError(f"value_anchor_t must be in (0, 1), got {value_anchor_t}")
+        if not 0.5 < value_anchor_q < 1.0:
+            raise ValueError(
+                f"value_anchor_q must be in (0.5, 1), got {value_anchor_q}"
+            )
         self._dataset_path = dataset_path
         self._policy_only = policy_only
+        self._value_anchor_q = value_anchor_q
+        self._value_anchor_t = value_anchor_t
         self._scc = keras.losses.SparseCategoricalCrossentropy(
             from_logits=True, reduction="none"
         )
@@ -76,6 +91,12 @@ class PretrainerBase:
         )
         self._value_scale = tf.Variable(
             1.0, trainable=False, dtype=tf.float32, name="value_scale"
+        )
+        self._value_center = tf.Variable(
+            0.0, trainable=False, dtype=tf.float32, name="value_center"
+        )
+        self._value_var = tf.Variable(
+            1.0, trainable=False, dtype=tf.float32, name="value_var"
         )
 
     def _load_dataset(self, batch_size):
@@ -191,8 +212,8 @@ class PretrainerBase:
     def _load_dataset_placement(self, batch_size):
         """Load the 128-slot placement dataset (cand_placements + cand_scores).
 
-        Same value-head standardization as the dense loader; the policy target is
-        built per batch in the train step from cand_scores."""
+        Calibrates the bounded tanh value label; the policy target is built per batch
+        in the train step from cand_scores."""
         if not os.path.exists(self._dataset_path):
             raise FileNotFoundError(
                 f"No dataset at {self._dataset_path}. Run `uv run datagen` to collect one."
@@ -207,7 +228,7 @@ class PretrainerBase:
             )
 
         if not self._policy_only:
-            self._assign_value_scale(dataset)
+            self._assign_tanh_value_norm(dataset)
 
         cached = dataset.cache()
         for _ in cached:
@@ -243,9 +264,10 @@ class PretrainerBase:
             )
         return ds.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
 
-    def _assign_value_scale(self, dataset):
-        """Standardize the value head from each position's max legal candidate score."""
-        vmax = tf.concat(
+    @staticmethod
+    def _dataset_vmax(dataset):
+        """Per-position max over legal candidate scores (the oracle's best-move value)."""
+        return tf.concat(
             [
                 tf.reduce_max(
                     tf.where(
@@ -259,6 +281,10 @@ class PretrainerBase:
             ],
             axis=0,
         )
+
+    def _assign_value_scale(self, dataset):
+        """Standardize the value head from each position's max legal candidate score."""
+        vmax = self._dataset_vmax(dataset)
         v_mean = tf.reduce_mean(vmax)
         v_std = tf.math.reduce_std(vmax)
         scale = tf.maximum(v_std, 1.0)
@@ -268,6 +294,42 @@ class PretrainerBase:
             f"std={float(v_std):.3f} | value-head scale={float(scale):.3f}",
             flush=True,
         )
+
+    def _assign_tanh_value_norm(self, dataset):
+        """Calibrate the bounded value label `tanh((vmax - center) / scale)`.
+
+        center is the median, so 0 means a typical board - what 0 also means to the 1v1
+        AZ tanh head this warm-starts. scale places the anchor quantile at anchor_t,
+        leaving range above it rather than saturating there. Both come from quantiles
+        because the oracle score's upper tail runs ~30x the median (deep beam lines
+        cashing a large surge)."""
+        vmax = tf.sort(self._dataset_vmax(dataset))
+        n = tf.shape(vmax)[0]
+
+        def quantile(p):
+            return vmax[tf.cast(tf.round(p * tf.cast(n - 1, tf.float32)), tf.int32)]
+
+        center = quantile(0.5)
+        span = quantile(self._value_anchor_q) - center
+        scale = tf.maximum(span / math.atanh(self._value_anchor_t), 1e-3)
+        target = tf.tanh((vmax - center) / scale)
+
+        self._value_center.assign(center)
+        self._value_scale.assign(scale)
+        self._value_var.assign(tf.maximum(tf.math.reduce_variance(target), 1e-6))
+        saturated = tf.reduce_mean(tf.cast(tf.abs(target) > 0.99, tf.float32))
+        print(
+            f"Value label | n={int(n)} | median={float(center):.2f} "
+            f"q{100 * self._value_anchor_q:g}={float(center + span):.2f} | "
+            f"scale={float(self._value_scale):.2f} | tanh target: "
+            f"std={float(tf.sqrt(self._value_var)):.3f} "
+            f"saturated={100.0 * float(saturated):.2f}%",
+            flush=True,
+        )
+
+    def _tanh_value_target(self, vmax):
+        """Apply the calibrated bounded label to a batch of per-position max scores."""
+        return tf.tanh((vmax - self._value_center) / self._value_scale)
 
     @staticmethod
     def load_expert_dataset(path, batch_size):

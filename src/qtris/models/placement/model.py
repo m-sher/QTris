@@ -100,8 +100,7 @@ class PlacementPolicyValueNet(QtrisModelBase):
         )
         self.score_top = layers.Dense(1, name="cand_logit")
 
-        # Value head: state-only scalar from the shared board latent. New submodule
-        # (not present in policy-only checkpoints), so warm-start leaves it fresh.
+        # Value head: state-only scalar from the shared board latent.
         self.value_trunk = keras.Sequential(
             [
                 layers.Flatten(),
@@ -111,8 +110,9 @@ class PlacementPolicyValueNet(QtrisModelBase):
             ],
             name="value_trunk",
         )
-        # Linear by default (solo AZ / BC regress unbounded return). 1v1 AZ passes
-        # "tanh" to bound the value to the outcome target's [-1, 1].
+        # Linear serves solo AZ, whose return target is unbounded. Placement BC and 1v1
+        # AZ pass "tanh": their labels are bounded to [-1, 1] and read 0 as neutral, so
+        # the head transfers between those two.
         self.value_top = layers.Dense(1, activation=value_activation, name="value")
 
     def process_obs(self, inputs, training=False):

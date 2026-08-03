@@ -5,6 +5,8 @@ from qtris.pretraining.base import PretrainerBase, resolve_resume_checkpoint
 import tensorflow as tf
 from tensorflow import keras
 
+_pretrain_cfg = PretrainConfig()
+
 
 class Pretrainer(PretrainerBase):
     def __init__(
@@ -12,8 +14,14 @@ class Pretrainer(PretrainerBase):
         dataset_path="datasets/tetris_oracle_placement",
         policy_temp=1.0,
         value_weight=1.0,
+        value_anchor_q=_pretrain_cfg.value_anchor_q,
+        value_anchor_t=_pretrain_cfg.value_anchor_t,
     ):
-        super().__init__(dataset_path)
+        super().__init__(
+            dataset_path,
+            value_anchor_q=value_anchor_q,
+            value_anchor_t=value_anchor_t,
+        )
         self._policy_temp = policy_temp
         self._value_weight = value_weight
 
@@ -28,9 +36,9 @@ class Pretrainer(PretrainerBase):
         mask = cand_scores > -1e29  # (B, C)
         masked_scores = tf.where(mask, cand_scores, tf.constant(-1e30, tf.float32))
         target = tf.nn.softmax(masked_scores / self._policy_temp, axis=-1)  # (B, C)
-        value_target = (
-            tf.reduce_max(masked_scores, axis=-1, keepdims=True) / self._value_scale
-        )  # (B, 1)
+        value_target = self._tanh_value_target(
+            tf.reduce_max(masked_scores, axis=-1, keepdims=True)
+        )  # (B, 1) in [-1, 1], 0 = median board
 
         with tf.GradientTape() as tape:
             logits, values = model(
@@ -38,7 +46,11 @@ class Pretrainer(PretrainerBase):
             )
             model_logp = tf.nn.log_softmax(logits, axis=-1)  # (B, C), illegal -> ~-inf
             policy_loss = tf.reduce_mean(-tf.reduce_sum(target * model_logp, axis=-1))
-            value_loss = tf.reduce_mean(tf.square(values - value_target))
+            # Fraction of variance unexplained (1.0 = predicting the mean), which keeps
+            # value_weight scale-free.
+            value_loss = (
+                tf.reduce_mean(tf.square(values - value_target)) / self._value_var
+            )
             loss = policy_loss + self._value_weight * value_loss
 
         grads = tape.gradient(loss, model.trainable_variables)
@@ -152,6 +164,7 @@ def main(args):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
+        value_activation="tanh",  # bounded label, matching the 1v1 AZ head
     )
     optimizer = keras.optimizers.AdamW(
         learning_rate=PretrainConfig().learning_rate,
@@ -174,13 +187,21 @@ def main(args):
 
     pretrainer_kwargs = {
         "policy_temp": args.policy_temp,
+        "value_weight": args.value_weight,
+        "value_anchor_t": args.value_anchor,
     }
     if args.dataset is not None:
         pretrainer_kwargs["dataset_path"] = str(args.dataset)
     pretrainer = Pretrainer(**pretrainer_kwargs)
 
+    # Recalibrated from the dataset on every run, so restoring them has no effect; they
+    # ride along so a consumer can read what the head was calibrated against.
     checkpoint = tf.train.Checkpoint(
-        model=model, optimizer=optimizer, value_scale=pretrainer._value_scale
+        model=model,
+        optimizer=optimizer,
+        value_scale=pretrainer._value_scale,
+        value_center=pretrainer._value_center,
+        value_var=pretrainer._value_var,
     )
     checkpoint_manager = tf.train.CheckpointManager(
         checkpoint, "checkpoints/placement_pretrained_policy", max_to_keep=3

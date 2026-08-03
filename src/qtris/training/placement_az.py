@@ -44,6 +44,20 @@ def _flat(arr, sel):
     return arr.reshape((-1,) + arr.shape[2:])[sel]
 
 
+def warm_start_policy_only(net, warm):
+    """Restore a BC checkpoint's trunk and policy into `net`, leaving its value head fresh.
+
+    This net's head is linear over an unbounded return in return_scale units, while the
+    pretrained head is tanh over a bounded label; a tanh pre-activation read linearly
+    reaches the search as saturated leaf bootstraps. 1v1 AZ, whose head is also tanh,
+    restores it."""
+    value_vars = net.value_trunk.weights + net.value_top.weights
+    fresh = [w.numpy() for w in value_vars]
+    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
+    for var, init in zip(value_vars, fresh):
+        var.assign(init)
+
+
 @tf.function
 def train_step(net, batch, value_coef):
     cand_mask = batch["cand_mask"]
@@ -330,11 +344,11 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            # Warm-start the policy only. The value head was pretrained against the oracle
-            # depth-0 max (value_scale units); it retargets to the search return (return_scale
-            # units) over the first few generations - a transient that self-corrects.
-            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-            print(f"Warm-started policy from BC checkpoint {warm}.", flush=True)
+            warm_start_policy_only(net, warm)
+            print(
+                f"Warm-started policy from BC checkpoint {warm} (value head fresh).",
+                flush=True,
+            )
 
     envs = _build_envs(
         num_games,

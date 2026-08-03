@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
 
+from qtris.config import PretrainConfig
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pretrain")
@@ -63,6 +65,23 @@ def main() -> None:
         "policy target weights. Scores are raw search magnitude O(hundreds-thousands); "
         "lower sharpens the target onto the search's best move, higher flattens it toward "
         "the full distribution.",
+    )
+    parser.add_argument(
+        "--value-anchor",
+        type=float,
+        default=PretrainConfig().value_anchor_t,
+        help="placement only: tanh output that the oracle score's 95th percentile maps "
+        "to. The value label is tanh((score - median) / scale) with scale set from this, "
+        "so lower leaves more headroom above the anchor and starts the pretrained head "
+        "less confident. Must be in (0, 1).",
+    )
+    parser.add_argument(
+        "--value-weight",
+        type=float,
+        default=1.0,
+        help="placement only: weight on the value loss, which is normalized by the label "
+        "variance (so it reads as fraction of variance unexplained and this weight stays "
+        "comparable across recalibrations).",
     )
     parser.add_argument(
         "--weight-decay",
