@@ -57,13 +57,7 @@ def main() -> None:
         "--pool-interval",
         type=int,
         default=10,
-        help="placement 1v1 only: generations between gated opponent-pool snapshots.",
-    )
-    az.add_argument(
-        "--pool-wr-gate",
-        type=float,
-        default=0.55,
-        help="placement 1v1 only: decisive-WR EMA the learner must beat to add a snapshot.",
+        help="placement 1v1 only: generations between opponent-pool snapshots.",
     )
     az.add_argument(
         "--eval-interval",

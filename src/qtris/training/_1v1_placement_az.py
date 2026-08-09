@@ -9,11 +9,10 @@ game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recov
 on every position). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
 w_b2b=0.06; own-death = -1 is the only in-search terminal.
 
-Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
-on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
-reference for the periodic `win_rate_vs_ref` eval. Opponents are sampled recency-weighted per
-generation; the pool grows (gated on the learner's decisive win-rate EMA) and evicts oldest
-(gen_0 pinned).
+Only the learner's trajectory is trained. The pool lives on disk under `<ckpt>/pool/gen_*`;
+gen_0 is seeded from the warm-started net and is the frozen reference for the periodic
+`win_rate_vs_ref` eval. Opponents are sampled recency-weighted per generation; the pool
+snapshots every `pool_interval` generations and evicts oldest (gen_0 pinned).
 """
 
 import glob
@@ -150,28 +149,45 @@ def _mean_or_none(xs):
     return float(np.mean(xs)) if xs else None
 
 
+GROUNDING_BUCKETS = ((0, 10), (10, 30), (30, 60), (60, 1 << 30))
+
+
+def _grounding(v_root, z, steps_to_end):
+    """corr(v_root, z) and Brier(v_root, z) per steps-to-end bucket, keyed
+    `corr_n0_10` / `brier_n0_10` and so on, with None for empty or degenerate buckets.
+
+    Draws (z=0) map to a Brier target of 0.5."""
+    p = (np.asarray(v_root, dtype=np.float64) + 1.0) * 0.5  # tanh value -> P(win)
+    o = (np.asarray(z, dtype=np.float64) + 1.0) * 0.5
+    out = {}
+    for lo, hi in GROUNDING_BUCKETS:
+        tag = f"n{lo}_{hi}" if hi < (1 << 30) else f"n{lo}plus"
+        m = (steps_to_end >= lo) & (steps_to_end < hi)
+        n = int(m.sum())
+        ok = n >= 2 and np.std(p[m]) > 1e-6 and np.std(o[m]) > 1e-6
+        out[f"corr_{tag}"] = float(np.corrcoef(p[m], o[m])[0, 1]) if ok else None
+        out[f"brier_{tag}"] = float(np.mean((p[m] - o[m]) ** 2)) if n else None
+    return out
+
+
 def _episode(pend, p1_died, p2_died, lam):
-    """Stamp each player's TD(lambda) value targets on its pending positions and return both
-    players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
-    is_draw) keyed on the learner's (player-1) outcome, or None if nothing was collected."""
-    glen = max(len(pend["p1"]), len(pend["p2"]))
+    """Stamp the learner's TD(lambda) value targets on its pending positions and return its
+    rows for training. Returns (rows[(pos, target, z, steps_to_end)], game_len, p1_won,
+    is_draw), or None if nothing was collected. z and steps_to_end are carried for the
+    value-grounding diagnostic and are not training inputs."""
+    positions = pend["p1"]
+    glen = len(positions)
     if glen == 0:
         return None
     if p1_died and not p2_died:
-        z1, z2 = -1.0, 1.0
+        z = -1.0
     elif p2_died and not p1_died:
-        z1, z2 = 1.0, -1.0
+        z = 1.0
     else:
-        z1, z2 = 0.0, 0.0
-    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions train
-    # the value only. Value targets are TD(lambda) bootstrapped from each root value.
-    rows = []
-    for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
-        if not positions:
-            continue
-        targets = _td_lambda([p["v_root"] for p in positions], z, lam)
-        rows += [(p, t, mask) for p, t in zip(positions, targets)]
-    return rows, glen, z1 > 0.0, z1 == 0.0
+        z = 0.0
+    targets = _td_lambda([p["v_root"] for p in positions], z, lam)
+    rows = [(p, t, z, glen - 1 - i) for i, (p, t) in enumerate(zip(positions, targets))]
+    return rows, glen, z > 0.0, z == 0.0
 
 
 def warm_start_full(net, warm):
@@ -306,7 +322,6 @@ def main(args):
     # Opponent-pool knobs.
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)
-    pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 8)
     td_lambda = getattr(args, "td_lambda", 0.9)
@@ -426,7 +441,6 @@ def main(args):
         replay_capacity=replay_capacity,
         max_pool_size=max_pool_size,
         pool_interval=pool_interval,
-        pool_wr_gate=pool_wr_gate,
         eval_interval=eval_interval,
         eval_games=eval_games,
         td_lambda=td_lambda,
@@ -459,8 +473,8 @@ def main(args):
         e1._reset()
         e2._reset()
     move_count = np.zeros(num_games, dtype=np.int64)
-    # Per-game pending positions for BOTH players, carried across gens until the game ends.
-    pending = [{"p1": [], "p2": []} for _ in range(num_games)]
+    # Per-game pending learner positions, carried across gens until the game ends.
+    pending = [{"p1": []} for _ in range(num_games)]
     # Per-game peak b2b for the current episode, carried across gens like `pending`.
     ep_max_b2b = [-1] * num_games
     # Run of consecutive difficult clears (flushed by any other placement), the b2b bank run
@@ -475,14 +489,13 @@ def main(args):
     replay_size = 0
     N = num_games
     opp_temps = np.zeros(N, dtype=np.float32)  # greedy move selection for the opponent
-    wr_ema = 0.5
     last_wr_ref = 0.5
     last_ref_dec = 0  # decisive games in the most recent eval-vs-ref window
 
     for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
-        gen_pos = []  # (pos, z) for both players' positions whose game completed this gen
+        gen_pos = []  # (pos, target, z, steps_to_end) for games that completed this gen
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
@@ -511,7 +524,6 @@ def main(args):
                     ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
                 else:
                     pending[g]["p1"].append(_pos(a))
-                    pending[g]["p2"].append(_pos(b))
                     if save_states_dir:
                         state_recs.append(_state_record(e1))
                         state_recs.append(_state_record(e2))
@@ -583,7 +595,7 @@ def main(args):
                 e1._reset()
                 e2._reset()
                 move_count[g] = 0
-                pending[g] = {"p1": [], "p2": []}
+                pending[g] = {"p1": []}
 
         if save_states_dir and state_recs:
             os.makedirs(save_states_dir, exist_ok=True)
@@ -624,29 +636,25 @@ def main(args):
             print(f"Gen {gen}: no games completed; skipping update.", flush=True)
             continue
 
-        boards = np.stack([p["board"] for p, _z, _m in gen_pos]).astype(np.float32)
-        pieces = np.stack([p["pieces"] for p, _z, _m in gen_pos]).astype(np.int64)
-        bcg = np.stack([p["bcg"] for p, _z, _m in gen_pos]).astype(np.float32)
-        cand_pl = np.stack([p["cand_placements"] for p, _z, _m in gen_pos]).astype(
+        boards = np.stack([p["board"] for p, *_ in gen_pos]).astype(np.float32)
+        pieces = np.stack([p["pieces"] for p, *_ in gen_pos]).astype(np.int64)
+        bcg = np.stack([p["bcg"] for p, *_ in gen_pos]).astype(np.float32)
+        cand_pl = np.stack([p["cand_placements"] for p, *_ in gen_pos]).astype(
             np.float32
         )
-        cand_mk = np.stack([p["cand_mask"] for p, _z, _m in gen_pos]).astype(bool)
-        pi_tgt = np.stack([p["pi"] for p, _z, _m in gen_pos]).astype(np.float32)
-        value_tgt = np.array([z for _p, z, _m in gen_pos], dtype=np.float32)
-        policy_mask = np.array([m for _p, _z, m in gen_pos], dtype=np.float32)
-        v_root = np.array([p["v_root"] for p, _z, _m in gen_pos], dtype=np.float32)
-        # gen_pos interleaves both players; policy_mask==1 is the learner.
-        lrn = policy_mask == 1.0
+        cand_mk = np.stack([p["cand_mask"] for p, *_ in gen_pos]).astype(bool)
+        pi_tgt = np.stack([p["pi"] for p, *_ in gen_pos]).astype(np.float32)
+        value_tgt = np.array([t for _p, t, _z, _n in gen_pos], dtype=np.float32)
+        outcome_z = np.array([z for _p, _t, z, _n in gen_pos], dtype=np.float32)
+        steps_to_end = np.array([n for _p, _t, _z, n in gen_pos], dtype=np.int64)
+        v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
         # Search exploration: how the root visit mass spreads over legal candidates.
         # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
-        pi_l = pi_tgt[lrn]
-        p_nz = np.where(pi_l > 0.0, pi_l, 1.0)  # 0*log(0) = 0
-        visit_perplexity = np.exp(-(pi_l * np.log(p_nz)).sum(axis=1))
-        top1_visit_share = pi_l.max(axis=1)
-        visit_coverage = (pi_l > 0.0).sum(axis=1) / np.maximum(
-            cand_mk[lrn].sum(axis=1), 1
-        )
-        root_cands_visited = (pi_l > 0.0).sum(axis=1)
+        p_nz = np.where(pi_tgt > 0.0, pi_tgt, 1.0)  # 0*log(0) = 0
+        visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
+        top1_visit_share = pi_tgt.max(axis=1)
+        visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
+        root_cands_visited = (pi_tgt > 0.0).sum(axis=1)
 
         replay.append(
             {
@@ -657,7 +665,6 @@ def main(args):
                 "cand_mask": cand_mk,
                 "pi_target": pi_tgt,
                 "value_target": value_tgt,
-                "policy_mask": policy_mask,
             }
         )
         replay_size += n_new
@@ -682,16 +689,16 @@ def main(args):
             .prefetch(tf.data.AUTOTUNE)
         )
 
-        # update_kl over a fixed-size slice of this gen's new LEARNER positions (one trace).
-        learner_idx = np.flatnonzero(policy_mask == 1.0)[:mini_batch_size]
-        measure_kl = len(learner_idx) >= mini_batch_size
+        # update_kl over a fixed-size slice of this generation's new positions (one trace).
+        measure_kl = n_new >= mini_batch_size
         if measure_kl:
+            sl = slice(0, mini_batch_size)
             gi = (
-                tf.constant(boards[learner_idx]),
-                tf.constant(pieces[learner_idx]),
-                tf.constant(bcg[learner_idx]),
-                tf.constant(cand_pl[learner_idx]),
-                tf.constant(cand_mk[learner_idx]),
+                tf.constant(boards[sl]),
+                tf.constant(pieces[sl]),
+                tf.constant(bcg[sl]),
+                tf.constant(cand_pl[sl]),
+                tf.constant(cand_mk[sl]),
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
 
@@ -721,7 +728,7 @@ def main(args):
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
         app_learner = learner_attack / learner_placements if learner_placements else 0.0
-        dec = (value_tgt != 0.0) & lrn  # learner positions only
+        dec = outcome_z != 0.0
         if (
             dec.sum() >= 2
             and np.std(v_root[dec]) > 1e-6
@@ -730,20 +737,13 @@ def main(args):
             value_calibration = float(np.corrcoef(v_root[dec], value_tgt[dec])[0, 1])
         else:
             value_calibration = 0.0
+        grounding = _grounding(v_root, outcome_z, steps_to_end)
 
-        # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
-        # bookkeeping already ran pre-skip; a new snapshot registers + refits here
+        # Rating bookkeeping already ran pre-skip; a new snapshot registers + refits here
         # so ratings.json includes it immediately.
-        if decisive > 0:
-            wr_ema = 0.9 * wr_ema + 0.1 * win_rate
-        if (
-            gen > 0
-            and gen % pool_interval == 0
-            and decisive >= 8
-            and wr_ema >= pool_wr_gate
-        ):
+        if gen > 0 and gen % pool_interval == 0:
             _save_pool(net, gen, pool_dir, max_pool_size)
-            print(f"Saved opponent-pool gen_{gen} (wr_ema {wr_ema:.3f}).", flush=True)
+            print(f"Saved opponent-pool gen_{gen}.", flush=True)
             if whr is not None:
                 whr.register_snapshot(f"gen_{gen}")
                 whr.fit(gen=gen, full_sigma=True)
@@ -788,10 +788,10 @@ def main(args):
                 app=app,
                 app_learner=app_learner,
                 value_calibration=value_calibration,
-                avg_b2b=float(bcg[lrn, 0].mean()),
-                max_b2b=float(bcg[lrn, 0].max()),
-                avg_combo=float(bcg[lrn, 1].mean()),
-                surge_rate=float((bcg[lrn, 0] >= 4).mean()),
+                avg_b2b=float(bcg[:, 0].mean()),
+                max_b2b=float(bcg[:, 0].max()),
+                avg_combo=float(bcg[:, 1].mean()),
+                surge_rate=float((bcg[:, 0] >= 4).mean()),
                 b2b_at_death=_mean_or_none(b2b_at_death),
                 b2b_at_cashout=_mean_or_none(b2b_at_cashout),
                 episode_max_b2b=_mean_or_none(episode_max_b2b),
@@ -814,6 +814,7 @@ def main(args):
                 completed_games=n_games,
                 pool_size=len(present),
                 elo=elo_tags,
+                grounding=grounding,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )

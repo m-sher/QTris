@@ -254,7 +254,6 @@ class OneVsOnePlacementAZConfig(BaseModel):
     replay_capacity: int
     max_pool_size: int = 30
     pool_interval: int = 10
-    pool_wr_gate: float = 0.55
     eval_interval: int = 10
     eval_games: int = 8
     td_lambda: float = 0.9
@@ -339,12 +338,16 @@ class OneVsOneAZLog(LogPayloadModel):
     # Opponent-pool Elo: pre-formatted "elo/..." tags spliced in by to_payload.
     elo: dict[str, float] = {}
 
+    # corr/Brier of the root value against the realized outcome, per steps-to-end bucket.
+    grounding: dict[str, float | None] = {}
+
     # Visualization (wrapped at log time)
     board: np.ndarray
 
     def to_payload(self) -> dict[str, Any]:
         d = super().to_payload()
         d.update(d.pop("elo", {}))
+        d.update({f"grounding/{k}": v for k, v in d.pop("grounding", {}).items()})
         return d
 
     _image_fields: tuple[str, ...] = ("board",)
