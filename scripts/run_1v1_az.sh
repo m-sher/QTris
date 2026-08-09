@@ -3,6 +3,12 @@ set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")/.."
 
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+fi
+
 mkdir -p logs
 ts="$(date +%Y%m%d_%H%M%S)"
 log="logs/1v1_az_${ts}.log"
