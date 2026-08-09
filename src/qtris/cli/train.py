@@ -119,8 +119,9 @@ def main() -> None:
     az.add_argument(
         "--gamma",
         type=float,
-        default=0.99,
-        help="discount for MCTS backup + MC return target.",
+        default=None,
+        help="placement single-player only: discount for MCTS backup + MC return target "
+        "(default 0.99). Rejected for placement 1v1, whose reward is terminal-only.",
     )
     az.add_argument(
         "--temp-moves",
@@ -278,6 +279,12 @@ def main() -> None:
             if args.algo != "az":
                 parser.error(
                     "placement 1v1 supports only --algo az (opponent-pool AlphaZero)."
+                )
+            if args.gamma is not None:
+                parser.error(
+                    "placement 1v1 does not accept --gamma: its reward is terminal-only "
+                    "(z in {-1,0,1}) and the TD(lambda) target is undiscounted. Use "
+                    "--td-lambda to trade outcome grounding against bootstrap."
                 )
             from qtris.training._1v1_placement_az import main as run
         else:

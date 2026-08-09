@@ -293,12 +293,13 @@ def main(args):
             raise SystemExit(f"--trace-tiers: unknown tiers {missing}.")
         trace_pools = {t: trace_pools[t] for t in sorted(keep)}
 
+    gamma = getattr(args, "gamma", None)
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
         c_puct=getattr(args, "c_puct", 1.5),
         dirichlet_alpha=getattr(args, "dirichlet_alpha", 0.3),
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
-        gamma=getattr(args, "gamma", GAMMA),
+        gamma=GAMMA if gamma is None else gamma,
         temp_moves=getattr(args, "temp_moves", 12),
         w_attack=getattr(args, "w_attack", 1.0),
         w_death=getattr(args, "w_death", 100.0),
