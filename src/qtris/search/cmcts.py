@@ -43,7 +43,11 @@ def _load_lib():
         + [ctypes.c_float] * 5
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
-        + [ctypes.c_float]  # w_b2b
+        + [
+            ctypes.c_float,
+            ctypes.c_int,
+            ctypes.c_float,
+        ]  # w_b2b, fpu_relative, fpu_reduction
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
@@ -93,6 +97,62 @@ def _load_lib():
     lib.mcts_result.restype = None
     lib.mcts_destroy.argtypes = [ctypes.c_void_p]
     lib.mcts_destroy.restype = None
+    # Tree export bindings.
+    try:
+        lib.mcts_export_api_version.argtypes = []
+        lib.mcts_export_api_version.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_export_api_version); rebuild tetrisenv"
+        ) from None
+    export_ver = int(lib.mcts_export_api_version())
+    if export_ver < 1:
+        raise RuntimeError(
+            f"mcts_export_api_version={export_ver} unsupported; rebuild tetrisenv"
+        )
+    _CINT = ctypes.POINTER(ctypes.c_int)
+    _CF32 = ctypes.POINTER(ctypes.c_float)
+    lib.mcts_export_tree_info.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        _CINT,
+        _CINT,
+        _CINT,
+        _CINT,
+        _CF32,
+        _CF32,
+        _CF32,
+        _CF32,
+        _CF32,
+        _CF32,
+        _CF32,
+        _CINT,
+        _CF32,
+        _CF32,
+    ]
+    lib.mcts_export_tree_info.restype = ctypes.c_int
+    lib.mcts_export_tree.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        _I32,
+        _I32,
+        _I32,
+        _I32,
+        _U8,
+        _U8,
+        _U8,
+        _F32,
+        _I32,
+        _I32,
+        _I32,
+        _F32,
+        _F32,
+        _F32,
+        _F32,
+        _F32,
+        _I32,
+    ]
+    lib.mcts_export_tree.restype = None
     return lib
 
 
@@ -120,6 +180,8 @@ class CMCTS:
         leaves_per_round=4,
         vloss=1.0,
         w_b2b=0.0,
+        fpu_relative=0,
+        fpu_reduction=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -158,6 +220,8 @@ class CMCTS:
             self.lpr,
             vloss,
             w_b2b,
+            int(fpu_relative),
+            fpu_reduction,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
@@ -256,6 +320,126 @@ class CMCTS:
         desc = self._desc.reshape(self.n, self.cap, 5).copy()
         dead = self._dead.astype(bool).copy()
         return pi, counts, desc, dead
+
+    def export_tree(self, tree=0):
+        """Snapshot one finished tree (after result(), before destroy). None when the tree
+        is dead or has no root.
+
+        Returns a dict of numpy arrays: node_* (length n_nodes) and edge_* (length
+        n_edges), plus cfg scalars and root_value. Child/parent links are pool indices.
+        Root edge_prior is the search prior as stored (post-Dirichlet mix when noise
+        was applied).
+        """
+        n_nodes = ctypes.c_int()
+        n_edges = ctypes.c_int()
+        root_idx = ctypes.c_int()
+        pool_cap = ctypes.c_int()
+        c_puct = ctypes.c_float()
+        gamma = ctypes.c_float()
+        vloss = ctypes.c_float()
+        return_scale = ctypes.c_float()
+        w_attack = ctypes.c_float()
+        w_death = ctypes.c_float()
+        w_b2b = ctypes.c_float()
+        fpu_relative = ctypes.c_int()
+        fpu_reduction = ctypes.c_float()
+        root_value = ctypes.c_float()
+        rc = int(
+            self.lib.mcts_export_tree_info(
+                self.h,
+                int(tree),
+                ctypes.byref(n_nodes),
+                ctypes.byref(n_edges),
+                ctypes.byref(root_idx),
+                ctypes.byref(pool_cap),
+                ctypes.byref(c_puct),
+                ctypes.byref(gamma),
+                ctypes.byref(vloss),
+                ctypes.byref(return_scale),
+                ctypes.byref(w_attack),
+                ctypes.byref(w_death),
+                ctypes.byref(w_b2b),
+                ctypes.byref(fpu_relative),
+                ctypes.byref(fpu_reduction),
+                ctypes.byref(root_value),
+            )
+        )
+        if rc != 0:
+            return None
+        nn, ne = int(n_nodes.value), int(n_edges.value)
+        node_depth = np.zeros(nn, np.int32)
+        node_parent = np.zeros(nn, np.int32)
+        node_parent_slot = np.zeros(nn, np.int32)
+        node_n_legal = np.zeros(nn, np.int32)
+        node_terminal = np.zeros(nn, np.uint8)
+        node_expanded = np.zeros(nn, np.uint8)
+        node_awaiting_eval = np.zeros(nn, np.uint8)
+        node_value = np.zeros(nn, np.float32)
+        edge_parent = np.zeros(ne, np.int32)
+        edge_slot = np.zeros(ne, np.int32)
+        edge_child = np.zeros(ne, np.int32)
+        edge_prior = np.zeros(ne, np.float32)
+        edge_N = np.zeros(ne, np.float32)
+        edge_W = np.zeros(ne, np.float32)
+        edge_Q = np.zeros(ne, np.float32)
+        edge_reward = np.zeros(ne, np.float32)
+        edge_desc = np.zeros(ne * 5, np.int32)
+        self.lib.mcts_export_tree(
+            self.h,
+            int(tree),
+            node_depth,
+            node_parent,
+            node_parent_slot,
+            node_n_legal,
+            node_terminal,
+            node_expanded,
+            node_awaiting_eval,
+            node_value,
+            edge_parent,
+            edge_slot,
+            edge_child,
+            edge_prior,
+            edge_N,
+            edge_W,
+            edge_Q,
+            edge_reward,
+            edge_desc,
+        )
+        return {
+            "n_nodes": nn,
+            "n_edges": ne,
+            "root_idx": int(root_idx.value),
+            "pool_cap": int(pool_cap.value),
+            "root_value": float(root_value.value),
+            "cfg": {
+                "c_puct": float(c_puct.value),
+                "gamma": float(gamma.value),
+                "vloss": float(vloss.value),
+                "return_scale": float(return_scale.value),
+                "w_attack": float(w_attack.value),
+                "w_death": float(w_death.value),
+                "w_b2b": float(w_b2b.value),
+                "fpu_relative": int(fpu_relative.value),
+                "fpu_reduction": float(fpu_reduction.value),
+            },
+            "node_depth": node_depth,
+            "node_parent": node_parent,
+            "node_parent_slot": node_parent_slot,
+            "node_n_legal": node_n_legal,
+            "node_terminal": node_terminal.astype(bool),
+            "node_expanded": node_expanded.astype(bool),
+            "node_awaiting_eval": node_awaiting_eval.astype(bool),
+            "node_value": node_value,
+            "edge_parent": edge_parent,
+            "edge_slot": edge_slot,
+            "edge_child": edge_child,
+            "edge_prior": edge_prior,
+            "edge_N": edge_N,
+            "edge_W": edge_W,
+            "edge_Q": edge_Q,
+            "edge_reward": edge_reward,
+            "edge_desc": edge_desc.reshape(ne, 5) if ne else edge_desc.reshape(0, 5),
+        }
 
     def destroy(self):
         if self.h:

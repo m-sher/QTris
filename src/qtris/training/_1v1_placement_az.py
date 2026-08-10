@@ -263,12 +263,23 @@ def _sample_pool(opp_net, pool_dir):
 
 
 def _eval_vs_ref(
-    learner_mcts, ref_mcts, n_games, queue_size, max_len, max_steps, rng, searcher
+    learner_mcts,
+    ref_mcts,
+    n_games,
+    queue_size,
+    max_len,
+    max_steps,
+    rng,
+    searcher,
+    seed0,
 ):
     """(wins, losses, draws) of the learner (player 1) vs the frozen reference (player 2),
     both greedy, played to completion on fresh games. Batched over still-live games each
-    round. Draws (timeouts + double-KOs) are informative half-wins for the rating fit."""
-    pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
+    round. Draws (timeouts + double-KOs) enter the rating fit as half-wins.
+
+    Games use seeds seed0..seed0+n_games-1, so `seed0` must stride by at least n_games
+    between calls."""
+    pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=seed0)
     for e1, e2 in pairs:
         e1._reset()
         e2._reset()
@@ -323,8 +334,10 @@ def main(args):
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)
     eval_interval = getattr(args, "eval_interval", 10)
-    eval_games = getattr(args, "eval_games", 8)
+    eval_games = getattr(args, "eval_games", 32)
     td_lambda = getattr(args, "td_lambda", 0.9)
+    fpu_relative = int(getattr(args, "fpu_relative", False))
+    fpu_reduction = getattr(args, "fpu_reduction", 0.0)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -354,6 +367,8 @@ def main(args):
         w_attack=getattr(args, "w_attack", 0.05),
         w_death=1.0,
         w_b2b=getattr(args, "w_b2b", 0.06),
+        fpu_relative=int(getattr(args, "fpu_relative", False)),
+        fpu_reduction=getattr(args, "fpu_reduction", 0.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -444,6 +459,8 @@ def main(args):
         eval_interval=eval_interval,
         eval_games=eval_games,
         td_lambda=td_lambda,
+        fpu_relative=fpu_relative,
+        fpu_reduction=fpu_reduction,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -619,6 +636,7 @@ def main(args):
                 max_game_steps,
                 rng,
                 searcher,
+                9001 + gen * eval_games,
             )
             last_ref_dec = ref_wins + ref_losses
             if last_ref_dec:  # hold the previous value across all-draw evals

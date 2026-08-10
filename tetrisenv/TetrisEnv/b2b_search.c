@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
@@ -3282,6 +3283,9 @@ typedef struct {
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
+    int fpu_relative;            // 0: unvisited children score 0. 1: they score the parent's
+                                 // mean backed-up return minus fpu_reduction.
+    float fpu_reduction;
 } MConfig;
 
 typedef struct MNode {
@@ -3292,6 +3296,9 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
+    // Real-backup totals over this node's edges. mtree_backup is the only writer, so these
+    // stay free of the virtual loss that N/W/Q carry while a round's leaves are in flight.
+    float w_clean, n_clean;
     struct MNode* child[MCAP];
 } MNode;
 
@@ -3497,10 +3504,13 @@ static int mcts_select(const MNode* node, const MConfig* cfg) {
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
     float best = -1e30f; int best_slot = node->legal[0];
     float sq = sqrtf(total + 1e-8f);
+    float fpu = (cfg->fpu_relative && node->n_clean > 0.0f)
+                    ? node->w_clean / node->n_clean - cfg->fpu_reduction
+                    : 0.0f;
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         float n = node->N[slot];
-        float q = n > 0 ? node->Q[slot] : 0.0f;
+        float q = n > 0 ? node->Q[slot] : fpu;
         float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
@@ -3516,6 +3526,8 @@ static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
         node->N[slot] += 1.0f;
         node->W[slot] += g;
         node->Q[slot] = node->W[slot] / node->N[slot];
+        node->w_clean += g;
+        node->n_clean += 1.0f;
     }
 }
 
@@ -3626,7 +3638,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss, float w_b2b) {
+                  int leaves_per_round, float vloss, float w_b2b, int fpu_relative,
+                  float fpu_reduction) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3661,6 +3674,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
     e->cfg.leaves_per_round = leaves_per_round;
     e->cfg.vloss = vloss;
+    e->cfg.fpu_relative = fpu_relative;
+    e->cfg.fpu_reduction = fpu_reduction;
     e->trees = (MTree*)calloc(num_trees, sizeof(MTree));
     for (int i = 0; i < num_trees; i++) {
         e->trees[i].pool = (MNode*)calloc((size_t)max_nodes, sizeof(MNode));
@@ -3815,6 +3830,125 @@ void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead) {
     }
 }
 
+// --- tree export: read-only snapshot, call after the final apply_leaves / mcts_result and
+//     before mcts_destroy. Child links are pool indices (n - pool). Root prior is the search
+//     prior as stored (post-Dirichlet mix when noise was applied). ---
+int mcts_export_api_version(void) { return 1; }
+
+static int mcts_pool_index(const MTree* t, const MNode* n) {
+    if (n == NULL) return -1;
+    ptrdiff_t off = n - t->pool;
+    if (off < 0 || off >= t->pool_used) return -1;
+    return (int)off;
+}
+
+// Sizes + cfg scalars for one tree. Returns 0 ok, -1 if dead/missing.
+int mcts_export_tree_info(void* h, int tree,
+                          int* out_n_nodes, int* out_n_edges, int* out_root_idx, int* out_pool_cap,
+                          float* out_c_puct, float* out_gamma, float* out_vloss,
+                          float* out_return_scale, float* out_w_attack, float* out_w_death,
+                          float* out_w_b2b, int* out_fpu_relative, float* out_fpu_reduction,
+                          float* out_root_value) {
+    MEngine* e = (MEngine*)h;
+    if (tree < 0 || tree >= e->num_trees) return -1;
+    MTree* t = &e->trees[tree];
+    if (!t->alive || t->root == NULL) return -1;
+    *out_n_nodes = t->pool_used;
+    *out_pool_cap = t->pool_cap;
+    *out_root_idx = mcts_pool_index(t, t->root);
+    int ne = 0;
+    for (int i = 0; i < t->pool_used; i++) {
+        if (t->pool[i].expanded) ne += t->pool[i].n_legal;
+    }
+    *out_n_edges = ne;
+    *out_c_puct = e->cfg.c_puct;
+    *out_gamma = e->cfg.gamma;
+    *out_vloss = e->cfg.vloss;
+    *out_return_scale = e->cfg.return_scale;
+    *out_w_attack = e->cfg.w_attack;
+    *out_w_death = e->cfg.w_death;
+    *out_w_b2b = e->cfg.w_b2b;
+    *out_fpu_relative = e->cfg.fpu_relative;
+    *out_fpu_reduction = e->cfg.fpu_reduction;
+    *out_root_value = t->root->value;
+    return 0;
+}
+
+// Fill pre-sized buffers (n_nodes / n_edges from mcts_export_tree_info). Serial only.
+void mcts_export_tree(void* h, int tree,
+                      int32_t* node_depth, int32_t* node_parent, int32_t* node_parent_slot,
+                      int32_t* node_n_legal,
+                      uint8_t* node_terminal, uint8_t* node_expanded, uint8_t* node_awaiting_eval,
+                      float* node_value,
+                      int32_t* edge_parent, int32_t* edge_slot, int32_t* edge_child,
+                      float* edge_prior, float* edge_N, float* edge_W, float* edge_Q,
+                      float* edge_reward, int32_t* edge_desc) {
+    MEngine* e = (MEngine*)h;
+    if (tree < 0 || tree >= e->num_trees) return;
+    MTree* t = &e->trees[tree];
+    if (!t->alive || t->root == NULL || t->pool_used <= 0) return;
+    int n_nodes = t->pool_used;
+
+    for (int i = 0; i < n_nodes; i++) {
+        node_depth[i] = -1;
+        node_parent[i] = -1;
+        node_parent_slot[i] = -1;
+        node_n_legal[i] = t->pool[i].n_legal;
+        node_terminal[i] = t->pool[i].terminal ? 1 : 0;
+        node_expanded[i] = t->pool[i].expanded ? 1 : 0;
+        node_awaiting_eval[i] = t->pool[i].awaiting_eval ? 1 : 0;
+        node_value[i] = t->pool[i].value;
+    }
+
+    // BFS parent/depth via non-NULL children from root.
+    int root_idx = mcts_pool_index(t, t->root);
+    if (root_idx < 0) return;
+    int* q = (int*)malloc((size_t)n_nodes * sizeof(int));
+    if (q == NULL) return;
+    int qh = 0, qt = 0;
+    node_depth[root_idx] = 0;
+    node_parent[root_idx] = -1;
+    node_parent_slot[root_idx] = -1;
+    q[qt++] = root_idx;
+    while (qh < qt) {
+        int ui = q[qh++];
+        MNode* u = &t->pool[ui];
+        for (int k = 0; k < u->n_legal; k++) {
+            int slot = u->legal[k];
+            MNode* ch = u->child[slot];
+            if (ch == NULL) continue;
+            int ci = mcts_pool_index(t, ch);
+            if (ci < 0) continue;
+            if (node_depth[ci] >= 0) continue;  // already visited (should not multi-parent)
+            node_depth[ci] = node_depth[ui] + 1;
+            node_parent[ci] = ui;
+            node_parent_slot[ci] = slot;
+            q[qt++] = ci;
+        }
+    }
+    free(q);
+
+    // Sparse edges: every legal slot of every expanded node.
+    int ei = 0;
+    for (int i = 0; i < n_nodes; i++) {
+        MNode* node = &t->pool[i];
+        if (!node->expanded) continue;
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            edge_parent[ei] = i;
+            edge_slot[ei] = slot;
+            edge_child[ei] = mcts_pool_index(t, node->child[slot]);
+            edge_prior[ei] = node->prior[slot];
+            edge_N[ei] = node->N[slot];
+            edge_W[ei] = node->W[slot];
+            edge_Q[ei] = node->Q[slot];
+            edge_reward[ei] = node->edge_reward[slot];
+            for (int d = 0; d < 5; d++) edge_desc[ei * 5 + d] = node->desc[slot][d];
+            ei++;
+        }
+    }
+}
+
 void mcts_destroy(void* h) {
     MEngine* e = (MEngine*)h;
     if (!e) return;
@@ -3828,10 +3962,9 @@ void mcts_destroy(void* h) {
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 17; }
+int mcts_create_arity(void) { return 19; }
 
-// --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
-//     deterministic core after a subtree re-sync re-applies these edits) ---
+// --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.
 int mcts_debug_enum(const uint16_t* board, int board_height, int active, int hold, int queue0,
                     int max_len, int* out_desc) {

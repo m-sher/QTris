@@ -35,6 +35,10 @@ class MCTSConfig:
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
     w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
+    # fpu_relative 0: unvisited children score 0. 1: they score the parent's mean backed-up
+    # return (visit-weighted over its children) minus fpu_reduction.
+    fpu_relative: int = 0
+    fpu_reduction: float = 0.0
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -105,13 +109,16 @@ class PlacementMCTS:
         probs = probs / probs.sum()
         return int(np.random.choice(legal, p=probs))
 
-    def search(self, real_envs, return_scale, temperatures):
+    def search(self, real_envs, return_scale, temperatures, *, export_trees=False):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
         {dead: True} or {dead: False, pi, pi_clean, slot, descriptor, visits, value, board,
         pieces, bcg, cand_placements, cand_mask, logits, noise}. `descriptor` = (is_hold, rot,
         norm_col, landing_row, spin); commit the real move via
-        `placement_step(env, searcher, descriptor)`."""
+        `placement_step(env, searcher, descriptor)`.
+
+        When `export_trees=True`, each live result also carries `tree` (a node/edge snapshot
+        from `CMCTS.export_tree`) and `counts` (root visit counts)."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -138,7 +145,10 @@ class PlacementMCTS:
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
+            fpu_relative=self.cfg.fpu_relative,
+            fpu_reduction=self.cfg.fpu_reduction,
         )
+        trees = None
         try:
             for i, env in enumerate(real_envs):
                 engine.set_root(i, env)
@@ -181,6 +191,8 @@ class PlacementMCTS:
                 engine.apply_leaves(logits, values)
 
             pi, counts, desc, dead = engine.result()
+            if export_trees:
+                trees = [engine.export_tree(i) for i in range(n)]
         finally:
             engine.destroy()
 
@@ -198,17 +210,19 @@ class PlacementMCTS:
                 self.cfg.dirichlet_eps,
                 obs[i]["cand_mask"],
             )
-            results.append(
-                {
-                    "dead": False,
-                    "pi": pi[i],
-                    "pi_clean": pi_clean if pi_clean is not None else pi[i],
-                    "slot": slot,
-                    "descriptor": tuple(int(x) for x in desc[i, slot]),
-                    "visits": int(counts[i].sum()),
-                    **obs[i],
-                }
-            )
+            row = {
+                "dead": False,
+                "pi": pi[i],
+                "pi_clean": pi_clean if pi_clean is not None else pi[i],
+                "slot": slot,
+                "descriptor": tuple(int(x) for x in desc[i, slot]),
+                "visits": int(counts[i].sum()),
+                **obs[i],
+            }
+            if trees is not None:
+                row["tree"] = trees[i]
+                row["counts"] = counts[i].copy()
+            results.append(row)
         return results
 
     def root_values(self, real_envs):
@@ -238,6 +252,8 @@ class PlacementMCTS:
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
+            fpu_relative=self.cfg.fpu_relative,
+            fpu_reduction=self.cfg.fpu_reduction,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

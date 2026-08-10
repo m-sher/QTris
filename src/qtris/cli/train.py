@@ -68,7 +68,7 @@ def main() -> None:
     az.add_argument(
         "--eval-games",
         type=int,
-        default=8,
+        default=32,
         help="placement 1v1 only: games per win_rate_vs_ref eval.",
     )
     az.add_argument(
@@ -116,6 +116,19 @@ def main() -> None:
         default=None,
         help="placement single-player only: discount for MCTS backup + MC return target "
         "(default 0.99). Rejected for placement 1v1, whose reward is terminal-only.",
+    )
+    az.add_argument(
+        "--fpu-relative",
+        action="store_true",
+        help="placement 1v1 only: score unvisited children at the parent's mean backed-up "
+        "return minus --fpu-reduction instead of at 0.",
+    )
+    az.add_argument(
+        "--fpu-reduction",
+        type=float,
+        default=0.0,
+        help="placement 1v1 only: reduction subtracted from the parent's mean backed-up "
+        "return to price an unvisited child. Only read when --fpu-relative is set.",
     )
     az.add_argument(
         "--temp-moves",
