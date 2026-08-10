@@ -257,6 +257,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     eval_interval: int = 10
     eval_games: int = 32
     td_lambda: float = 0.9
+    td_blend: float = 0.0
+    blend_horizon: int = 16
     fpu_relative: int = 0
     fpu_reduction: float = 0.0
     resumed: bool = False
@@ -343,6 +345,11 @@ class OneVsOneAZLog(LogPayloadModel):
     # corr/Brier of the root value against the realized outcome, per steps-to-end bucket.
     grounding: dict[str, float | None] = {}
 
+    # Mean Ahat and its two channels over the generation's rows; None when td_blend is 0.
+    ahat_mean: Optional[float] = None
+    ahat_b2b: Optional[float] = None
+    ahat_atk: Optional[float] = None
+
     # Visualization (wrapped at log time)
     board: np.ndarray
 
@@ -401,6 +408,7 @@ class OneVsOneAZLog(LogPayloadModel):
             "visit_coverage",
             "root_cands_visited",
         ),
+        "blend": ("ahat_mean", "ahat_b2b", "ahat_atk"),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
     }
 

@@ -118,6 +118,19 @@ def main() -> None:
         "(default 0.99). Rejected for placement 1v1, whose reward is terminal-only.",
     )
     az.add_argument(
+        "--td-blend",
+        type=float,
+        default=0.0,
+        help="placement 1v1 only: weight of the realized near-term production channel in "
+        "the value target; 0 disables the blend. Terminal rows stay pure z.",
+    )
+    az.add_argument(
+        "--blend-horizon",
+        type=int,
+        default=16,
+        help="placement 1v1 only: forward window (placements) for the blend channels.",
+    )
+    az.add_argument(
         "--fpu-relative",
         action="store_true",
         help="placement 1v1 only: score unvisited children at the parent's mean backed-up "

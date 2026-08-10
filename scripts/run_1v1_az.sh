@@ -18,7 +18,7 @@ setsid uv run train placement --mode 1v1 --algo az \
   --num-games 16 --horizon 64 --num-simulations 256 --leaves-per-round 8 \
   --batch-size 512 --max-game-steps 512 --eval-interval 10 --w-b2b 0.0 \
   --w-attack 0.0 --td-lambda 0.9 --num-epochs 4 \
-  --fpu-relative --fpu-reduction 0.50 --wandb \
+  --fpu-relative --fpu-reduction 0.50 --td-blend 0.15 --blend-horizon 16 --wandb \
   >"$log" 2>&1 </dev/null &
 
 pid=$!

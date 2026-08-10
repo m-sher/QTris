@@ -3590,8 +3590,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 node->child[slot] = leaf;
                 // Death (top-out/holes, or a resulting no-legal position) is the loss signal.
                 // The attack part goes through the reward clip; the w_death penalty is applied
-                // UNCLIPPED (return_scale units only) so raising w_death actually deepens the
-                // terminal Q instead of saturating at -MCLIP and being tuned away.
+                // UNCLIPPED (return_scale units only).
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
