@@ -234,8 +234,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
 
     TD(lambda) value target built from the outcome z in {-1,0,+1}; w_death=1, gamma=1,
-    return_scale=1. The learner duels frozen snapshots sampled from a disk pool; only the
-    learner's trajectory is trained."""
+    return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
+    players' trajectories train the value head, the learner's also the policy."""
 
     num_games: int
     horizon: int
@@ -254,6 +254,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     replay_capacity: int
     max_pool_size: int = 30
     pool_interval: int = 10
+    pool_wr_gate: float = 0.55
     eval_interval: int = 10
     eval_games: int = 32
     td_lambda: float = 0.9

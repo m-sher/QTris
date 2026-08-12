@@ -61,6 +61,9 @@ def warm_start_policy_only(net, warm):
 @tf.function
 def train_step(net, batch, value_coef):
     cand_mask = batch["cand_mask"]
+    # Optional per-position policy weight: 1 trains policy and value on the row, 0 value
+    # only. Absent for solo AZ, where the policy terms reduce to plain means.
+    pm = batch.get("policy_mask")
     with tf.GradientTape() as tape:
         logits, values = net(
             (
@@ -75,7 +78,11 @@ def train_step(net, batch, value_coef):
         masked = tf.where(cand_mask, logits, tf.constant(-1e9, tf.float32))
         log_probs = tf.nn.log_softmax(masked, axis=-1)
         ce = -tf.reduce_sum(batch["pi_target"] * log_probs, axis=-1)
-        policy_loss = tf.reduce_mean(ce)
+        if pm is not None:
+            pnorm = tf.reduce_sum(pm) + 1e-8
+            policy_loss = tf.reduce_sum(pm * ce) / pnorm
+        else:
+            policy_loss = tf.reduce_mean(ce)
         value_loss = tf.reduce_mean((values[:, 0] - batch["value_target"]) ** 2)
         loss = policy_loss + value_coef * value_loss
 
@@ -88,8 +95,12 @@ def train_step(net, batch, value_coef):
     # Exact KL(pi_target || p_net) = CE - H(pi_target); zero target arms contribute 0.
     tgt = batch["pi_target"]
     tgt_ent = -tf.reduce_sum(tgt * tf.math.log(tgt + 1e-12), axis=-1)
-    entropy = tf.reduce_mean(ent)
-    tgt_entropy = tf.reduce_mean(tgt_ent)
+    if pm is not None:
+        entropy = tf.reduce_sum(pm * ent) / pnorm
+        tgt_entropy = tf.reduce_sum(pm * tgt_ent) / pnorm
+    else:
+        entropy = tf.reduce_mean(ent)
+        tgt_entropy = tf.reduce_mean(tgt_ent)
     ret_var = tf.math.reduce_variance(batch["value_target"])
     res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
