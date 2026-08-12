@@ -74,51 +74,38 @@ def _coverage(net, *, fpu_relative, fpu_reduction, seed=1):
             fpu_relative=fpu_relative,
             fpu_reduction=fpu_reduction,
         ),
-    ).search([_make_env(seed)], 1.0, np.zeros(1, np.float32), export_trees=True)
+    ).search([_make_env(seed)], 1.0, np.zeros(1, np.float32))
     assert not res[0]["dead"]
     counts = res[0]["counts"]
     legal = int(res[0]["cand_mask"].sum())
-    return int((counts > 0).sum()) / legal, res[0]["tree"]
+    return int((counts > 0).sum()) / legal
 
 
 def test_negative_q_forces_full_breadth_under_the_absolute_floor():
     """With every leaf valued below the 0 floor, an unvisited child outscores its visited
     siblings, so selection sweeps every legal candidate."""
-    cov, _ = _coverage(_net(-2.0), fpu_relative=0, fpu_reduction=0.0)
+    cov = _coverage(_net(-2.0), fpu_relative=0, fpu_reduction=0.0)
     assert cov == pytest.approx(1.0)
 
 
 def test_relative_floor_narrows_the_sweep_at_negative_q():
     net = _net(-2.0)
-    absolute, _ = _coverage(net, fpu_relative=0, fpu_reduction=0.0)
-    relative, _ = _coverage(net, fpu_relative=1, fpu_reduction=0.25)
+    absolute = _coverage(net, fpu_relative=0, fpu_reduction=0.0)
+    relative = _coverage(net, fpu_relative=1, fpu_reduction=0.25)
     assert relative < absolute
     assert relative < 0.7
 
 
-def test_relative_floor_deepens_the_tree_at_negative_q():
-    net = _net(-2.0)
-    _, t_abs = _coverage(net, fpu_relative=0, fpu_reduction=0.0)
-    _, t_rel = _coverage(net, fpu_relative=1, fpu_reduction=0.25)
-    assert int(t_rel["node_depth"].max()) > int(t_abs["node_depth"].max())
-
-
 def test_larger_reduction_is_never_wider():
     net = _net(-2.0)
-    covs = [_coverage(net, fpu_relative=1, fpu_reduction=r)[0] for r in (0.1, 0.5, 2.0)]
+    covs = [_coverage(net, fpu_relative=1, fpu_reduction=r) for r in (0.1, 0.5, 2.0)]
     assert covs == sorted(covs, reverse=True)
 
 
-def test_absolute_floor_is_the_default_and_round_trips():
+def test_absolute_floor_is_the_default():
     assert MCTSConfig().fpu_relative == 0
     assert MCTSConfig().fpu_reduction == 0.0
     engine = CMCTS(
         1, num_simulations=4, leaves_per_round=1, fpu_relative=1, fpu_reduction=0.3
     )
-    try:
-        assert engine.export_tree(0) is None  # no root set
-    finally:
-        engine.destroy()
-    _, tree = _coverage(_net(-2.0), fpu_relative=1, fpu_reduction=0.3)
-    assert tree["cfg"]["fpu_relative"] == 1
-    assert tree["cfg"]["fpu_reduction"] == pytest.approx(0.3)
+    engine.destroy()

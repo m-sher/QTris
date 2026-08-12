@@ -109,16 +109,14 @@ class PlacementMCTS:
         probs = probs / probs.sum()
         return int(np.random.choice(legal, p=probs))
 
-    def search(self, real_envs, return_scale, temperatures, *, export_trees=False):
+    def search(self, real_envs, return_scale, temperatures):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
         {dead: True} or {dead: False, pi, pi_clean, slot, descriptor, visits, value, board,
         pieces, bcg, cand_placements, cand_mask, logits, noise}. `descriptor` = (is_hold, rot,
         norm_col, landing_row, spin); commit the real move via
-        `placement_step(env, searcher, descriptor)`.
-
-        When `export_trees=True`, each live result also carries `tree` (a node/edge snapshot
-        from `CMCTS.export_tree`) and `counts` (root visit counts)."""
+        `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
+        counts alongside the normalized `pi`."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -148,7 +146,6 @@ class PlacementMCTS:
             fpu_relative=self.cfg.fpu_relative,
             fpu_reduction=self.cfg.fpu_reduction,
         )
-        trees = None
         try:
             for i, env in enumerate(real_envs):
                 engine.set_root(i, env)
@@ -191,8 +188,6 @@ class PlacementMCTS:
                 engine.apply_leaves(logits, values)
 
             pi, counts, desc, dead = engine.result()
-            if export_trees:
-                trees = [engine.export_tree(i) for i in range(n)]
         finally:
             engine.destroy()
 
@@ -214,14 +209,12 @@ class PlacementMCTS:
                 "dead": False,
                 "pi": pi[i],
                 "pi_clean": pi_clean if pi_clean is not None else pi[i],
+                "counts": counts[i].copy(),
                 "slot": slot,
                 "descriptor": tuple(int(x) for x in desc[i, slot]),
                 "visits": int(counts[i].sum()),
                 **obs[i],
             }
-            if trees is not None:
-                row["tree"] = trees[i]
-                row["counts"] = counts[i].copy()
             results.append(row)
         return results
 
