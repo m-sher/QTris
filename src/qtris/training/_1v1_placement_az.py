@@ -9,7 +9,7 @@ game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recov
 on every position); with td_blend > 0 each non-terminal target is a convex blend with a
 realized near-term production channel (window saturating ratios of b2b level and attack
 rate), while the terminal row stays exactly z. The search runs at w_death=1, gamma=1,
-return_scale=1, w_attack=0.05, w_b2b=0.06; own-death = -1 is the only in-search terminal.
+return_scale=1, w_attack=0, w_b2b=0; own-death = -1 is the only in-search terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z; only the
 learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
@@ -41,6 +41,12 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
+
+
+def _resolve(args, name, default):
+    """Per-family default for a shared CLI flag whose argparse default is None."""
+    v = getattr(args, name, None)
+    return default if v is None else v
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -417,9 +423,9 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=1.0,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=getattr(args, "w_attack", 0.05),
+        w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
-        w_b2b=getattr(args, "w_b2b", 0.06),
+        w_b2b=_resolve(args, "w_b2b", 0.0),
         fpu_relative=int(getattr(args, "fpu_relative", False)),
         fpu_reduction=getattr(args, "fpu_reduction", 0.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),

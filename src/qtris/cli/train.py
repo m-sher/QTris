@@ -176,8 +176,9 @@ def main() -> None:
     az.add_argument(
         "--w-attack",
         type=float,
-        default=1.0,
-        help="per-edge search reward weight on attack (also scales the realized return).",
+        default=None,
+        help="per-edge search reward weight on attack (also scales the realized return). "
+        "Default 1.0 for single-player, 0.0 for placement 1v1.",
     )
     az.add_argument(
         "--w-death",
@@ -188,7 +189,7 @@ def main() -> None:
     az.add_argument(
         "--w-b2b",
         type=float,
-        default=0.06,
+        default=0.0,
         help="placement 1v1 only: potential-based b2b-build search shaping "
         "(Phi=min(max(0,b2b),12); 0=off).",
     )

@@ -245,7 +245,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     dirichlet_alpha: float
     dirichlet_eps: float
     temp_moves: int
-    w_attack: float = 0.05
+    w_attack: float = 0.0
     w_b2b: float = 0.0
     mini_batch_size: int
     num_epochs: int

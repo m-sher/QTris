@@ -39,6 +39,13 @@ from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 GAMMA = 0.99
 
 
+def _resolve_w_attack(args):
+    """--w-attack defaults to None at the CLI; solo resolves it to 1.0 (attack is the
+    solo return), 1v1 resolves to 0.0."""
+    v = getattr(args, "w_attack", None)
+    return 1.0 if v is None else v
+
+
 def _flat(arr, sel):
     """Collapse the (horizon, num_games) leading axes and keep storable rows."""
     return arr.reshape((-1,) + arr.shape[2:])[sel]
@@ -301,7 +308,7 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=GAMMA if gamma is None else gamma,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=getattr(args, "w_attack", 1.0),
+        w_attack=_resolve_w_attack(args),
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),

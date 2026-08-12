@@ -73,9 +73,9 @@ def main(cli_args):
         dirichlet_eps=0.0,
         leaves_per_round=leaves,
         gamma=1.0,
-        w_attack=0.05,
+        w_attack=0.0,
         w_death=1.0,
-        w_b2b=0.06,
+        w_b2b=0.00,
     )
     mcts1 = PlacementMCTS(p1_net, cfg)
     mcts2 = PlacementMCTS(p2_net, cfg)
