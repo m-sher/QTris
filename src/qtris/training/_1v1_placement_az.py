@@ -77,7 +77,7 @@ def _pos(r):
         "bcg": r["bcg"],
         "cand_placements": r["cand_placements"],
         "cand_mask": r["cand_mask"],
-        "pi": r["pi_clean"],
+        "pi": r["pi"],
         "v_root": r["value"],
     }
 
