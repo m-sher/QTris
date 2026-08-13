@@ -121,13 +121,10 @@ typedef struct {
     int b2b;
     int combo;
     float total_attack;
-    int total_lines_cleared;   // Total lines cleared in this search path
     int pieces_placed;         // Pieces placed along this search path (for APP denom)
     int hold_piece;
     int next_queue_idx;
     int depth0_placement_idx;  // Which placement was chosen at depth 0 (for output)
-    bool b2b_broken;
-    int prev_b2b;
     int garbage_remaining;   // Simulated garbage rows not yet pushed
     int garbage_timer;       // Ticks until next garbage push (decremented on non-clear)
     float garbage_prevented; // Cumulative garbage lines kept off the board along this path:
@@ -834,7 +831,6 @@ typedef struct {
     float attack;
     int new_b2b;
     int new_combo;
-    bool b2b_broken;
     bool b2b_maintaining;  // true if this clear kept/started b2b (spin/tetris/PC)
     float surge;
 } AttackResult;
@@ -845,7 +841,6 @@ static AttackResult compute_attack(int clears, int spin_type, int b2b, int combo
     res.attack = 0;
     res.new_b2b = b2b;
     res.new_combo = combo;
-    res.b2b_broken = false;
     res.b2b_maintaining = false;
     res.surge = 0;
 
@@ -860,7 +855,6 @@ static AttackResult compute_attack(int clears, int spin_type, int b2b, int combo
                 res.surge = (float)(b2b);
             }
             res.new_b2b = -1;
-            if (b2b >= 0) res.b2b_broken = true;
         }
 
         res.new_combo = combo + 1;
@@ -1147,22 +1141,19 @@ static void compute_reachability(const uint16_t* board, int board_height,
 
 // Count enclosed hole SECTIONS (connected components) using precomputed
 // reachability.  A "section" is a maximal 4-connected group of enclosed
-// empty cells.  Cells in immobile_cells[] are excluded.
+// empty cells.
 //
 // Fewer, larger cavities score lower than many scattered single-cell holes.
 static int count_hole_sections(const uint16_t* board,
                                int board_height,
-                               const uint16_t* reachable,
-                               const uint16_t* immobile_cells) {
+                               const uint16_t* reachable) {
     uint16_t full_mask = (1 << BOARD_COLS) - 1;
 
     // Build per-row bitmask of hole cells
     uint16_t hole_mask[BOARD_ROWS];
     for (int r = 0; r < board_height; r++) {
         uint16_t empty = (~board[r]) & full_mask;
-        uint16_t enclosed = empty & (~reachable[r]);
-        enclosed &= ~immobile_cells[r];
-        hole_mask[r] = enclosed;
+        hole_mask[r] = empty & (~reachable[r]);
     }
 
     // Flood-fill BFS to count connected components (4-connected)
@@ -1228,8 +1219,7 @@ static int count_hole_sections(const uint16_t* board,
 //
 // Returns a float score (not an integer count) because of height weighting.
 static float compute_hole_ceiling_weight(const uint16_t* board, int board_height,
-                                          const uint16_t* reachable,
-                                          const uint16_t* immobile_cells) {
+                                          const uint16_t* reachable) {
     float total_weight = 0.0f;
 
     for (int c = 0; c < BOARD_COLS; c++) {
@@ -1243,8 +1233,7 @@ static float compute_hole_ceiling_weight(const uint16_t* board, int board_height
             } else {
                 // Empty cell - check if it's an enclosed hole
                 bool enclosed = !(reachable[r] & bit);
-                bool is_setup = (immobile_cells[r] & bit) != 0;
-                if (enclosed && !is_setup && filled_above > 0) {
+                if (enclosed && filled_above > 0) {
                     int hole_height = board_height - r;
                     float height_factor = (float)hole_height / (float)board_height;
                     total_weight += (float)filled_above * (1.0f + height_factor);
@@ -1280,16 +1269,10 @@ static inline bool cell_empty(const uint16_t* board, int board_height, int r, in
 // We check for all 4 T-spin orientations at each board position.
 // Returns: number of T-spin setups found (0, 1, or more)
 // t_slot_quality: set to best quality found (0=none, 1=mini possible, 2=full T-spin)
-// t_multiline_setups: [optional, may be NULL] number of setups that would clear >=2 lines
-//                     (TSD/TST); these are the attack/clear-efficient T-spins we want to
-//                     actively reward when T is in the queue.
 static int detect_t_spin_setups(const uint16_t* board, int board_height,
-                                int* t_slot_quality,
-                                int* t_multiline_setups) {
+                                int* t_slot_quality) {
     int setups = 0;
     int best_quality = 0;
-    int multi = 0;
-    uint16_t full_mask_ = (1 << BOARD_COLS) - 1;
 
     // For each possible T-piece center position (row, col),
     // check if a T-spin could happen in each of the 4 rotations.
@@ -1316,31 +1299,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 
             // Check each T rotation for a valid slot
 
-            // Helper to count lines cleared by a T placement at this slot:
-            // given the 4 piece cells as (row, col_bit) pairs, OR each into
-            // its board row and count how many become full.  Inlined per
-            // rotation so we don't allocate arrays in a hot loop.
-            #define TSPIN_COUNT_LINES(r0,m0, r1,m1, r2,m2, r3,m3) ({        \
-                int _lines = 0;                                                \
-                int _rs[4] = {(r0),(r1),(r2),(r3)};                            \
-                uint16_t _ms[4] = {(uint16_t)(m0),(uint16_t)(m1),              \
-                                    (uint16_t)(m2),(uint16_t)(m3)};            \
-                /* dedupe rows: multiple T cells can be on same row */         \
-                for (int _i = 0; _i < 4; _i++) {                               \
-                    bool _seen = false;                                        \
-                    for (int _j = 0; _j < _i; _j++)                            \
-                        if (_rs[_j] == _rs[_i]) { _seen = true; break; }       \
-                    if (_seen) continue;                                       \
-                    uint16_t _comb = _ms[_i];                                  \
-                    for (int _j = _i + 1; _j < 4; _j++)                        \
-                        if (_rs[_j] == _rs[_i]) _comb |= _ms[_j];              \
-                    if (_rs[_i] >= 0 && _rs[_i] < board_height &&              \
-                        (((uint16_t)board[_rs[_i]] | _comb) & full_mask_) == full_mask_) \
-                        _lines++;                                              \
-                }                                                              \
-                _lines;                                                        \
-            })
-
             // Rot 2 (T points down, most common T-spin: overhang from above)
             // T cells: [1,0] [1,1] [1,2] [2,1] - center is [1,1]
             // Need these cells empty:
@@ -1360,14 +1318,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                     if (cell_empty(board, board_height, r, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1389,14 +1339,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r, c + 2)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1418,14 +1360,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r - 1, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1447,23 +1381,13 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r - 1, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
-            #undef TSPIN_COUNT_LINES
         }
     }
 
     *t_slot_quality = best_quality;
-    if (t_multiline_setups) *t_multiline_setups = multi;
     return setups;
 }
 
@@ -1486,7 +1410,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 // ============================================================
 
 typedef struct {
-    float weighted_immobile;            // Queue-weighted sum of truly immobile placements
     float weighted_immobile_clearing;   // Queue-weighted sum of immobile + line-clearing placements
     float weighted_immobile_lines;      // Queue-weighted sum of clearable lines from immobile placements
 } ImmobilePlacementResult;
@@ -1497,21 +1420,11 @@ typedef struct {
 // then 0.33, etc. (1/position). This ensures the heuristic rewards setups
 // that can be resolved SOON rather than speculative cavities for distant pieces.
 //
-// Populates two per-row bitmasks:
-//   immobile_cells[]   - cells in ANY valid immobile placement (used for
-//                         wasted-hole detection: reachable holes not in here
-//                         are "wasted").
-//   clearing_cells[]   - cells in immobile placements that CLEAR at least one
-//                         line (used to exempt productive spin-setup holes from
-//                         hole penalties - only clearing setups earn exemption).
-//
 // upcoming_pieces: array of piece types (1-7) to check, ordered by priority
 // num_upcoming: length of upcoming_pieces
 static ImmobilePlacementResult count_immobile_placements(
     const uint16_t* board, int board_height,
     const uint16_t* reachable,
-    uint16_t* immobile_cells,        // output: ALL immobile placement cells
-    uint16_t* clearing_cells,        // output: only clearing immobile cells
     const int* upcoming_pieces,
     int num_upcoming,
     const int* piece_queue_count     // [8], count of each piece type in upcoming;
@@ -1519,9 +1432,7 @@ static ImmobilePlacementResult count_immobile_placements(
                                      // four S-slots with one S in queue reward only
                                      // as much as one usable slot.
 ) {
-    ImmobilePlacementResult res = {0.0f, 0.0f, 0.0f};
-    memset(immobile_cells, 0, sizeof(uint16_t) * board_height);
-    memset(clearing_cells, 0, sizeof(uint16_t) * board_height);
+    ImmobilePlacementResult res = {0.0f, 0.0f};
 
     if (num_upcoming <= 0) return res;
 
@@ -1564,12 +1475,8 @@ static ImmobilePlacementResult count_immobile_placements(
 
         float w = piece_weight[pt];
 
-        // Per-piece accumulators: count all valid placements/lines for this
-        // piece type, then apply the queue-count cap at the end.  This caps
-        // the scalar reward without restricting which slots populate the
-        // immobile_cells / clearing_cells bitmasks (those remain full so
-        // hole-exemption still works on every valid spin slot).
-        int placements_this_piece = 0;
+        // Per-piece accumulators: count all valid clearing placements/lines for
+        // this piece type, then apply the queue-count cap at the end.
         int clearing_placements_this_piece = 0;
         int lines_this_piece = 0;
 
@@ -1619,18 +1526,6 @@ static ImmobilePlacementResult count_immobile_placements(
                         if ((combined & full_mask) == full_mask) lines++;
                     }
 
-                    // Mark cells: ALL placements go into immobile_cells
-                    // (for wasted-hole detection); only CLEARING placements
-                    // go into clearing_cells (for hole-penalty exemption).
-                    for (int i = 0; i < 4; i++) {
-                        if (ori->row_masks[i] == 0) continue;
-                        int br = r + i;
-                        uint16_t shifted = (uint16_t)(ori->row_masks[i]) << c;
-                        immobile_cells[br] |= shifted;
-                        if (lines > 0) clearing_cells[br] |= shifted;
-                    }
-
-                    placements_this_piece++;
                     if (lines > 0) {
                         clearing_placements_this_piece++;
                         lines_this_piece += lines;
@@ -1648,12 +1543,10 @@ static ImmobilePlacementResult count_immobile_placements(
         if (piece_queue_count != NULL && pt >= 0 && pt < 8) qc = piece_queue_count[pt];
         if (qc <= 0) qc = 1; // defensive: weight was non-zero, so piece IS in queue
 
-        int capped_placements = placements_this_piece < qc ? placements_this_piece : qc;
         int capped_clearing   = clearing_placements_this_piece < qc ? clearing_placements_this_piece : qc;
         int lines_cap         = qc * 4;
         int capped_lines      = lines_this_piece < lines_cap ? lines_this_piece : lines_cap;
 
-        res.weighted_immobile          += w * (float)capped_placements;
         res.weighted_immobile_clearing += w * (float)capped_clearing;
         res.weighted_immobile_lines    += w * (float)capped_lines;
     }
@@ -1716,8 +1609,6 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     compute_reachability(board, board_height, reachable);
 
     // Immobile (b2b-maintaining) spin placements + T-piece queue count.
-    uint16_t immobile_cells[BOARD_ROWS];
-    uint16_t clearing_cells[BOARD_ROWS];
     int piece_queue_count[8] = {0};
     for (int i = 0; i < num_upcoming; i++) {
         int pt = upcoming_pieces[i];
@@ -1725,24 +1616,18 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     }
     s.t_queue_count = piece_queue_count[PIECE_T];
     ImmobilePlacementResult ipr = count_immobile_placements(board, board_height, reachable,
-                                                            immobile_cells, clearing_cells,
                                                             upcoming_pieces, num_upcoming,
                                                             piece_queue_count);
     s.immobile_clearing_placements = ipr.weighted_immobile_clearing;
     s.immobile_clearable_lines = ipr.weighted_immobile_lines;
 
-    // Hole metrics.  Spin-channel hole-forgiveness was removed, so pass an empty
-    // exemption mask - identical to the prior W_SPIN_CHANNEL=0 behavior.
-    uint16_t no_channel[BOARD_ROWS];
-    memset(no_channel, 0, sizeof(uint16_t) * board_height);
-    s.holes = count_hole_sections(board, board_height, reachable, no_channel);
+    // Hole metrics.
+    s.holes = count_hole_sections(board, board_height, reachable);
     if (W_HOLE_CEILING != 0.0f) {
-        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable, no_channel);
+        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable);
     }
 
-    // T-spin setups (the multiline output is discarded - its reward was removed).
-    int t_multiline_unused = 0;
-    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality, &t_multiline_unused);
+    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality);
 
     // Deepest well column - the only well stat the eval needs (bumpiness exemption).
     int well_col = -1, well_depth = 0;
@@ -2042,9 +1927,9 @@ int b2b_decompose_c(
         AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
         s.b2b = ar.new_b2b; s.combo = ar.new_combo;
         s.total_attack = ar.attack;
-        s.total_lines_cleared = clears; s.hold_piece = hold_piece;
+        s.hold_piece = hold_piece;
         s.pieces_placed = 1;
-        s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
+        s.next_queue_idx = 0;
         { int gr = total_garbage; int gc = 0; int prevented = 0;
           bool was_imminent = (init_gt <= 0 && gr > 0);
           if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
@@ -2074,9 +1959,9 @@ int b2b_decompose_c(
             AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
             s.b2b = ar.new_b2b; s.combo = ar.new_combo;
             s.total_attack = ar.attack;
-            s.total_lines_cleared = clears; s.hold_piece = active_piece;
+            s.hold_piece = active_piece;
             s.pieces_placed = 1;
-            s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
+            s.next_queue_idx = 0;
             { int gr = total_garbage; int gc = 0; int prevented = 0;
           bool was_imminent = (init_gt <= 0 && gr > 0);
           if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
@@ -2105,9 +1990,9 @@ int b2b_decompose_c(
             AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
             s.b2b = ar.new_b2b; s.combo = ar.new_combo;
             s.total_attack = ar.attack;
-            s.total_lines_cleared = clears; s.hold_piece = active_piece;
+            s.hold_piece = active_piece;
             s.pieces_placed = 1;
-            s.next_queue_idx = 1; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
+            s.next_queue_idx = 1;
             { int gr = total_garbage; int gc = 0; int prevented = 0;
           bool was_imminent = (init_gt <= 0 && gr > 0);
           if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
@@ -2187,14 +2072,10 @@ static inline void expand_and_insert(
     child.b2b = ar.new_b2b;
     child.combo = ar.new_combo;
     child.total_attack = parent->total_attack + ar.attack;
-    child.total_lines_cleared = parent->total_lines_cleared + clears;
     child.pieces_placed = parent->pieces_placed + 1;
     child.hold_piece = new_hold_piece;
     child.next_queue_idx = new_queue_idx;
     child.depth0_placement_idx = parent->depth0_placement_idx;
-    child.b2b_broken = parent->b2b_broken || ar.b2b_broken;
-    child.prev_b2b = parent->b2b_broken ? parent->prev_b2b
-                   : (ar.b2b_broken ? parent->b2b : parent->prev_b2b);
     child.bag_seen = new_bag_seen;
 
     bool pushed_garbage = false;
@@ -2386,13 +2267,10 @@ void b2b_search_c(
         s->b2b = ar.new_b2b;
         s->combo = ar.new_combo;
         s->total_attack = ar.attack;
-        s->total_lines_cleared = clears;
         s->pieces_placed = 1;
         s->hold_piece = hold_piece;
         s->next_queue_idx = 0;
         s->depth0_placement_idx = depth0_count;
-        s->b2b_broken = ar.b2b_broken;
-        s->prev_b2b = b2b;
         s->bag_seen = initial_bag_seen;
 
         bool pushed_garbage = false;
@@ -2475,13 +2353,10 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
             s->next_queue_idx = 0;
             s->depth0_placement_idx = depth0_count;
-            s->b2b_broken = ar.b2b_broken;
-            s->prev_b2b = b2b;
             s->bag_seen = initial_bag_seen;
 
             bool pushed_garbage = false;
@@ -2561,13 +2436,10 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
             s->next_queue_idx = 1;
             s->depth0_placement_idx = depth0_count;
-            s->b2b_broken = ar.b2b_broken;
-            s->prev_b2b = b2b;
             s->bag_seen = initial_bag_seen;
 
             bool pushed_garbage = false;
