@@ -91,7 +91,7 @@ class PlacementMCTS:
     def search(self, real_envs, return_scale, temperatures):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
-        {dead: True} or {dead: False, pi, counts, slot, descriptor, visits, value, board,
+        {dead: True} or {dead: False, pi, counts, descriptor, visits, value, board,
         pieces, bcg, cand_placements, cand_mask}. `descriptor` = (is_hold, rot, norm_col,
         landing_row, spin); commit the real move via
         `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
@@ -179,7 +179,6 @@ class PlacementMCTS:
                 "dead": False,
                 "pi": pi[i],
                 "counts": counts[i].copy(),
-                "slot": slot,
                 "descriptor": tuple(int(x) for x in desc[i, slot]),
                 "visits": int(counts[i].sum()),
                 **obs[i],
