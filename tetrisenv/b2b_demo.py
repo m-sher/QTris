@@ -13,40 +13,12 @@ import pygame
 import numpy as np
 import copy
 import sys
-import os
-import json
 import argparse
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Pieces import PieceType
 from TetrisEnv.RotationSystem import RotationSystem
-
-
-def weights_to_file(searcher, path):
-    data = {name: searcher.get_weight(name) for name in searcher.weight_names()}
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-
-
-def weights_from_file(searcher, path):
-    """Apply weights from the JSON file; returns how many names were applied."""
-    if not os.path.exists(path):
-        return 0
-    with open(path) as f:
-        data = json.load(f)
-    return sum(1 for name, val in data.items() if searcher.set_weight(name, float(val)))
-
-
-def sync_weights_file(searcher, path):
-    """Load the file if it exists (so edits persist + apply), else seed it with the
-    current weights so there is always a file to edit. Returns a short status string
-    (basename only; the caller prints the full path)."""
-    name = os.path.basename(path)
-    if os.path.exists(path):
-        return f"loaded {weights_from_file(searcher, path)} weights from {name}"
-    weights_to_file(searcher, path)
-    return f"seeded {name} with current weights"
 
 
 # ── Tetris piece colors (guideline) ─────────────────────────
@@ -342,7 +314,6 @@ def run_headless(args):
     env = PyTetrisEnv(
         queue_size=args.queue_size,
         max_holes=None,
-        max_height=20,
         max_steps=None,
         max_len=15,
         pathfinding=False,
@@ -357,8 +328,6 @@ def run_headless(args):
     )
     env.reset()
     searcher = CB2BSearch()
-    _wf = os.path.abspath("b2b_weights.json")
-    print(f"weights config: {_wf}\n  {sync_weights_file(searcher, _wf)}")
 
     total_attack = 0.0
     max_b2b = 0
@@ -544,23 +513,16 @@ def main():
     btn_reset = Button((sp_x, btn_y + btn_h + btn_gap, 100, btn_h), "Reset", font)
     btn_restart = Button((sp_x + 106, btn_y + btn_h + btn_gap, 140, btn_h),
                          "New Game", font)
-    btn_reload = Button((sp_x, btn_y + 2 * (btn_h + btn_gap), 160, btn_h),
-                        "Reload Wts", font)
-
-    buttons = [btn_play, btn_step_fwd, btn_step_back, btn_reset, btn_restart, btn_reload]
+    buttons = [btn_play, btn_step_fwd, btn_step_back, btn_reset, btn_restart]
 
     # ── State ────────────────────────────────────────────────
     searcher = CB2BSearch()
-    weights_file = os.path.abspath("b2b_weights.json")  # abs so the path is unambiguous
-    weights_msg = sync_weights_file(searcher, weights_file)
-    print(f"weights config: {weights_file}\n  {weights_msg}")
 
     def create_env():
         qs = spinners["queue_size"].value
         env = PyTetrisEnv(
             queue_size=qs,
             max_holes=None,
-            max_height=20,
             max_steps=None,
             max_len=15,
             pathfinding=False,
@@ -589,17 +551,15 @@ def main():
     step_timer = 0.0
     game_over = False
     step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
-    # Last search candidates + their depth-0 component breakdown (for the bottom strip)
+    # Last search candidates (for the bottom strip)
     last_cand_actions = None
     last_cand_scores = None
-    last_components = None  # (n, NUM_DECOMPOSE) aligned to candidates, or None
 
     def refresh_search():
-        """Search + decompose the CURRENT position and update the move/strip state,
-        WITHOUT advancing the game. Used by step-forward and after a weight reload so
-        the breakdown reflects the new weights immediately (no need to step)."""
+        """Search the CURRENT position and update the move/strip state, WITHOUT
+        advancing the game. Used by step-forward and on reset."""
         nonlocal last_action_idx, last_sequence
-        nonlocal last_cand_actions, last_cand_scores, last_components
+        nonlocal last_cand_actions, last_cand_scores
         if game_over:
             return
 
@@ -634,23 +594,6 @@ def main():
         last_sequence = sequence
         last_cand_actions = cand_actions
         last_cand_scores = cand_scores
-
-        # Depth-0 component breakdown for the strip. Rows align with the candidates
-        # by enumeration index (both enumerate active-then-hold via find_placements);
-        # guard on equal length so a mismatch falls back to totals-only.
-        comps = None
-        if hasattr(searcher, "decompose"):
-            try:
-                comps = searcher.decompose(
-                    board=board, active_piece=active, hold_piece=hold,
-                    queue=queue_types, b2b=b2b, combo=combo, total_garbage=total_garb,
-                    garbage_push_delay=env._garbage_push_delay,
-                )
-            except Exception:
-                comps = None
-            if comps is None or len(comps) != len(cand_actions):
-                comps = None
-        last_components = comps
 
     def do_step_forward():
         nonlocal history, history_idx
@@ -741,8 +684,7 @@ def main():
         step_info_history = [{"attack": 0, "clears": 0, "action_idx": -1}]
         refresh_search()
 
-    # Populate the breakdown strip for the initial position (so it's not empty and
-    # a weight reload shows changes even before the first step).
+    # Populate the breakdown strip for the initial position so it is not empty.
     refresh_search()
 
     # ── Main loop ────────────────────────────────────────────
@@ -783,10 +725,6 @@ def main():
                     do_reset()
                 elif btn_restart.clicked(mouse_pos):
                     do_new_game()
-                elif btn_reload.clicked(mouse_pos):
-                    n_loaded = weights_from_file(searcher, weights_file)
-                    weights_msg = f"reloaded {n_loaded} weights from {os.path.basename(weights_file)}"
-                    refresh_search()  # re-evaluate the current board so the strip updates now
                 else:
                     for sp in spinners.values():
                         sp.handle_click(mouse_pos)
@@ -917,28 +855,20 @@ def main():
         pygame.draw.line(screen, BORDER_COLOR, (0, strip_y), (WIN_W, strip_y))
         sx = 10
         title = stat_font.render(
-            "SCORE BREAKDOWN - top moves (beam total | depth-0 components)",
+            "SCORE BREAKDOWN - top moves (beam total)",
             True, ACCENT,
         )
         screen.blit(title, (sx, strip_y + 5))
 
-        comp_names = getattr(searcher, "COMPONENT_NAMES", [])
-        has_comps = last_components is not None and len(comp_names) > 0
-        move_x, beam_x, comp_x0 = sx, sx + 86, sx + 150
-        comp_w = (WIN_W - comp_x0 - 8) / len(comp_names) if comp_names else 0
+        move_x, beam_x = sx, sx + 86
         header_y = strip_y + 28
 
-        # Column header (component legend), or a note when decompose is unavailable.
-        if has_comps:
+        if last_cand_scores is not None:
             screen.blit(small_font.render("move", True, LABEL_DIM), (move_x, header_y))
             screen.blit(small_font.render("beam", True, LABEL_DIM), (beam_x, header_y))
-            for i, nm in enumerate(comp_names):
-                screen.blit(small_font.render(nm[:4], True, LABEL_DIM),
-                            (int(comp_x0 + i * comp_w), header_y))
         else:
-            note = ("decompose: b2b engine only - showing beam totals"
-                    if last_cand_scores is not None else "step to populate")
-            screen.blit(small_font.render(note, True, LABEL_DIM), (move_x, header_y))
+            screen.blit(small_font.render("step to populate", True, LABEL_DIM),
+                        (move_x, header_y))
 
         # Top-5 candidates by beam score; the chosen move is accented.
         row_y = header_y + 18
@@ -951,22 +881,10 @@ def main():
                 col = ACCENT if a == last_action_idx else TEXT_COLOR
                 screen.blit(stat_font.render(f"H{h}R{r}C{c}S{sp}", True, col), (move_x, row_y))
                 screen.blit(stat_font.render(f"{sc:7.1f}", True, col), (beam_x, row_y))
-                if has_comps:
-                    for i, v in enumerate(last_components[idx]):
-                        v = float(v)
-                        if abs(v) < 0.5:
-                            cc = (95, 95, 110)
-                        elif v < 0:
-                            cc = (220, 120, 120)
-                        else:
-                            cc = (120, 205, 135)
-                        screen.blit(small_font.render(f"{v:.0f}", True, cc),
-                                    (int(comp_x0 + i * comp_w), row_y))
                 row_y += 20
 
-        # Status line: weight-config message (left) + keyboard help (right).
+        # Status line: keyboard help.
         status_y = WIN_H - 18
-        screen.blit(small_font.render(weights_msg, True, LABEL_DIM), (sx, status_y))
         help_text = small_font.render(
             "Space=Play/Pause  L/R=Step  R=Reset  Esc=Quit", True, LABEL_DIM
         )
