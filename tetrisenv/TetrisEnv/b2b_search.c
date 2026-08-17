@@ -132,6 +132,9 @@ typedef struct {
                              // (timer <= 0) and the move either cancelled the lines or
                              // blocked the push by clearing.
     uint8_t bag_seen;        // Bitmask of pieces consumed from current 7-bag (bits 1-7)
+    uint8_t unlicensed_cash; // D_cash at parent.combo<0: exclude this lock's A from APP
+    float parent_avg_height; // Parent skyline mean; used for W_AVG_HEIGHT iff unlicensed_cash
+    float unlicensed_cash_A; // This lock's attack iff unlicensed_cash, else 0
     float score;
     uint64_t sort_hash;      // state_hash cached at insert; sole tiebreak key for the
                              // deterministic beam sort (so parallel append order can't
@@ -148,6 +151,24 @@ static inline void compute_col_heights_full(const uint16_t* board, int board_hei
             if (board[r] & bit) { out_heights[c] = (int8_t)(board_height - r); break; }
         }
     }
+}
+
+static inline float mean_col_heights(const int8_t* heights) {
+    int sum = 0;
+    for (int c = 0; c < BOARD_COLS; c++) sum += heights[c];
+    return (float)sum / (float)BOARD_COLS;
+}
+
+// U := D_cash && parent.combo<0. D_cash := clear && spin==NONE && (tetris || PC).
+// Must be written on every emit; SearchState is not memset.
+static inline void latch_unlicensed_cash(SearchState* s, int clears, int spin_type,
+                                         bool perfect_clear, int parent_combo,
+                                         float parent_avg_height, float this_attack) {
+    bool d_cash = (clears > 0) && (spin_type == SPIN_NONE)
+                  && (clears == 4 || perfect_clear);
+    s->unlicensed_cash = (d_cash && parent_combo < 0) ? 1 : 0;
+    s->parent_avg_height = parent_avg_height;
+    s->unlicensed_cash_A = s->unlicensed_cash ? this_attack : 0.0f;
 }
 
 // Top-out, shared by the env/MCTS/beam: the piece-agnostic 7-cell spawn box is blocked
@@ -302,6 +323,12 @@ static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     gp.f = s->garbage_prevented;
     h ^= (uint64_t)a.u * 0x9e3779b97f4a7c15ULL;
     h ^= (uint64_t)gp.u * 0x517cc1b727220a95ULL;
+    h ^= (uint64_t)s->unlicensed_cash * 0x9e3779b97f4a7c15ULL;
+    union { float f; uint32_t u; } ua, ph;
+    ua.f = s->unlicensed_cash_A;
+    ph.f = s->parent_avg_height;
+    h ^= (uint64_t)ua.u * 0x517cc1b727220a95ULL;
+    h ^= (uint64_t)ph.u * 0x9e3779b97f4a7c15ULL;
     return h;
 }
 
@@ -1038,17 +1065,26 @@ static int find_placements(const uint16_t* board_rows, int board_height,
 // Flood-fill reachability from top of board.
 // Fills reachable[] with bitmasks indicating which empty cells are reachable
 // from the top row via orthogonal movement through empty cells.
+//
+// `top_filled` is the first non-empty row (board_height if the board is empty).
+// Every row above it is wholly empty and 4-connected to row 0, so the flood
+// would mark it full_mask; set those directly and seed the BFS at top_filled
+// instead of walking the air column. Output is bit-identical.
 static void compute_reachability(const uint16_t* board, int board_height,
-                                  uint16_t* reachable) {
-    memset(reachable, 0, sizeof(uint16_t) * board_height);
+                                  int top_filled, uint16_t* reachable) {
+    const uint16_t full_mask = (1 << BOARD_COLS) - 1;
+    for (int r = 0; r < top_filled; r++) reachable[r] = full_mask;
+    memset(reachable + top_filled, 0,
+           sizeof(uint16_t) * (size_t)(board_height - top_filled));
+    if (top_filled >= board_height) return;
 
     int flood_queue[BOARD_ROWS * BOARD_COLS * 2]; // row, col pairs
     int fh = 0, ft = 0;
 
     for (int c = 0; c < BOARD_COLS; c++) {
-        if (!(board[0] & (1 << c))) {
-            reachable[0] |= (1 << c);
-            flood_queue[ft++] = 0;
+        if (!(board[top_filled] & (1 << c))) {
+            reachable[top_filled] |= (1 << c);
+            flood_queue[ft++] = top_filled;
             flood_queue[ft++] = c;
         }
     }
@@ -1150,8 +1186,11 @@ static int count_hole_sections(const uint16_t* board,
 // of the stack are more dangerous.
 //
 // Returns a float score (not an integer count) because of height weighting.
+//
+// Scanning starts at `top_filled`: above it every cell is empty, so filled_above
+// stays 0 and the `filled_above > 0` test can never fire. Bit-identical result.
 static float compute_hole_ceiling_weight(const uint16_t* board, int board_height,
-                                          const uint16_t* reachable) {
+                                          int top_filled, const uint16_t* reachable) {
     float total_weight = 0.0f;
 
     for (int c = 0; c < BOARD_COLS; c++) {
@@ -1159,7 +1198,7 @@ static float compute_hole_ceiling_weight(const uint16_t* board, int board_height
 
         // Scan column top-to-bottom, track filled cells above
         int filled_above = 0;
-        for (int r = 0; r < board_height; r++) {
+        for (int r = top_filled; r < board_height; r++) {
             if (board[r] & bit) {
                 filled_above++;
             } else {
@@ -1202,7 +1241,7 @@ static inline bool cell_empty(const uint16_t* board, int board_height, int r, in
 // Returns: number of T-spin setups found (0, 1, or more)
 // t_slot_quality: set to best quality found (0=none, 1=mini possible, 2=full T-spin)
 static int detect_t_spin_setups(const uint16_t* board, int board_height,
-                                int* t_slot_quality) {
+                                int top_filled, int* t_slot_quality) {
     int setups = 0;
     int best_quality = 0;
 
@@ -1217,8 +1256,15 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 
     // We look for the T-slot pattern: the 3 cells of the T (excluding center-back)
     // must be empty, and at least 3 of 4 corners must be filled.
+    //
+    // Anchors with r + 2 < top_filled are skipped: c spans 0..BOARD_COLS-3 and the
+    // loop bound keeps r + 2 <= board_height - 1, so all four corners are in bounds
+    // (no out-of-bounds "filled") and all sit in wholly empty rows, giving
+    // corner_count == 0 < 3. Starting at top_filled - 2 is bit-identical.
+    int scan_start = top_filled - 2;
+    if (scan_start < 0) scan_start = 0;
 
-    for (int r = 0; r < board_height - 2; r++) {
+    for (int r = scan_start; r < board_height - 2; r++) {
         for (int c = 0; c < BOARD_COLS - 2; c++) {
             // Corner positions (in the 3x3 grid anchored at r,c)
             bool tl = cell_filled(board, board_height, r, c);
@@ -1536,9 +1582,16 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
         bumpiness += fabsf((float)(s.col_heights[c] - s.col_heights[c + 1]));
     }
 
+    // First non-empty row; bounds every per-leaf scan below (the stack is ~2-5
+    // rows of a 40-row board, so the rest is air).
+    int top_filled = board_height;
+    for (int r = 0; r < board_height; r++) {
+        if (board[r] != 0) { top_filled = r; break; }
+    }
+
     // Flood-fill reachability (feeds the hole + immobile scans).
     uint16_t reachable[BOARD_ROWS];
-    compute_reachability(board, board_height, reachable);
+    compute_reachability(board, board_height, top_filled, reachable);
 
     // Immobile (b2b-maintaining) spin placements + T-piece queue count.
     int piece_queue_count[8] = {0};
@@ -1556,10 +1609,16 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     // Hole metrics.
     s.holes = count_hole_sections(board, board_height, reachable);
     if (W_HOLE_CEILING != 0.0f) {
-        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable);
+        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height,
+                                                           top_filled, reachable);
     }
 
-    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality);
+    // The only reader of t_spin_setups/t_slot_quality is gated on t_queue_count > 0,
+    // and both stay 0 from the memset, so skipping the sweep here changes nothing.
+    if (s.t_queue_count > 0) {
+        s.t_spin_setups = detect_t_spin_setups(board, board_height, top_filled,
+                                               &s.t_slot_quality);
+    }
 
     // Deepest well column - the only well stat the eval needs (bumpiness exemption).
     int well_col = -1, well_depth = 0;
@@ -1658,8 +1717,13 @@ static float evaluate_state(const SearchState* state, int board_height,
         score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
     // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
+    // Unlicensed leftover-I/PC must not be paid for emptying the well: use the
+    // parent skyline so D_cash at combo<0 does not beat TSD/Imm1 on W_AVG_HEIGHT.
     score -= W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio;
-    score -= W_AVG_HEIGHT * bs.avg_height;
+    {
+        float avg_h = state->unlicensed_cash ? state->parent_avg_height : bs.avg_height;
+        score -= W_AVG_HEIGHT * avg_h;
+    }
     // Bumpiness (well-column-exempted so deliberate spin/Tetris wells aren't double-penalized).
     score -= W_BUMPINESS * bs.bumpiness_exempted;
 
@@ -1684,14 +1748,17 @@ static float evaluate_state(const SearchState* state, int board_height,
 
     // ── Attack realization ────────────────────────────────────
     // Realized attack along the path + banked b2b (pending surge ~= b2b on break).
-    float atk_credit = state->total_attack + (state->b2b > 0 ? (float)state->b2b : 0.0f);
+    // Unlicensed D_cash (leftover I/PC at combo<0) does not enter APP/attack.
+    float atk_real = state->total_attack - state->unlicensed_cash_A;
+    if (atk_real < 0.0f) atk_real = 0.0f;
+    float atk_credit = atk_real + (state->b2b > 0 ? (float)state->b2b : 0.0f);
     if (atk_credit > 0.0f) {
         score += W_ATTACK_TOTAL * atk_credit;
     }
     // Direct APP (attack-per-piece), counting stored b2b as pending surge attack.
     if (state->pieces_placed > 0) {
         float b2b_val = state->b2b > 0 ? (float)state->b2b : 0.0f;
-        score += W_APP * ((state->total_attack + b2b_val) / (float)state->pieces_placed);
+        score += W_APP * ((atk_real + b2b_val) / (float)state->pieces_placed);
     }
     // Garbage prevention: keeping imminent garbage off the board (cancel or block-push).
     if (state->garbage_prevented > 0.0f) {
@@ -1832,6 +1899,9 @@ static inline void expand_and_insert(
     }
 
     if (placement_is_dead(&child, board_height)) return;
+
+    latch_unlicensed_cash(&child, clears, pl->spin_type, perfect_clear, parent->combo,
+                          mean_col_heights(parent->col_heights), ar.attack);
 
     // Full eval for every surviving child (no aspiration prune - it was the main
     // source of nondeterminism and its omission only makes the beam MORE thorough).
@@ -2023,6 +2093,8 @@ void b2b_search_c(
             compute_col_heights_full(s->board, board_height, s->col_heights);
         }
 
+        latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                              mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
@@ -2109,6 +2181,8 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
+            latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                                  mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
@@ -2192,6 +2266,8 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
+            latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                                  mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
