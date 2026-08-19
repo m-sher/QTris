@@ -4,15 +4,18 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses the realized game outcome z in {-1, 0, +1}
-(loss / draw / win). The search runs at w_death=1, gamma=1, return_scale=1, w_attack=0.05,
-w_b2b=0.06; own-death = -1 is the only in-search terminal.
+`PyTetris1v1Env` does. The value head regresses TD(lambda) targets built from the realized
+game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recovers raw z
+on every position); with td_blend > 0 each non-terminal target is a convex blend with a
+realized near-term production channel (window saturating ratios of b2b level and attack
+rate), while the terminal row stays exactly z. The search runs at w_death=1, gamma=1,
+return_scale=1, w_attack=0, w_b2b=0; own-death = -1 is the only in-search terminal.
 
-Both players' trajectories are trained, each labeled with its own outcome z. The pool lives
-on disk under `<ckpt>/pool/gen_*`; gen_0 is seeded from the warm-started net and is the frozen
-reference for the periodic `win_rate_vs_ref` eval. Opponents are sampled recency-weighted per
-generation; the pool grows (gated on the learner's decisive win-rate EMA) and evicts oldest
-(gen_0 pinned).
+Both players' trajectories are trained, each labeled with its own outcome z; only the
+learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
+gen_0 is seeded from the warm-started net and is the frozen reference for the periodic
+`win_rate_vs_ref` eval. Opponents are sampled recency-weighted per generation; the pool
+grows (gated on the learner's decisive win-rate EMA) and evicts oldest (gen_0 pinned).
 """
 
 import glob
@@ -27,7 +30,10 @@ from tensorflow import keras
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from qtris.data.dagger import _state_record, save_states
-from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY as CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+)
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.backend import finish, init_run, log_step
 from qtris.observability.models import OneVsOneAZLog, OneVsOnePlacementAZConfig
@@ -35,6 +41,12 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
+
+
+def _resolve(args, name, default):
+    """Per-family default for a shared CLI flag whose argparse default is None."""
+    v = getattr(args, name, None)
+    return default if v is None else v
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -73,7 +85,6 @@ def _pos(r):
         "cand_mask": r["cand_mask"],
         "pi": r["pi"],
         "v_root": r["value"],
-        "visits": r["visits"],
     }
 
 
@@ -142,10 +153,69 @@ def _td_lambda(values, z, lam):
     return targets
 
 
-def _episode(pend, p1_died, p2_died, lam):
-    """Stamp each player's TD(lambda) value targets on its pending positions and return both
-    players' rows for training. Returns (rows[(pos, target, policy_mask)], game_len, p1_won,
-    is_draw) keyed on the learner's (player-1) outcome, or None if nothing was collected."""
+def _mean_or_none(xs):
+    """Mean of a per-generation sample, or None when the generation had no events."""
+    return float(np.mean(xs)) if xs else None
+
+
+GROUNDING_BUCKETS = ((0, 10), (10, 30), (30, 60), (60, 1 << 30))
+
+# Ahat channel weights and half-saturation levels. Both channels are saturating ratios
+# x/(x+half), bounded in [0,1); half is the level scoring 0.5.
+BLEND_B2B_WEIGHT = 0.8
+BLEND_ATK_WEIGHT = 0.2
+B2B_HALF_SAT = 8.0
+ATK_HALF_SAT = 0.5
+
+
+def _ahat(atks, b2bs, horizon):
+    """Per-position (ahat, b2b_channel, atk_channel) arrays over forward windows of up to
+    `horizon` placements.
+
+    b2b is a state: each window step's level enters as its own ratio, then the window is
+    averaged. Attack is a flow: the window's attack-per-placement rate is computed first and
+    the ratio applied once."""
+    atks = np.asarray(atks, dtype=np.float64)
+    b2bs = np.maximum(np.asarray(b2bs, dtype=np.float64), 0.0)
+    n = len(atks)
+    b2b_ratio = b2bs / (b2bs + B2B_HALF_SAT)
+    b2b_ch = np.empty(n)
+    atk_ch = np.empty(n)
+    for i in range(n):
+        w = slice(i, min(i + horizon, n))
+        b2b_ch[i] = b2b_ratio[w].mean()
+        app = atks[w].mean()
+        atk_ch[i] = app / (app + ATK_HALF_SAT)
+    return BLEND_B2B_WEIGHT * b2b_ch + BLEND_ATK_WEIGHT * atk_ch, b2b_ch, atk_ch
+
+
+def _grounding(v_root, z, steps_to_end):
+    """corr(v_root, z) and Brier(v_root, z) per steps-to-end bucket, keyed
+    `corr_n0_10` / `brier_n0_10` and so on, with None for empty or degenerate buckets.
+
+    Draws (z=0) map to a Brier target of 0.5."""
+    p = (np.asarray(v_root, dtype=np.float64) + 1.0) * 0.5  # tanh value -> P(win)
+    o = (np.asarray(z, dtype=np.float64) + 1.0) * 0.5
+    out = {}
+    for lo, hi in GROUNDING_BUCKETS:
+        tag = f"n{lo}_{hi}" if hi < (1 << 30) else f"n{lo}plus"
+        m = (steps_to_end >= lo) & (steps_to_end < hi)
+        n = int(m.sum())
+        ok = n >= 2 and np.std(p[m]) > 1e-6 and np.std(o[m]) > 1e-6
+        out[f"corr_{tag}"] = float(np.corrcoef(p[m], o[m])[0, 1]) if ok else None
+        out[f"brier_{tag}"] = float(np.mean((p[m] - o[m]) ** 2)) if n else None
+    return out
+
+
+def _episode(pend, p1_died, p2_died, lam, blend, horizon):
+    """Stamp each player's value targets on its pending positions and return both players'
+    rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end, ahat_b2b,
+    ahat_atk)], game_len, p1_won, is_draw) keyed on the learner's (player-1) outcome, or
+    None if nothing was collected. z, steps_to_end, and the ahat channels are carried for
+    diagnostics and are not training inputs.
+
+    The target is (1-blend)*TD(lambda) + blend*Ahat on every row but a trajectory's last,
+    which stays at that player's z."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -155,15 +225,37 @@ def _episode(pend, p1_died, p2_died, lam):
         z1, z2 = 1.0, -1.0
     else:
         z1, z2 = 0.0, 0.0
-    # policy_mask: learner's (p1) positions train the policy; opponent's (p2) positions train
-    # the value only. Value targets are TD(lambda) bootstrapped from each root value.
+    # policy_mask 1.0: learner rows, train policy and value. 0.0: opponent rows, value only.
     rows = []
     for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
-        if not positions:
+        n = len(positions)
+        if n == 0:
             continue
         targets = _td_lambda([p["v_root"] for p in positions], z, lam)
-        rows += [(p, t, mask) for p, t in zip(positions, targets)]
+        b2b_ch, atk_ch = np.zeros(n), np.zeros(n)
+        if blend > 0.0:
+            ahat, b2b_ch, atk_ch = _ahat(
+                [p["atk"] for p in positions], [p["b2b"] for p in positions], horizon
+            )
+            for i in range(n - 1):
+                targets[i] = (1.0 - blend) * targets[i] + blend * ahat[i]
+        rows += [
+            (p, t, mask, z, n - 1 - i, b2b_ch[i], atk_ch[i])
+            for i, (p, t) in enumerate(zip(positions, targets))
+        ]
     return rows, glen, z1 > 0.0, z1 == 0.0
+
+
+def warm_start_full(net, warm):
+    """Restore a BC checkpoint into `net`, value head included; returns whether the
+    checkpoint carried one.
+
+    The placement pretrainer trains its value head with a tanh activation against a
+    centered bounded label, matching this net's head, so it transfers as an ordering
+    prior for the gen-0 leaf bootstraps. A policy-only checkpoint has no value head and
+    restores partial, leaving it fresh."""
+    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
+    return any("value_top" in name for name, _ in tf.train.list_variables(warm))
 
 
 def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
@@ -227,12 +319,23 @@ def _sample_pool(opp_net, pool_dir):
 
 
 def _eval_vs_ref(
-    learner_mcts, ref_mcts, n_games, queue_size, max_len, max_steps, rng, searcher
+    learner_mcts,
+    ref_mcts,
+    n_games,
+    queue_size,
+    max_len,
+    max_steps,
+    rng,
+    searcher,
+    seed0,
 ):
     """(wins, losses, draws) of the learner (player 1) vs the frozen reference (player 2),
     both greedy, played to completion on fresh games. Batched over still-live games each
-    round. Draws (timeouts + double-KOs) are informative half-wins for the rating fit."""
-    pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=9001)
+    round. Draws (timeouts + double-KOs) enter the rating fit as half-wins.
+
+    Games use seeds seed0..seed0+n_games-1, so `seed0` must stride by at least n_games
+    between calls."""
+    pairs = _build_game_pairs(n_games, queue_size, 50, max_len, seed0=seed0)
     for e1, e2 in pairs:
         e1._reset()
         e2._reset()
@@ -288,8 +391,10 @@ def main(args):
     pool_interval = getattr(args, "pool_interval", 10)
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 10)
-    eval_games = getattr(args, "eval_games", 8)
+    eval_games = getattr(args, "eval_games", 32)
     td_lambda = getattr(args, "td_lambda", 0.9)
+    td_blend = getattr(args, "td_blend", 0.0)
+    blend_horizon = getattr(args, "blend_horizon", 16)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -316,9 +421,9 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=1.0,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=0.05,
+        w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
-        w_b2b=getattr(args, "w_b2b", 0.06),
+        w_b2b=_resolve(args, "w_b2b", 0.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -341,9 +446,12 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            # Policy warm-start only; the value head restores partial (left fresh).
-            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-            print(f"Warm-started policy from BC checkpoint {warm}.", flush=True)
+            warm_value = warm_start_full(net, warm)
+            print(
+                f"Warm-started from BC checkpoint {warm} "
+                f"(value head {'restored' if warm_value else 'fresh'}).",
+                flush=True,
+            )
 
     # Seed the pool with gen_0 = the warm-started learner.
     if not _pool_snaps(pool_dir):
@@ -394,6 +502,7 @@ def main(args):
         dirichlet_alpha=cfg.dirichlet_alpha,
         dirichlet_eps=cfg.dirichlet_eps,
         temp_moves=cfg.temp_moves,
+        w_attack=cfg.w_attack,
         w_b2b=cfg.w_b2b,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
@@ -406,6 +515,8 @@ def main(args):
         eval_interval=eval_interval,
         eval_games=eval_games,
         td_lambda=td_lambda,
+        td_blend=td_blend,
+        blend_horizon=blend_horizon,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -437,6 +548,15 @@ def main(args):
     move_count = np.zeros(num_games, dtype=np.int64)
     # Per-game pending positions for BOTH players, carried across gens until the game ends.
     pending = [{"p1": [], "p2": []} for _ in range(num_games)]
+    # Per-game peak b2b for the current episode, carried across gens like `pending`.
+    ep_max_b2b = [-1] * num_games
+    # Run of consecutive difficult clears (flushed by any other placement), the b2b bank run
+    # (difficult clears in a streak, tolerating stacking in between), and the combo peak after
+    # a b2b break (-1 = idle) with the combo already carried into that break.
+    cur_chain = [0] * num_games
+    cur_bank = [0] * num_games
+    post_break_peak = [-1] * num_games
+    post_break_base = [0] * num_games
 
     replay = deque()
     replay_size = 0
@@ -449,12 +569,16 @@ def main(args):
     for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
-        gen_pos = []  # (pos, z) for both players' positions whose game completed this gen
+        gen_pos = []  # (pos, target, policy_mask, z, steps_to_end, ahat_b2b, ahat_atk)
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
         total_attack = total_placements = 0
-        dead_searches = total_searches = 0
+        learner_attack = learner_placements = 0
+        # Learner b2b/combo economics, from p1's scorer around each committed placement.
+        b2b_at_death, b2b_at_cashout, episode_max_b2b = [], [], []
+        chain_runs, bank_runs, post_break_combos, post_break_clears = [], [], [], []
+        n_difficult = n_breaks = n_deaths = 0
 
         for _t in range(horizon):
             temps_p1 = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(
@@ -462,31 +586,79 @@ def main(args):
             )
             r1 = mcts.search([p[0] for p in pairs], 1.0, temps_p1)  # learner
             r2 = opp_mcts.search([p[1] for p in pairs], 1.0, opp_temps)  # pool opponent
-            total_searches += N
-            dead_searches += sum(1 for g in range(N) if r1[g]["dead"])
 
             for g in range(N):
                 a, b = r1[g], r2[g]
                 e1, e2 = pairs[g]
 
                 if a["dead"] or b["dead"]:
-                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
+                    if a["dead"]:
+                        b2b_at_death.append(e1._scorer._b2b)
+                        n_deaths += 1
+                    ep = _episode(
+                        pending[g],
+                        a["dead"],
+                        b["dead"],
+                        td_lambda,
+                        td_blend,
+                        blend_horizon,
+                    )
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
                     if save_states_dir:
                         state_recs.append(_state_record(e1))
                         state_recs.append(_state_record(e2))
+                    pre_b2b = e1._scorer._b2b
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
+                    pending[g]["p1"][-1]["atk"] = atk1
+                    pending[g]["p1"][-1]["b2b"] = post_b2b
+                    pending[g]["p2"][-1]["atk"] = atk2
+                    pending[g]["p2"][-1]["b2b"] = e2._scorer._b2b
+                    broke = pre_b2b >= 0 and post_b2b == -1
+                    if post_b2b == pre_b2b + 1:  # a difficult clear
+                        n_difficult += 1
+                        cur_chain[g] += 1
+                        cur_bank[g] += 1
+                    else:  # chain_run flushes on ANY other placement, bank_run does not
+                        if cur_chain[g] > 0:
+                            chain_runs.append(cur_chain[g])
+                        cur_chain[g] = 0
+                    if broke:
+                        n_breaks += 1
+                        bank_runs.append(cur_bank[g])
+                        cur_bank[g] = 0
+                        if pre_b2b >= 4:
+                            b2b_at_cashout.append(pre_b2b)
+                            post_break_peak[g] = post_combo
+                            post_break_base[g] = post_combo
+                    elif post_break_peak[g] >= 0:
+                        if post_combo >= 0:
+                            post_break_peak[g] = max(post_break_peak[g], post_combo)
+                        else:
+                            post_break_combos.append(post_break_peak[g])
+                            post_break_clears.append(
+                                post_break_peak[g] - post_break_base[g]
+                            )
+                            post_break_peak[g] = -1
+                    ep_max_b2b[g] = max(ep_max_b2b[g], post_b2b)
+                    if p1_died:
+                        b2b_at_death.append(pre_b2b)
+                        n_deaths += 1
                     total_attack += atk1 + atk2
                     total_placements += 2
+                    learner_attack += atk1
+                    learner_placements += 1
                     move_count[g] += 1
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
+                    ep = _episode(
+                        pending[g], p1_died, p2_died, td_lambda, td_blend, blend_horizon
+                    )
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
@@ -496,6 +668,18 @@ def main(args):
                         n_draw += 1
                     else:
                         p1_wins.append(p1_won)
+                episode_max_b2b.append(ep_max_b2b[g])
+                ep_max_b2b[g] = -1
+                if cur_chain[g] > 0:
+                    chain_runs.append(cur_chain[g])
+                cur_chain[g] = 0
+                if cur_bank[g] > 0:
+                    bank_runs.append(cur_bank[g])
+                cur_bank[g] = 0
+                if post_break_peak[g] >= 0:
+                    post_break_combos.append(post_break_peak[g])
+                    post_break_clears.append(post_break_peak[g] - post_break_base[g])
+                post_break_peak[g] = -1
                 e1._reset()
                 e2._reset()
                 move_count[g] = 0
@@ -523,6 +707,7 @@ def main(args):
                 max_game_steps,
                 rng,
                 searcher,
+                9001 + gen * eval_games,
             )
             last_ref_dec = ref_wins + ref_losses
             if last_ref_dec:  # hold the previous value across all-draw evals
@@ -540,24 +725,33 @@ def main(args):
             print(f"Gen {gen}: no games completed; skipping update.", flush=True)
             continue
 
-        boards = np.stack([p["board"] for p, _z, _m in gen_pos]).astype(np.float32)
-        pieces = np.stack([p["pieces"] for p, _z, _m in gen_pos]).astype(np.int64)
-        bcg = np.stack([p["bcg"] for p, _z, _m in gen_pos]).astype(np.float32)
-        cand_pl = np.stack([p["cand_placements"] for p, _z, _m in gen_pos]).astype(
+        boards = np.stack([p["board"] for p, *_ in gen_pos]).astype(np.float32)
+        pieces = np.stack([p["pieces"] for p, *_ in gen_pos]).astype(np.int64)
+        bcg = np.stack([p["bcg"] for p, *_ in gen_pos]).astype(np.float32)
+        cand_pl = np.stack([p["cand_placements"] for p, *_ in gen_pos]).astype(
             np.float32
         )
-        cand_mk = np.stack([p["cand_mask"] for p, _z, _m in gen_pos]).astype(bool)
-        pi_tgt = np.stack([p["pi"] for p, _z, _m in gen_pos]).astype(np.float32)
-        value_tgt = np.array([z for _p, z, _m in gen_pos], dtype=np.float32)
-        policy_mask = np.array([m for _p, _z, m in gen_pos], dtype=np.float32)
-        v_root = np.array([p["v_root"] for p, _z, _m in gen_pos], dtype=np.float32)
-        visits = np.array([p["visits"] for p, _z, _m in gen_pos], dtype=np.float32)
+        cand_mk = np.stack([p["cand_mask"] for p, *_ in gen_pos]).astype(bool)
+        pi_tgt = np.stack([p["pi"] for p, *_ in gen_pos]).astype(np.float32)
+        value_tgt = np.array([r[1] for r in gen_pos], dtype=np.float32)
+        policy_mask = np.array([r[2] for r in gen_pos], dtype=np.float32)
+        outcome_z = np.array([r[3] for r in gen_pos], dtype=np.float32)
+        steps_to_end = np.array([r[4] for r in gen_pos], dtype=np.int64)
+        ahat_b2b = np.array([r[5] for r in gen_pos], dtype=np.float32)
+        ahat_atk = np.array([r[6] for r in gen_pos], dtype=np.float32)
+        v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
+        # gen_pos interleaves both players; policy_mask==1 is the learner.
+        lrn = policy_mask == 1.0
         # Search exploration: how the root visit mass spreads over legal candidates.
         # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
-        p_nz = np.where(pi_tgt > 0.0, pi_tgt, 1.0)  # 0*log(0) = 0
-        visit_perplexity = np.exp(-(pi_tgt * np.log(p_nz)).sum(axis=1))
-        top1_visit_share = pi_tgt.max(axis=1)
-        visit_coverage = (pi_tgt > 0.0).sum(axis=1) / np.maximum(cand_mk.sum(axis=1), 1)
+        pi_l = pi_tgt[lrn]
+        p_nz = np.where(pi_l > 0.0, pi_l, 1.0)  # 0*log(0) = 0
+        visit_perplexity = np.exp(-(pi_l * np.log(p_nz)).sum(axis=1))
+        top1_visit_share = pi_l.max(axis=1)
+        visit_coverage = (pi_l > 0.0).sum(axis=1) / np.maximum(
+            cand_mk[lrn].sum(axis=1), 1
+        )
+        root_cands_visited = (pi_l > 0.0).sum(axis=1)
 
         replay.append(
             {
@@ -594,7 +788,7 @@ def main(args):
         )
 
         # update_kl over a fixed-size slice of this gen's new LEARNER positions (one trace).
-        learner_idx = np.flatnonzero(policy_mask == 1.0)[:mini_batch_size]
+        learner_idx = np.flatnonzero(lrn)[:mini_batch_size]
         measure_kl = len(learner_idx) >= mini_batch_size
         if measure_kl:
             gi = (
@@ -606,14 +800,18 @@ def main(args):
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
 
+        # Average the optimization stats over the generation's minibatches.
         updates = 0
-        step_out = None
+        acc = {}
         for batch in ds:
             step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
+            for k, v in step_out.items():
+                acc.setdefault(k, []).append(float(v))
             updates += 1
-        if step_out is None:
+        if not acc:
             print(f"Gen {gen}: no batch produced; skipping update.", flush=True)
             continue
+        opt = {k: float(np.mean(v)) for k, v in acc.items()}
 
         if measure_kl:
             lp_after = _gen_log_probs(net, *gi).numpy()
@@ -627,7 +825,8 @@ def main(args):
         win_rate = wins / decisive if decisive else 0.0
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
-        dec = (value_tgt != 0.0) & (policy_mask == 1.0)  # learner positions only
+        app_learner = learner_attack / learner_placements if learner_placements else 0.0
+        dec = (outcome_z != 0.0) & lrn
         if (
             dec.sum() >= 2
             and np.std(v_root[dec]) > 1e-6
@@ -636,6 +835,7 @@ def main(args):
             value_calibration = float(np.corrcoef(v_root[dec], value_tgt[dec])[0, 1])
         else:
             value_calibration = 0.0
+        grounding = _grounding(v_root[lrn], outcome_z[lrn], steps_to_end[lrn])
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -678,40 +878,64 @@ def main(args):
 
         log_step(
             OneVsOneAZLog(
-                policy_loss=step_out["policy_loss"],
-                value_loss=step_out["value_loss"],
-                entropy=step_out["entropy"],
-                policy_kl=step_out["policy_kl"],
+                policy_loss=opt["policy_loss"],
+                value_loss=opt["value_loss"],
+                entropy=opt["entropy"],
+                policy_kl=opt["policy_kl"],
                 update_kl=update_kl,
-                explained_var=step_out["explained_var"],
-                value_mean=step_out["value_mean"],
+                explained_var=opt["explained_var"],
+                value_mean=opt["value_mean"],
+                value_target_var=opt["value_target_var"],
+                grad_norm=opt["grad_norm"],
                 avg_game_len=float(np.mean(game_lens)),
                 win_rate=win_rate,
                 win_rate_vs_ref=last_wr_ref,
                 draw_rate=draw_rate,
                 app=app,
+                app_learner=app_learner,
                 value_calibration=value_calibration,
-                avg_b2b=float(bcg[:, 0].mean()),
-                max_b2b=float(bcg[:, 0].max()),
-                avg_combo=float(bcg[:, 1].mean()),
-                surge_rate=float((bcg[:, 0] >= 4).mean()),
-                avg_visits=float(visits.mean()),
+                avg_b2b=float(bcg[lrn, 0].mean()),
+                max_b2b=float(bcg[lrn, 0].max()),
+                avg_combo=float(bcg[lrn, 1].mean()),
+                surge_rate=float((bcg[lrn, 0] >= 4).mean()),
+                b2b_at_death=_mean_or_none(b2b_at_death),
+                b2b_at_cashout=_mean_or_none(b2b_at_cashout),
+                episode_max_b2b=_mean_or_none(episode_max_b2b),
+                chain_run_len=_mean_or_none(chain_runs),
+                bank_run_len=_mean_or_none(bank_runs),
+                post_break_combo=_mean_or_none(post_break_combos),
+                post_break_clears=_mean_or_none(post_break_clears),
+                n_difficult_clears=n_difficult,
+                n_chain_runs=len(chain_runs),
+                n_breaks=n_breaks,
+                n_cashouts=len(b2b_at_cashout),
+                n_deaths=n_deaths,
+                decisive_games=decisive,
                 visit_perplexity=float(visit_perplexity.mean()),
                 top1_visit_share=float(top1_visit_share.mean()),
                 visit_coverage=float(visit_coverage.mean()),
-                dead_rate=dead_searches / total_searches if total_searches else 0.0,
+                root_cands_visited=float(root_cands_visited.mean()),
                 updates=updates,
                 buffer_size=replay_size,
                 completed_games=n_games,
                 pool_size=len(present),
                 elo=elo_tags,
+                grounding=grounding,
+                ahat_mean=float(
+                    BLEND_B2B_WEIGHT * ahat_b2b[lrn].mean()
+                    + BLEND_ATK_WEIGHT * ahat_atk[lrn].mean()
+                )
+                if td_blend > 0.0
+                else None,
+                ahat_b2b=float(ahat_b2b[lrn].mean()) if td_blend > 0.0 else None,
+                ahat_atk=float(ahat_atk[lrn].mean()) if td_blend > 0.0 else None,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )
         print(
-            f"Gen {gen} | Policy: {float(step_out['policy_loss']):2.3f} | "
-            f"Value: {float(step_out['value_loss']):2.3f} | "
-            f"Ent: {float(step_out['entropy']):1.3f} | "
+            f"Gen {gen} | Policy: {opt['policy_loss']:2.3f} | "
+            f"Value: {opt['value_loss']:2.3f} | "
+            f"Ent: {opt['entropy']:1.3f} | "
             f"WR(pool {opp_tag}): {win_rate:1.2f} | WRvsRef: {last_wr_ref:1.2f} | "
             f"Games: {n_games} | APP: {app:1.3f} | Updates: {updates}",
             flush=True,

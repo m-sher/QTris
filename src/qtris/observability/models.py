@@ -233,9 +233,9 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
 
-    Outcome value target (z in {-1,0,+1}); search shaping w_attack=0.05, w_b2b=0.06;
-    w_death=1, gamma=1, return_scale=1. The learner duels frozen snapshots sampled from a
-    disk pool; both players' trajectories are trained (each labeled with its own outcome)."""
+    TD(lambda) value target built from the outcome z in {-1,0,+1}; w_death=1, gamma=1,
+    return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
+    players' trajectories train the value head, the learner's also the policy."""
 
     num_games: int
     horizon: int
@@ -245,6 +245,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     dirichlet_alpha: float
     dirichlet_eps: float
     temp_moves: int
+    w_attack: float = 0.0
     w_b2b: float = 0.0
     mini_batch_size: int
     num_epochs: int
@@ -255,8 +256,10 @@ class OneVsOnePlacementAZConfig(BaseModel):
     pool_interval: int = 10
     pool_wr_gate: float = 0.55
     eval_interval: int = 10
-    eval_games: int = 8
+    eval_games: int = 32
     td_lambda: float = 0.9
+    td_blend: float = 0.0
+    blend_horizon: int = 16
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
@@ -280,27 +283,54 @@ class OneVsOneAZLog(LogPayloadModel):
     update_kl: float
     explained_var: float
     value_mean: float
+    value_target_var: float  # spread of the value target itself; read EV against this
+    grad_norm: float  # global grad norm before the optimizer's clipnorm
 
-    # Outcomes / gameplay (over games that completed this generation)
+    # Outcomes / gameplay.
     avg_game_len: float
     win_rate: float  # learner's decisive WR vs the sampled pool opponent
     win_rate_vs_ref: float  # learner's decisive WR vs the frozen gen_0 reference
     draw_rate: float
-    app: float
+    app: float  # both players' attack per placement, gross, garbage exchange on
+    app_learner: float  # learner-only attack per learner placement
     value_calibration: float
     avg_b2b: float
     max_b2b: float
     avg_combo: float
-    surge_rate: float
+    surge_rate: float  # share of learner positions SITTING at b2b>=4 (occupancy)
+
+    # Learner b2b economics; None when the gen produced no qualifying event.
+    b2b_at_death: Optional[float]  # learner b2b carried into its fatal placement
+    b2b_at_cashout: Optional[
+        float
+    ]  # b2b entering a surge break (trivial clear at b2b>=4); floored at 4
+    episode_max_b2b: Optional[float]  # mean per-episode peak b2b
+    chain_run_len: Optional[
+        float
+    ]  # difficult clears in a row; ANY other placement flushes
+    bank_run_len: Optional[
+        float
+    ]  # difficult clears per b2b streak, tolerating stacking between them (the hoard)
+    post_break_combo: Optional[
+        float
+    ]  # peak combo over a surge break, including combo carried into it
+    post_break_clears: Optional[float]  # clears chained AFTER a surge break
+
+    # Event counts.
+    n_difficult_clears: int
+    n_chain_runs: int
+    n_breaks: int
+    n_cashouts: int
+    n_deaths: int
+    decisive_games: int
 
     # Search
-    avg_visits: float
     visit_perplexity: (
         float  # exp(H(visit pi)): effective candidates searched; 1 = tunnel vision
     )
     top1_visit_share: float
     visit_coverage: float  # fraction of legal candidates that got >=1 visit
-    dead_rate: float
+    root_cands_visited: Optional[float]  # mean root candidates receiving visit mass
 
     # Training progress
     updates: int
@@ -311,12 +341,21 @@ class OneVsOneAZLog(LogPayloadModel):
     # Opponent-pool Elo: pre-formatted "elo/..." tags spliced in by to_payload.
     elo: dict[str, float] = {}
 
+    # corr/Brier of the root value against the realized outcome, per steps-to-end bucket.
+    grounding: dict[str, float | None] = {}
+
+    # Mean Ahat and its two channels over the generation's rows; None when td_blend is 0.
+    ahat_mean: Optional[float] = None
+    ahat_b2b: Optional[float] = None
+    ahat_atk: Optional[float] = None
+
     # Visualization (wrapped at log time)
     board: np.ndarray
 
     def to_payload(self) -> dict[str, Any]:
         d = super().to_payload()
         d.update(d.pop("elo", {}))
+        d.update({f"grounding/{k}": v for k, v in d.pop("grounding", {}).items()})
         return d
 
     _image_fields: tuple[str, ...] = ("board",)
@@ -329,6 +368,8 @@ class OneVsOneAZLog(LogPayloadModel):
             "update_kl",
             "explained_var",
             "value_mean",
+            "value_target_var",
+            "grad_norm",
         ),
         "outcomes": (
             "avg_game_len",
@@ -336,16 +377,37 @@ class OneVsOneAZLog(LogPayloadModel):
             "win_rate_vs_ref",
             "draw_rate",
             "app",
+            "app_learner",
             "value_calibration",
         ),
-        "gameplay": ("avg_b2b", "max_b2b", "avg_combo", "surge_rate"),
+        "gameplay": (
+            "avg_b2b",
+            "max_b2b",
+            "avg_combo",
+            "surge_rate",
+            "b2b_at_death",
+            "b2b_at_cashout",
+            "episode_max_b2b",
+            "chain_run_len",
+            "bank_run_len",
+            "post_break_combo",
+            "post_break_clears",
+        ),
+        "counts": (
+            "n_difficult_clears",
+            "n_chain_runs",
+            "n_breaks",
+            "n_cashouts",
+            "n_deaths",
+            "decisive_games",
+        ),
         "search": (
-            "avg_visits",
             "visit_perplexity",
             "top1_visit_share",
             "visit_coverage",
-            "dead_rate",
+            "root_cands_visited",
         ),
+        "blend": ("ahat_mean", "ahat_b2b", "ahat_atk"),
         "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
     }
 

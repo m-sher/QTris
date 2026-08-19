@@ -2,7 +2,11 @@ import tensorflow as tf
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.placement_features import build_placement_inference
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
-from qtris.search.placement_search import SearchConfig, search_best_move
+from qtris.search.placement_search import (
+    SearchConfig,
+    descriptor_key_sequence,
+    search_best_move,
+)
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
@@ -58,6 +62,7 @@ def main(args):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=dropout_rate,
+        value_activation="tanh",
     )
 
     p_model(
@@ -72,11 +77,8 @@ def main(args):
 
     load_checkpoint(p_model, args.checkpoint)
 
-    # MCTS search must use the SAME return_scale the value head was trained at - it normalizes
-    # the per-edge attack / b2b / death terms against the learned value. At the default 1.0 the
-    # immediate reward terms dwarf the value head (~return_scale x too large), so the search
-    # cashes out / breaks b2b instead of hoarding. Restore it from the (AZ) checkpoint; BC/PPO
-    # checkpoints have no return_scale -> fall back to 1.0.
+    # return_scale normalizes the per-edge attack, b2b and death terms against the value
+    # head. Read from the AZ checkpoint; BC/PPO checkpoints have none and use 1.0.
     mcts_return_scale = 1.0
     try:
         _ck = tf.train.latest_checkpoint(args.checkpoint)
@@ -279,13 +281,10 @@ def main(args):
                 forced[0], forced[1] = Keys.START, Keys.HARD_DROP
                 key_sequence = tf.constant(forced[None], dtype=tf.int64)
             else:
-                # The C engine steps by descriptor; reconstruct the key sequence for the
-                # chosen placement from the env pathfinder to drive the (TF-wrapped) demo env.
-                is_hold, rot, norm_col, _landing, spin = res["descriptor"]
-                action_index = is_hold * 160 + rot * 40 + norm_col * 4 + spin
-                _, _, cand_seqs = py_env._enumerate_placement_candidates()
+                # Full descriptor (incl. landing_row) -> multi-landing pathfinder sequence.
                 key_sequence = tf.constant(
-                    cand_seqs[action_index][None], dtype=tf.int64
+                    descriptor_key_sequence(py_env, res["descriptor"], max_len)[None],
+                    dtype=tf.int64,
                 )
         elif search_cfg is not None:
             # Neural-guided search picks the move (the predict above is only for the

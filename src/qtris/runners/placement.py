@@ -16,7 +16,10 @@ from tf_agents.environments.parallel_py_environment import ParallelPyEnvironment
 from tf_agents.environments.tf_py_environment import TFPyEnvironment
 
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from qtris.data.placement_features import build_placement_inference
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY,
+    build_placement_inference,
+)
 
 ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 
@@ -74,8 +77,10 @@ class PlacementRunner:
         self.env = TFPyEnvironment(ppy_env)
 
     def _build_candidates(self, cand_scores, cand_rows, cand_seqs, pieces):
-        """Per-env: dense obs candidates -> (placements[N,128,18], mask[N,128],
-        sequences[N,128,max_len])."""
+        """Per-env: dense obs candidates -> (placements[N,MCTS_CANDIDATE_CAPACITY,18],
+        mask[N,MCTS_CANDIDATE_CAPACITY], sequences[N,128,max_len]). Placements/mask are
+        padded past the dense packing up to the net's pinned candidate width; padded
+        slots are mask-False."""
         pls, masks, seqs = [], [], []
         for e in range(self._num_envs):
             valid = np.flatnonzero(cand_scores[e] > -1e29)
@@ -93,7 +98,13 @@ class PlacementRunner:
             pls.append(pl)
             masks.append(mask)
             seqs.append(sq)
-        return np.stack(pls), np.stack(masks), np.stack(seqs)
+        pls = np.stack(pls)
+        masks = np.stack(masks)
+        pad = MCTS_CANDIDATE_CAPACITY - pls.shape[1]
+        if pad > 0:
+            pls = np.pad(pls, ((0, 0), (0, pad), (0, 0)))
+            masks = np.pad(masks, ((0, 0), (0, pad)))
+        return pls, masks, np.stack(seqs)
 
     def collect_trajectory(self):
         b = {

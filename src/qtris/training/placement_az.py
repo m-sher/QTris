@@ -25,7 +25,10 @@ from tensorflow import keras
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
-from qtris.data.placement_features import CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY as CANDIDATE_CAPACITY,
+    PLACEMENT_FEATURE_DIM,
+)
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.models import AlphaZeroTrainConfig, SingleAgentAZLog
 from qtris.observability.backend import finish, init_run, log_step
@@ -36,16 +39,37 @@ from qtris.training.gae import compute_gae_and_returns, compute_raw_returns
 GAMMA = 0.99
 
 
+def _resolve_w_attack(args):
+    """--w-attack defaults to None at the CLI; solo resolves it to 1.0 (attack is the
+    solo return), 1v1 resolves to 0.0."""
+    v = getattr(args, "w_attack", None)
+    return 1.0 if v is None else v
+
+
 def _flat(arr, sel):
     """Collapse the (horizon, num_games) leading axes and keep storable rows."""
     return arr.reshape((-1,) + arr.shape[2:])[sel]
 
 
+def warm_start_policy_only(net, warm):
+    """Restore a BC checkpoint's trunk and policy into `net`, leaving its value head fresh.
+
+    This net's head is linear over an unbounded return in return_scale units, while the
+    pretrained head is tanh over a bounded label; a tanh pre-activation read linearly
+    reaches the search as saturated leaf bootstraps. 1v1 AZ, whose head is also tanh,
+    restores it."""
+    value_vars = net.value_trunk.weights + net.value_top.weights
+    fresh = [w.numpy() for w in value_vars]
+    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
+    for var, init in zip(value_vars, fresh):
+        var.assign(init)
+
+
 @tf.function
 def train_step(net, batch, value_coef):
     cand_mask = batch["cand_mask"]
-    # Optional per-position policy weight (1=train policy here, 0=value-only). Absent for
-    # solo AZ, so the policy terms reduce to a plain mean and behavior is unchanged.
+    # Optional per-position policy weight: 1 trains policy and value on the row, 0 value
+    # only. Absent for solo AZ, where the policy terms reduce to plain means.
     pm = batch.get("policy_mask")
     with tf.GradientTape() as tape:
         logits, values = net(
@@ -70,6 +94,7 @@ def train_step(net, batch, value_coef):
         loss = policy_loss + value_coef * value_loss
 
     grads = tape.gradient(loss, net.trainable_variables)
+    grad_norm = tf.linalg.global_norm(grads)  # pre-clip; the optimizer clips at 0.5
     net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
 
     probs = tf.nn.softmax(masked, axis=-1)
@@ -93,6 +118,8 @@ def train_step(net, batch, value_coef):
         "policy_kl": policy_loss - tgt_entropy,
         "explained_var": explained_var,
         "value_mean": tf.reduce_mean(values[:, 0]),
+        "value_target_var": ret_var,
+        "grad_norm": grad_norm,
     }
 
 
@@ -273,14 +300,15 @@ def main(args):
             raise SystemExit(f"--trace-tiers: unknown tiers {missing}.")
         trace_pools = {t: trace_pools[t] for t in sorted(keep)}
 
+    gamma = getattr(args, "gamma", None)
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 64),
         c_puct=getattr(args, "c_puct", 1.5),
         dirichlet_alpha=getattr(args, "dirichlet_alpha", 0.3),
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
-        gamma=getattr(args, "gamma", GAMMA),
+        gamma=GAMMA if gamma is None else gamma,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=getattr(args, "w_attack", 1.0),
+        w_attack=_resolve_w_attack(args),
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
@@ -324,11 +352,11 @@ def main(args):
     else:
         warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
         if warm is not None:
-            # Warm-start the policy only. The value head was pretrained against the oracle
-            # depth-0 max (value_scale units); it retargets to the search return (return_scale
-            # units) over the first few generations - a transient that self-corrects.
-            tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-            print(f"Warm-started policy from BC checkpoint {warm}.", flush=True)
+            warm_start_policy_only(net, warm)
+            print(
+                f"Warm-started policy from BC checkpoint {warm} (value head fresh).",
+                flush=True,
+            )
 
     envs = _build_envs(
         num_games,

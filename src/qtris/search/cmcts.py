@@ -17,7 +17,9 @@ import numpy as np
 
 import TetrisEnv
 
-CANDIDATE_CAPACITY = 128
+from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
+
+CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY  # MCTS slot width, not the BC one
 FEATURE_DIM = 18
 _NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
@@ -44,6 +46,22 @@ def _load_lib():
         + [ctypes.c_float]  # w_b2b
     )
     lib.mcts_create.restype = ctypes.c_void_p
+    lib.mcts_candidate_capacity.argtypes = []
+    lib.mcts_candidate_capacity.restype = ctypes.c_int
+    # Arity handshake: the .so's mcts_create must take exactly the args passed below.
+    try:
+        lib.mcts_create_arity.argtypes = []
+        lib.mcts_create_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_create_arity); rebuild tetrisenv"
+        ) from None
+    arity = int(lib.mcts_create_arity())
+    if arity != len(lib.mcts_create.argtypes):
+        raise RuntimeError(
+            f"mcts_create arity mismatch: .so has {arity}, wrapper passes "
+            f"{len(lib.mcts_create.argtypes)}. Rebuild tetrisenv."
+        )
     lib.mcts_set_root.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -107,6 +125,13 @@ class CMCTS:
         if _LIB is None:
             _LIB = _load_lib()
         self.lib = _LIB
+        c_cap = int(self.lib.mcts_candidate_capacity())
+        if c_cap != CANDIDATE_CAPACITY:
+            raise RuntimeError(
+                f"MCTS capacity handshake failed: C MCAP={c_cap} != "
+                f"MCTS_CANDIDATE_CAPACITY={CANDIDATE_CAPACITY}. Rebuild tetrisenv "
+                f"(pathfinder + b2b_search) after changing capacity."
+            )
         self.n = num_trees
         self.bh = board_height
         self.qsize = queue_size

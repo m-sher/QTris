@@ -7,10 +7,10 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 `apply_leaves` until the budget is spent, and read out per-root visit counts.
 
 Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
-attack), clipped, with an unclipped `-w_death` on terminal edges; the leaf bootstrap is the
-net value directly. PUCT uses Q in raw return_scale units (no per-tree min-max) so the death
-penalty isn't flattened to one normalized unit and `w_death` actually bites. Dirichlet noise
-+ sampling stay in Python.
+attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
+with `Phi = min(max(0, b2b), 12)`; terminal edges add an unclipped `-w_death` and carry
+`Phi(terminal) = 0`. The leaf bootstrap is the net value directly. PUCT uses Q in raw
+return_scale units. Dirichlet noise + sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import tensorflow as tf
 
-from qtris.data.placement_features import CANDIDATE_CAPACITY
+from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 from qtris.search.cmcts import CMCTS
 
 
@@ -34,7 +34,7 @@ class MCTSConfig:
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
-    w_b2b: float = 0.0  # potential-based b2b-build shaping; Phi=min(b2b,12), 0=off
+    w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -87,9 +87,11 @@ class PlacementMCTS:
     def search(self, real_envs, return_scale, temperatures):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
-        {dead: True} or {dead: False, pi, slot, descriptor, visits, board, pieces, bcg,
-        cand_placements, cand_mask}. `descriptor` = (is_hold, rot, norm_col, landing_row,
-        spin); commit the real move via `placement_step(env, searcher, descriptor)`."""
+        {dead: True} or {dead: False, pi, counts, descriptor, visits, value, board,
+        pieces, bcg, cand_placements, cand_mask}. `descriptor` = (is_hold, rot, norm_col,
+        landing_row, spin); commit the real move via
+        `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
+        counts alongside the normalized `pi`."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -103,7 +105,9 @@ class PlacementMCTS:
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),
-            auto_fill_queue=int(e0._auto_fill_queue),
+            # The sim extends its own queue from the mirrored bag RNG; the env flag only
+            # says who refills the real queue between moves.
+            auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,
@@ -124,7 +128,7 @@ class PlacementMCTS:
             if nv:
                 boards, pieces, bcg, pls, masks, tree_ids = req
                 logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
-                noise = np.zeros((nv, CANDIDATE_CAPACITY), dtype=np.float32)
+                noise = np.zeros((nv, MCTS_CANDIDATE_CAPACITY), dtype=np.float32)
                 for k in range(nv):
                     ls = np.flatnonzero(masks[k])
                     if ls.size:
@@ -165,16 +169,15 @@ class PlacementMCTS:
                 continue
             legal = np.flatnonzero(desc[i, :, 0] >= 0)
             slot = self._select_action(legal, counts[i], pi[i], float(temps[i]))
-            results.append(
-                {
-                    "dead": False,
-                    "pi": pi[i],
-                    "slot": slot,
-                    "descriptor": tuple(int(x) for x in desc[i, slot]),
-                    "visits": int(counts[i].sum()),
-                    **obs[i],
-                }
-            )
+            row = {
+                "dead": False,
+                "pi": pi[i],
+                "counts": counts[i].copy(),
+                "descriptor": tuple(int(x) for x in desc[i, slot]),
+                "visits": int(counts[i].sum()),
+                **obs[i],
+            }
+            results.append(row)
         return results
 
     def root_values(self, real_envs):
@@ -191,7 +194,9 @@ class PlacementMCTS:
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
             auto_push_garbage=int(e0._auto_push_garbage),
-            auto_fill_queue=int(e0._auto_fill_queue),
+            # The sim extends its own queue from the mirrored bag RNG; the env flag only
+            # says who refills the real queue between moves.
+            auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
             w_attack=self.cfg.w_attack,

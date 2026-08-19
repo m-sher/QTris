@@ -50,12 +50,15 @@
 #define MAX_LANDINGS 24  // Max distinct landing rows per base slot
 
 typedef struct {
-    uint16_t row_masks[4]; 
+    uint16_t row_masks[4];
     int min_col;
     int max_col;
     int min_row;
     int max_row;
     int row_offsets[4]; // Offset of each row in the 4x4 grid relative to top-left
+    // row_masks shifted to the bounding box origin, 4 bits per row. Equal shape_key means
+    // identical cells once anchored: I/S/Z rot r == rot r+2, all four O rotations.
+    uint16_t shape_key;
 } PieceOrientation;
 
 typedef struct {
@@ -276,6 +279,18 @@ void init_pieces() {
     // (3, 1)
     int8_t ik31[5][2] = {{0,-1}, {-2,-1}, {-1,-1}, {-2,0}, {-1,0}};
     for(int i=0; i<5; i++) { I_KICKS[3][1][i][0] = ik31[i][0]; I_KICKS[3][1][i][1] = ik31[i][1]; }
+
+    // shape_key: row_masks shifted to the bounding box origin, packed 4 bits per row.
+    for (int p = 0; p < 8; p++) {
+        for (int r = 0; r < 4; r++) {
+            PieceOrientation* o = &PIECES[p].orientations[r];
+            uint16_t k = 0;
+            for (int j = 0; j + o->min_row <= o->max_row && j < 4; j++) {
+                k |= (uint16_t)(((o->row_masks[o->min_row + j] >> o->min_col) & 0xF) << (4 * j));
+            }
+            o->shape_key = k;
+        }
+    }
 
     initialized = true;
 }
@@ -765,4 +780,111 @@ void find_placement_candidates_c(
         bfs_expand(board_rows, board_height, piece_type, curr_state, r, c, rot, depth,
                    meta, visited, queue, &tail);
     }
+}
+
+// Every unique resting placement (rot, norm_col, landing_row, spin) reachable from the
+// start state; distinct landing rows are separate entries. BFS rules match
+// find_placement_candidates_c (max_len-derived depth, 4-way spin detection, no
+// visibility filter). Returns the count written (capped at max_out). out_sequences may
+// be NULL; when non-NULL it is a caller-PAD-filled [max_out * max_len] buffer receiving
+// one key sequence per placement.
+int find_unique_placements_c(
+    const uint16_t* board_rows,
+    const int board_height,
+    const int piece_type,
+    const int start_row,
+    const int start_col,
+    const int start_rot,
+    const int max_len,
+    const int is_hold,
+    const int max_out,
+    int32_t* out_rot,
+    int32_t* out_norm_col,
+    int32_t* out_landing_row,
+    int32_t* out_spin,
+    int64_t* out_sequences
+) {
+    if (!initialized) init_pieces();
+    if (max_out <= 0 || !out_rot || !out_norm_col || !out_landing_row || !out_spin)
+        return 0;
+
+    StateMeta meta[STATE_SPACE];
+    bool visited[STATE_SPACE];
+    int queue[QUEUE_CAPACITY];
+
+    for (int i = 0; i < STATE_SPACE; i++) {
+        visited[i] = false;
+        meta[i].parent = -1;
+    }
+
+    int start_state = encode_state(start_row, start_col, start_rot, piece_type);
+    if (start_state == -1 ||
+        check_collision(board_rows, board_height, piece_type, start_rot, start_row,
+                        start_col)) {
+        return 0;
+    }
+
+    int head = 0, tail = 0;
+    queue[tail++] = start_state;
+    visited[start_state] = true;
+    meta[start_state].depth = 0;
+    meta[start_state].last_move = KEY_START;
+    meta[start_state].delta_r = 0;
+
+    int max_seq = is_hold ? max_len : max_len - 1;
+    int max_depth = max_seq - 2;
+    int n_out = 0;
+
+    while (head != tail) {
+        int curr_state = queue[head++];
+        head %= QUEUE_CAPACITY;
+
+        int r, c, rot;
+        decode_state(curr_state, &r, &c, &rot, piece_type);
+        int depth = meta[curr_state].depth;
+
+        int land_r = hard_drop_row(board_rows, board_height, piece_type, rot, r, c);
+
+        if (r == land_r) {
+            int delta_sum =
+                abs(meta[curr_state].delta_row) + abs(meta[curr_state].delta_col);
+            int spin_type = compute_spin_type(board_rows, board_height, piece_type, rot,
+                                              land_r, c, meta[curr_state].delta_r,
+                                              delta_sum);
+            const PieceOrientation* ori = &PIECES[piece_type].orientations[rot];
+            int norm_col = c + ori->min_col;
+            int norm_row = land_r + ori->min_row;
+
+            // Dedup on occupied cells: equal shape_key at the same normalised anchor and
+            // spin type is the same placement.
+            bool dup = false;
+            for (int i = 0; i < n_out; i++) {
+                const PieceOrientation* oi =
+                    &PIECES[piece_type].orientations[out_rot[i]];
+                if (out_spin[i] == spin_type && out_norm_col[i] == norm_col &&
+                    out_landing_row[i] + oi->min_row == norm_row &&
+                    oi->shape_key == ori->shape_key) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup && n_out < max_out) {
+                out_rot[n_out] = rot;
+                out_norm_col[n_out] = norm_col;
+                out_landing_row[n_out] = land_r;
+                out_spin[n_out] = spin_type;
+                if (out_sequences) {
+                    write_sequence(meta, curr_state, is_hold, max_len,
+                                   &out_sequences[(size_t)n_out * max_len]);
+                }
+                n_out++;
+            }
+        }
+
+        if (depth >= max_depth) continue;
+
+        bfs_expand(board_rows, board_height, piece_type, curr_state, r, c, rot, depth,
+                   meta, visited, queue, &tail);
+    }
+    return n_out;
 }

@@ -74,7 +74,7 @@ def main() -> None:
     az.add_argument(
         "--eval-games",
         type=int,
-        default=8,
+        default=32,
         help="placement 1v1 only: games per win_rate_vs_ref eval.",
     )
     az.add_argument(
@@ -119,8 +119,22 @@ def main() -> None:
     az.add_argument(
         "--gamma",
         type=float,
-        default=0.99,
-        help="discount for MCTS backup + MC return target.",
+        default=None,
+        help="placement single-player only: discount for MCTS backup + MC return target "
+        "(default 0.99). Rejected for placement 1v1, whose reward is terminal-only.",
+    )
+    az.add_argument(
+        "--td-blend",
+        type=float,
+        default=0.0,
+        help="placement 1v1 only: weight of the realized near-term production channel in "
+        "the value target; 0 disables the blend. Terminal rows stay pure z.",
+    )
+    az.add_argument(
+        "--blend-horizon",
+        type=int,
+        default=16,
+        help="placement 1v1 only: forward window (placements) for the blend channels.",
     )
     az.add_argument(
         "--temp-moves",
@@ -149,8 +163,9 @@ def main() -> None:
     az.add_argument(
         "--w-attack",
         type=float,
-        default=1.0,
-        help="per-edge search reward weight on attack (also scales the realized return).",
+        default=None,
+        help="per-edge search reward weight on attack (also scales the realized return). "
+        "Default 1.0 for single-player, 0.0 for placement 1v1.",
     )
     az.add_argument(
         "--w-death",
@@ -161,9 +176,9 @@ def main() -> None:
     az.add_argument(
         "--w-b2b",
         type=float,
-        default=0.06,
+        default=0.0,
         help="placement 1v1 only: potential-based b2b-build search shaping "
-        "(Phi=min(b2b,12); builds toward surges instead of cashing out; 0=off).",
+        "(Phi=min(max(0,b2b),12); 0=off).",
     )
     az.add_argument(
         "--replay-capacity",
@@ -278,6 +293,12 @@ def main() -> None:
             if args.algo != "az":
                 parser.error(
                     "placement 1v1 supports only --algo az (opponent-pool AlphaZero)."
+                )
+            if args.gamma is not None:
+                parser.error(
+                    "placement 1v1 does not accept --gamma: its reward is terminal-only "
+                    "(z in {-1,0,1}) and the TD(lambda) target is undiscounted. Use "
+                    "--td-lambda to trade outcome grounding against bootstrap."
                 )
             from qtris.training._1v1_placement_az import main as run
         else:

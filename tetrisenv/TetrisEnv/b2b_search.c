@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
@@ -69,7 +70,7 @@
 #define MAX_PLACEMENTS 512
 
 // Beam search limits
-#define MAX_BEAM_WIDTH 256
+#define MAX_BEAM_WIDTH 2048
 #define MAX_SEARCH_DEPTH 16
 
 // ============================================================
@@ -83,6 +84,9 @@ typedef struct {
     int min_row;
     int max_row;
     int row_offsets[4];
+    // row_masks shifted to the bounding box origin, 4 bits per row. Equal shape_key means
+    // identical cells once anchored: I/S/Z rot r == rot r+2, all four O rotations.
+    uint16_t shape_key;
 } PieceOrientation;
 
 typedef struct {
@@ -117,13 +121,10 @@ typedef struct {
     int b2b;
     int combo;
     float total_attack;
-    int total_lines_cleared;   // Total lines cleared in this search path
     int pieces_placed;         // Pieces placed along this search path (for APP denom)
     int hold_piece;
     int next_queue_idx;
     int depth0_placement_idx;  // Which placement was chosen at depth 0 (for output)
-    bool b2b_broken;
-    int prev_b2b;
     int garbage_remaining;   // Simulated garbage rows not yet pushed
     int garbage_timer;       // Ticks until next garbage push (decremented on non-clear)
     float garbage_prevented; // Cumulative garbage lines kept off the board along this path:
@@ -131,6 +132,9 @@ typedef struct {
                              // (timer <= 0) and the move either cancelled the lines or
                              // blocked the push by clearing.
     uint8_t bag_seen;        // Bitmask of pieces consumed from current 7-bag (bits 1-7)
+    uint8_t unlicensed_cash; // D_cash at parent.combo<0: exclude this lock's A from APP
+    float parent_avg_height; // Parent skyline mean; used for W_AVG_HEIGHT iff unlicensed_cash
+    float unlicensed_cash_A; // This lock's attack iff unlicensed_cash, else 0
     float score;
     uint64_t sort_hash;      // state_hash cached at insert; sole tiebreak key for the
                              // deterministic beam sort (so parallel append order can't
@@ -147,6 +151,24 @@ static inline void compute_col_heights_full(const uint16_t* board, int board_hei
             if (board[r] & bit) { out_heights[c] = (int8_t)(board_height - r); break; }
         }
     }
+}
+
+static inline float mean_col_heights(const int8_t* heights) {
+    int sum = 0;
+    for (int c = 0; c < BOARD_COLS; c++) sum += heights[c];
+    return (float)sum / (float)BOARD_COLS;
+}
+
+// U := D_cash && parent.combo<0. D_cash := clear && spin==NONE && (tetris || PC).
+// Must be written on every emit; SearchState is not memset.
+static inline void latch_unlicensed_cash(SearchState* s, int clears, int spin_type,
+                                         bool perfect_clear, int parent_combo,
+                                         float parent_avg_height, float this_attack) {
+    bool d_cash = (clears > 0) && (spin_type == SPIN_NONE)
+                  && (clears == 4 || perfect_clear);
+    s->unlicensed_cash = (d_cash && parent_combo < 0) ? 1 : 0;
+    s->parent_avg_height = parent_avg_height;
+    s->unlicensed_cash_A = s->unlicensed_cash ? this_attack : 0.0f;
 }
 
 // Top-out, shared by the env/MCTS/beam: the piece-agnostic 7-cell spawn box is blocked
@@ -301,6 +323,12 @@ static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     gp.f = s->garbage_prevented;
     h ^= (uint64_t)a.u * 0x9e3779b97f4a7c15ULL;
     h ^= (uint64_t)gp.u * 0x517cc1b727220a95ULL;
+    h ^= (uint64_t)s->unlicensed_cash * 0x9e3779b97f4a7c15ULL;
+    union { float f; uint32_t u; } ua, ph;
+    ua.f = s->unlicensed_cash_A;
+    ph.f = s->parent_avg_height;
+    h ^= (uint64_t)ua.u * 0x517cc1b727220a95ULL;
+    h ^= (uint64_t)ph.u * 0x9e3779b97f4a7c15ULL;
     return h;
 }
 
@@ -340,10 +368,6 @@ static inline void tt_new_generation(void) {
 
 static PieceDef B2B_PIECES[8];
 static bool b2b_initialized = false;
-
-// Last search result - read by the C game loop to avoid lossy action_idx decode.
-// b2b_search_c() writes this; b2b_run_eval_games() reads it.
-static __thread Placement b2b_last_placement;
 
 // Kick tables: [from_rot][to_rot][kick_index][0=row, 1=col]
 static int8_t B2B_KICKS[4][4][5][2];
@@ -391,70 +415,6 @@ static float W_GARBAGE_PREVENT = 4.0f;     // * garbage_prevented - keep imminen
 static float W_TSLOT           = 6.0f;
 static float W_IMMOBILE_CLEAR  = 5.0f;     // * sqrt(immobile_clearing_placements)
 static float W_IMMOBILE_LINES  = 1.0f;     // * min(immobile_clearable_lines, 8)
-
-// ============================================================
-// Weight Override Table (for ablation / tuning)
-//
-// Each entry maps a string name to the address of a W_* global so callers can
-// override or reset weights at runtime without recompiling.  Used by
-// b2b_set_weight / b2b_reset_weights - invoked from Python for ablation sweeps.
-// ============================================================
-
-typedef struct {
-    const char* name;
-    float* ptr;
-    float default_value;
-} WeightEntry;
-
-static WeightEntry W_TABLE[] = {
-    {"W_NEAR_DEATH",       &W_NEAR_DEATH,       5000.0f},
-    {"W_HEIGHT_QUARTIC",   &W_HEIGHT_QUARTIC,   80.0f},
-    {"W_AVG_HEIGHT",       &W_AVG_HEIGHT,       40.0f},
-    {"W_BUMPINESS",        &W_BUMPINESS,        1.0f},
-    {"W_HOLES",            &W_HOLES,            6.0f},
-    {"W_HOLE_CEILING",     &W_HOLE_CEILING,     1.5f},
-    {"W_B2B_FLAT",         &W_B2B_FLAT,         5.0f},
-    {"W_B2B_SQRT",         &W_B2B_SQRT,         8.0f},
-    {"W_B2B_LINEAR",       &W_B2B_LINEAR,       20.0f},
-    {"W_ATTACK_TOTAL",     &W_ATTACK_TOTAL,     1.0f},
-    {"W_APP",              &W_APP,              100.0f},
-    {"W_GARBAGE_PREVENT",  &W_GARBAGE_PREVENT,  4.0f},
-    {"W_TSLOT",            &W_TSLOT,            6.0f},
-    {"W_IMMOBILE_CLEAR",   &W_IMMOBILE_CLEAR,   5.0f},
-    {"W_IMMOBILE_LINES",   &W_IMMOBILE_LINES,   1.0f},
-};
-static const int W_TABLE_LEN = (int)(sizeof(W_TABLE) / sizeof(W_TABLE[0]));
-
-int b2b_set_weight(const char* name, float value) {
-    for (int i = 0; i < W_TABLE_LEN; i++) {
-        if (strcmp(W_TABLE[i].name, name) == 0) {
-            *W_TABLE[i].ptr = value;
-            // Invalidate the eval transposition cache so stale scores from
-            // before the weight change can never satisfy a TT lookup.
-            g_tt_generation += TT_GENERATION_EXPIRY + 1;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-float b2b_get_weight(const char* name) {
-    for (int i = 0; i < W_TABLE_LEN; i++) {
-        if (strcmp(W_TABLE[i].name, name) == 0) return *W_TABLE[i].ptr;
-    }
-    return 0.0f;
-}
-
-void b2b_reset_weights(void) {
-    for (int i = 0; i < W_TABLE_LEN; i++) *W_TABLE[i].ptr = W_TABLE[i].default_value;
-}
-
-int b2b_get_weight_count(void) { return W_TABLE_LEN; }
-
-const char* b2b_get_weight_name(int idx) {
-    if (idx < 0 || idx >= W_TABLE_LEN) return "";
-    return W_TABLE[idx].name;
-}
 
 // ============================================================
 // Piece / Kick Initialization (copied from pathfinder.c)
@@ -582,6 +542,18 @@ static void b2b_init_pieces(void) {
 
     int8_t ik31[5][2] = {{0,-1}, {-2,-1}, {-1,-1}, {-2,0}, {-1,0}};
     for (int i = 0; i < 5; i++) { B2B_I_KICKS[3][1][i][0] = ik31[i][0]; B2B_I_KICKS[3][1][i][1] = ik31[i][1]; }
+
+    // shape_key: row_masks shifted to the bounding box origin, packed 4 bits per row.
+    for (int p = 0; p < 8; p++) {
+        for (int r = 0; r < 4; r++) {
+            PieceOrientation* o = &B2B_PIECES[p].orientations[r];
+            uint16_t k = 0;
+            for (int j = 0; j + o->min_row <= o->max_row && j < 4; j++) {
+                k |= (uint16_t)(((o->row_masks[o->min_row + j] >> o->min_col) & 0xF) << (4 * j));
+            }
+            o->shape_key = k;
+        }
+    }
 
     b2b_initialized = true;
 }
@@ -818,7 +790,6 @@ typedef struct {
     float attack;
     int new_b2b;
     int new_combo;
-    bool b2b_broken;
     bool b2b_maintaining;  // true if this clear kept/started b2b (spin/tetris/PC)
     float surge;
 } AttackResult;
@@ -829,7 +800,6 @@ static AttackResult compute_attack(int clears, int spin_type, int b2b, int combo
     res.attack = 0;
     res.new_b2b = b2b;
     res.new_combo = combo;
-    res.b2b_broken = false;
     res.b2b_maintaining = false;
     res.surge = 0;
 
@@ -844,7 +814,6 @@ static AttackResult compute_attack(int clears, int spin_type, int b2b, int combo
                 res.surge = (float)(b2b);
             }
             res.new_b2b = -1;
-            if (b2b >= 0) res.b2b_broken = true;
         }
 
         res.new_combo = combo + 1;
@@ -960,11 +929,18 @@ static int find_placements(const uint16_t* board_rows, int board_height,
                 }
             }
 
-            // Check for duplicate placement (same rot, col, landing_row, spin)
+            // Dedup on occupied cells: equal shape_key at the same normalised anchor and
+            // spin type is the same placement.
+            const PieceOrientation* ori = &B2B_PIECES[piece_type].orientations[rot];
+            int norm_col_k = c + ori->min_col;
+            int norm_row_k = land_r + ori->min_row;
             bool dup = false;
             for (int i = 0; i < num_placements; i++) {
-                if (out[i].rot == rot && out[i].col == c &&
-                    out[i].landing_row == land_r && out[i].spin_type == spin) {
+                const PieceOrientation* oi = &B2B_PIECES[piece_type].orientations[out[i].rot];
+                if (out[i].spin_type == spin &&
+                    out[i].col + oi->min_col == norm_col_k &&
+                    out[i].landing_row + oi->min_row == norm_row_k &&
+                    oi->shape_key == ori->shape_key) {
                     dup = true;
                     break;
                 }
@@ -1089,17 +1065,26 @@ static int find_placements(const uint16_t* board_rows, int board_height,
 // Flood-fill reachability from top of board.
 // Fills reachable[] with bitmasks indicating which empty cells are reachable
 // from the top row via orthogonal movement through empty cells.
+//
+// `top_filled` is the first non-empty row (board_height if the board is empty).
+// Every row above it is wholly empty and 4-connected to row 0, so the flood
+// would mark it full_mask; set those directly and seed the BFS at top_filled
+// instead of walking the air column. Output is bit-identical.
 static void compute_reachability(const uint16_t* board, int board_height,
-                                  uint16_t* reachable) {
-    memset(reachable, 0, sizeof(uint16_t) * board_height);
+                                  int top_filled, uint16_t* reachable) {
+    const uint16_t full_mask = (1 << BOARD_COLS) - 1;
+    for (int r = 0; r < top_filled; r++) reachable[r] = full_mask;
+    memset(reachable + top_filled, 0,
+           sizeof(uint16_t) * (size_t)(board_height - top_filled));
+    if (top_filled >= board_height) return;
 
     int flood_queue[BOARD_ROWS * BOARD_COLS * 2]; // row, col pairs
     int fh = 0, ft = 0;
 
     for (int c = 0; c < BOARD_COLS; c++) {
-        if (!(board[0] & (1 << c))) {
-            reachable[0] |= (1 << c);
-            flood_queue[ft++] = 0;
+        if (!(board[top_filled] & (1 << c))) {
+            reachable[top_filled] |= (1 << c);
+            flood_queue[ft++] = top_filled;
             flood_queue[ft++] = c;
         }
     }
@@ -1124,22 +1109,19 @@ static void compute_reachability(const uint16_t* board, int board_height,
 
 // Count enclosed hole SECTIONS (connected components) using precomputed
 // reachability.  A "section" is a maximal 4-connected group of enclosed
-// empty cells.  Cells in immobile_cells[] are excluded.
+// empty cells.
 //
 // Fewer, larger cavities score lower than many scattered single-cell holes.
 static int count_hole_sections(const uint16_t* board,
                                int board_height,
-                               const uint16_t* reachable,
-                               const uint16_t* immobile_cells) {
+                               const uint16_t* reachable) {
     uint16_t full_mask = (1 << BOARD_COLS) - 1;
 
     // Build per-row bitmask of hole cells
     uint16_t hole_mask[BOARD_ROWS];
     for (int r = 0; r < board_height; r++) {
         uint16_t empty = (~board[r]) & full_mask;
-        uint16_t enclosed = empty & (~reachable[r]);
-        enclosed &= ~immobile_cells[r];
-        hole_mask[r] = enclosed;
+        hole_mask[r] = empty & (~reachable[r]);
     }
 
     // Flood-fill BFS to count connected components (4-connected)
@@ -1204,9 +1186,11 @@ static int count_hole_sections(const uint16_t* board,
 // of the stack are more dangerous.
 //
 // Returns a float score (not an integer count) because of height weighting.
+//
+// Scanning starts at `top_filled`: above it every cell is empty, so filled_above
+// stays 0 and the `filled_above > 0` test can never fire. Bit-identical result.
 static float compute_hole_ceiling_weight(const uint16_t* board, int board_height,
-                                          const uint16_t* reachable,
-                                          const uint16_t* immobile_cells) {
+                                          int top_filled, const uint16_t* reachable) {
     float total_weight = 0.0f;
 
     for (int c = 0; c < BOARD_COLS; c++) {
@@ -1214,14 +1198,13 @@ static float compute_hole_ceiling_weight(const uint16_t* board, int board_height
 
         // Scan column top-to-bottom, track filled cells above
         int filled_above = 0;
-        for (int r = 0; r < board_height; r++) {
+        for (int r = top_filled; r < board_height; r++) {
             if (board[r] & bit) {
                 filled_above++;
             } else {
                 // Empty cell - check if it's an enclosed hole
                 bool enclosed = !(reachable[r] & bit);
-                bool is_setup = (immobile_cells[r] & bit) != 0;
-                if (enclosed && !is_setup && filled_above > 0) {
+                if (enclosed && filled_above > 0) {
                     int hole_height = board_height - r;
                     float height_factor = (float)hole_height / (float)board_height;
                     total_weight += (float)filled_above * (1.0f + height_factor);
@@ -1257,16 +1240,10 @@ static inline bool cell_empty(const uint16_t* board, int board_height, int r, in
 // We check for all 4 T-spin orientations at each board position.
 // Returns: number of T-spin setups found (0, 1, or more)
 // t_slot_quality: set to best quality found (0=none, 1=mini possible, 2=full T-spin)
-// t_multiline_setups: [optional, may be NULL] number of setups that would clear >=2 lines
-//                     (TSD/TST); these are the attack/clear-efficient T-spins we want to
-//                     actively reward when T is in the queue.
 static int detect_t_spin_setups(const uint16_t* board, int board_height,
-                                int* t_slot_quality,
-                                int* t_multiline_setups) {
+                                int top_filled, int* t_slot_quality) {
     int setups = 0;
     int best_quality = 0;
-    int multi = 0;
-    uint16_t full_mask_ = (1 << BOARD_COLS) - 1;
 
     // For each possible T-piece center position (row, col),
     // check if a T-spin could happen in each of the 4 rotations.
@@ -1279,8 +1256,15 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 
     // We look for the T-slot pattern: the 3 cells of the T (excluding center-back)
     // must be empty, and at least 3 of 4 corners must be filled.
+    //
+    // Anchors with r + 2 < top_filled are skipped: c spans 0..BOARD_COLS-3 and the
+    // loop bound keeps r + 2 <= board_height - 1, so all four corners are in bounds
+    // (no out-of-bounds "filled") and all sit in wholly empty rows, giving
+    // corner_count == 0 < 3. Starting at top_filled - 2 is bit-identical.
+    int scan_start = top_filled - 2;
+    if (scan_start < 0) scan_start = 0;
 
-    for (int r = 0; r < board_height - 2; r++) {
+    for (int r = scan_start; r < board_height - 2; r++) {
         for (int c = 0; c < BOARD_COLS - 2; c++) {
             // Corner positions (in the 3x3 grid anchored at r,c)
             bool tl = cell_filled(board, board_height, r, c);
@@ -1292,31 +1276,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
             if (corner_count < 3) continue;
 
             // Check each T rotation for a valid slot
-
-            // Helper to count lines cleared by a T placement at this slot:
-            // given the 4 piece cells as (row, col_bit) pairs, OR each into
-            // its board row and count how many become full.  Inlined per
-            // rotation so we don't allocate arrays in a hot loop.
-            #define TSPIN_COUNT_LINES(r0,m0, r1,m1, r2,m2, r3,m3) ({        \
-                int _lines = 0;                                                \
-                int _rs[4] = {(r0),(r1),(r2),(r3)};                            \
-                uint16_t _ms[4] = {(uint16_t)(m0),(uint16_t)(m1),              \
-                                    (uint16_t)(m2),(uint16_t)(m3)};            \
-                /* dedupe rows: multiple T cells can be on same row */         \
-                for (int _i = 0; _i < 4; _i++) {                               \
-                    bool _seen = false;                                        \
-                    for (int _j = 0; _j < _i; _j++)                            \
-                        if (_rs[_j] == _rs[_i]) { _seen = true; break; }       \
-                    if (_seen) continue;                                       \
-                    uint16_t _comb = _ms[_i];                                  \
-                    for (int _j = _i + 1; _j < 4; _j++)                        \
-                        if (_rs[_j] == _rs[_i]) _comb |= _ms[_j];              \
-                    if (_rs[_i] >= 0 && _rs[_i] < board_height &&              \
-                        (((uint16_t)board[_rs[_i]] | _comb) & full_mask_) == full_mask_) \
-                        _lines++;                                              \
-                }                                                              \
-                _lines;                                                        \
-            })
 
             // Rot 2 (T points down, most common T-spin: overhang from above)
             // T cells: [1,0] [1,1] [1,2] [2,1] - center is [1,1]
@@ -1337,14 +1296,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                     if (cell_empty(board, board_height, r, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1366,14 +1317,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r, c + 2)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1395,14 +1338,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r - 1, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << (c+1),
-                                r+1, 1u << (c+2),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
@@ -1424,23 +1359,13 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
                         cell_empty(board, board_height, r - 1, c + 1)) {
                         setups++;
                         if (quality > best_quality) best_quality = quality;
-                        if (quality == 2) {
-                            int lines = TSPIN_COUNT_LINES(
-                                r,   1u << (c+1),
-                                r+1, 1u << c,
-                                r+1, 1u << (c+1),
-                                r+2, 1u << (c+1));
-                            if (lines >= 2) multi++;
-                        }
                     }
                 }
             }
-            #undef TSPIN_COUNT_LINES
         }
     }
 
     *t_slot_quality = best_quality;
-    if (t_multiline_setups) *t_multiline_setups = multi;
     return setups;
 }
 
@@ -1463,7 +1388,6 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
 // ============================================================
 
 typedef struct {
-    float weighted_immobile;            // Queue-weighted sum of truly immobile placements
     float weighted_immobile_clearing;   // Queue-weighted sum of immobile + line-clearing placements
     float weighted_immobile_lines;      // Queue-weighted sum of clearable lines from immobile placements
 } ImmobilePlacementResult;
@@ -1474,21 +1398,11 @@ typedef struct {
 // then 0.33, etc. (1/position). This ensures the heuristic rewards setups
 // that can be resolved SOON rather than speculative cavities for distant pieces.
 //
-// Populates two per-row bitmasks:
-//   immobile_cells[]   - cells in ANY valid immobile placement (used for
-//                         wasted-hole detection: reachable holes not in here
-//                         are "wasted").
-//   clearing_cells[]   - cells in immobile placements that CLEAR at least one
-//                         line (used to exempt productive spin-setup holes from
-//                         hole penalties - only clearing setups earn exemption).
-//
 // upcoming_pieces: array of piece types (1-7) to check, ordered by priority
 // num_upcoming: length of upcoming_pieces
 static ImmobilePlacementResult count_immobile_placements(
     const uint16_t* board, int board_height,
     const uint16_t* reachable,
-    uint16_t* immobile_cells,        // output: ALL immobile placement cells
-    uint16_t* clearing_cells,        // output: only clearing immobile cells
     const int* upcoming_pieces,
     int num_upcoming,
     const int* piece_queue_count     // [8], count of each piece type in upcoming;
@@ -1496,9 +1410,7 @@ static ImmobilePlacementResult count_immobile_placements(
                                      // four S-slots with one S in queue reward only
                                      // as much as one usable slot.
 ) {
-    ImmobilePlacementResult res = {0.0f, 0.0f, 0.0f};
-    memset(immobile_cells, 0, sizeof(uint16_t) * board_height);
-    memset(clearing_cells, 0, sizeof(uint16_t) * board_height);
+    ImmobilePlacementResult res = {0.0f, 0.0f};
 
     if (num_upcoming <= 0) return res;
 
@@ -1541,12 +1453,8 @@ static ImmobilePlacementResult count_immobile_placements(
 
         float w = piece_weight[pt];
 
-        // Per-piece accumulators: count all valid placements/lines for this
-        // piece type, then apply the queue-count cap at the end.  This caps
-        // the scalar reward without restricting which slots populate the
-        // immobile_cells / clearing_cells bitmasks (those remain full so
-        // hole-exemption still works on every valid spin slot).
-        int placements_this_piece = 0;
+        // Per-piece accumulators: count all valid clearing placements/lines for
+        // this piece type, then apply the queue-count cap at the end.
         int clearing_placements_this_piece = 0;
         int lines_this_piece = 0;
 
@@ -1596,18 +1504,6 @@ static ImmobilePlacementResult count_immobile_placements(
                         if ((combined & full_mask) == full_mask) lines++;
                     }
 
-                    // Mark cells: ALL placements go into immobile_cells
-                    // (for wasted-hole detection); only CLEARING placements
-                    // go into clearing_cells (for hole-penalty exemption).
-                    for (int i = 0; i < 4; i++) {
-                        if (ori->row_masks[i] == 0) continue;
-                        int br = r + i;
-                        uint16_t shifted = (uint16_t)(ori->row_masks[i]) << c;
-                        immobile_cells[br] |= shifted;
-                        if (lines > 0) clearing_cells[br] |= shifted;
-                    }
-
-                    placements_this_piece++;
                     if (lines > 0) {
                         clearing_placements_this_piece++;
                         lines_this_piece += lines;
@@ -1625,12 +1521,10 @@ static ImmobilePlacementResult count_immobile_placements(
         if (piece_queue_count != NULL && pt >= 0 && pt < 8) qc = piece_queue_count[pt];
         if (qc <= 0) qc = 1; // defensive: weight was non-zero, so piece IS in queue
 
-        int capped_placements = placements_this_piece < qc ? placements_this_piece : qc;
         int capped_clearing   = clearing_placements_this_piece < qc ? clearing_placements_this_piece : qc;
         int lines_cap         = qc * 4;
         int capped_lines      = lines_this_piece < lines_cap ? lines_this_piece : lines_cap;
 
-        res.weighted_immobile          += w * (float)capped_placements;
         res.weighted_immobile_clearing += w * (float)capped_clearing;
         res.weighted_immobile_lines    += w * (float)capped_lines;
     }
@@ -1688,13 +1582,18 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
         bumpiness += fabsf((float)(s.col_heights[c] - s.col_heights[c + 1]));
     }
 
+    // First non-empty row; bounds every per-leaf scan below (the stack is ~2-5
+    // rows of a 40-row board, so the rest is air).
+    int top_filled = board_height;
+    for (int r = 0; r < board_height; r++) {
+        if (board[r] != 0) { top_filled = r; break; }
+    }
+
     // Flood-fill reachability (feeds the hole + immobile scans).
     uint16_t reachable[BOARD_ROWS];
-    compute_reachability(board, board_height, reachable);
+    compute_reachability(board, board_height, top_filled, reachable);
 
     // Immobile (b2b-maintaining) spin placements + T-piece queue count.
-    uint16_t immobile_cells[BOARD_ROWS];
-    uint16_t clearing_cells[BOARD_ROWS];
     int piece_queue_count[8] = {0};
     for (int i = 0; i < num_upcoming; i++) {
         int pt = upcoming_pieces[i];
@@ -1702,24 +1601,24 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
     }
     s.t_queue_count = piece_queue_count[PIECE_T];
     ImmobilePlacementResult ipr = count_immobile_placements(board, board_height, reachable,
-                                                            immobile_cells, clearing_cells,
                                                             upcoming_pieces, num_upcoming,
                                                             piece_queue_count);
     s.immobile_clearing_placements = ipr.weighted_immobile_clearing;
     s.immobile_clearable_lines = ipr.weighted_immobile_lines;
 
-    // Hole metrics.  Spin-channel hole-forgiveness was removed, so pass an empty
-    // exemption mask - identical to the prior W_SPIN_CHANNEL=0 behavior.
-    uint16_t no_channel[BOARD_ROWS];
-    memset(no_channel, 0, sizeof(uint16_t) * board_height);
-    s.holes = count_hole_sections(board, board_height, reachable, no_channel);
+    // Hole metrics.
+    s.holes = count_hole_sections(board, board_height, reachable);
     if (W_HOLE_CEILING != 0.0f) {
-        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height, reachable, no_channel);
+        s.hole_ceiling_weight = compute_hole_ceiling_weight(board, board_height,
+                                                           top_filled, reachable);
     }
 
-    // T-spin setups (the multiline output is discarded - its reward was removed).
-    int t_multiline_unused = 0;
-    s.t_spin_setups = detect_t_spin_setups(board, board_height, &s.t_slot_quality, &t_multiline_unused);
+    // The only reader of t_spin_setups/t_slot_quality is gated on t_queue_count > 0,
+    // and both stay 0 from the memset, so skipping the sweep here changes nothing.
+    if (s.t_queue_count > 0) {
+        s.t_spin_setups = detect_t_spin_setups(board, board_height, top_filled,
+                                               &s.t_slot_quality);
+    }
 
     // Deepest well column - the only well stat the eval needs (bumpiness exemption).
     int well_col = -1, well_depth = 0;
@@ -1818,8 +1717,13 @@ static float evaluate_state(const SearchState* state, int board_height,
         score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
     // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
+    // Unlicensed leftover-I/PC must not be paid for emptying the well: use the
+    // parent skyline so D_cash at combo<0 does not beat TSD/Imm1 on W_AVG_HEIGHT.
     score -= W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio;
-    score -= W_AVG_HEIGHT * bs.avg_height;
+    {
+        float avg_h = state->unlicensed_cash ? state->parent_avg_height : bs.avg_height;
+        score -= W_AVG_HEIGHT * avg_h;
+    }
     // Bumpiness (well-column-exempted so deliberate spin/Tetris wells aren't double-penalized).
     score -= W_BUMPINESS * bs.bumpiness_exempted;
 
@@ -1844,14 +1748,17 @@ static float evaluate_state(const SearchState* state, int board_height,
 
     // ── Attack realization ────────────────────────────────────
     // Realized attack along the path + banked b2b (pending surge ~= b2b on break).
-    float atk_credit = state->total_attack + (state->b2b > 0 ? (float)state->b2b : 0.0f);
+    // Unlicensed D_cash (leftover I/PC at combo<0) does not enter APP/attack.
+    float atk_real = state->total_attack - state->unlicensed_cash_A;
+    if (atk_real < 0.0f) atk_real = 0.0f;
+    float atk_credit = atk_real + (state->b2b > 0 ? (float)state->b2b : 0.0f);
     if (atk_credit > 0.0f) {
         score += W_ATTACK_TOTAL * atk_credit;
     }
     // Direct APP (attack-per-piece), counting stored b2b as pending surge attack.
     if (state->pieces_placed > 0) {
         float b2b_val = state->b2b > 0 ? (float)state->b2b : 0.0f;
-        score += W_APP * ((state->total_attack + b2b_val) / (float)state->pieces_placed);
+        score += W_APP * ((atk_real + b2b_val) / (float)state->pieces_placed);
     }
     // Garbage prevention: keeping imminent garbage off the board (cancel or block-push).
     if (state->garbage_prevented > 0.0f) {
@@ -1882,225 +1789,6 @@ static float evaluate_state(const SearchState* state, int board_height,
     _tt_e->score = score;
     _tt_e->generation = g_tt_generation;
     return score;
-}
-
-// ============================================================
-// Score Decomposition (for heuristic influence analysis)
-// ============================================================
-
-#define NUM_DECOMPOSE 13
-
-#define D_HEIGHT          0
-#define D_NEAR_DEATH      1
-#define D_BUMPINESS       2
-#define D_HOLES           3
-#define D_HOLE_CEILING    4
-#define D_B2B_FLAT        5
-#define D_B2B_SQRT        6
-#define D_B2B_LINEAR      7
-#define D_ATTACK          8
-#define D_APP             9
-#define D_TSLOT           10
-#define D_IMMOBILE_CLEAR  11
-#define D_GARBAGE_PREVENT 12
-
-int b2b_get_num_decompose(void) { return NUM_DECOMPOSE; }
-
-// Mirrors evaluate_state() term-by-term, writing each kept component into d[].
-static void evaluate_state_decompose(const SearchState* state, int board_height,
-                                      const int* queue, int queue_len,
-                                      float* d) {
-    memset(d, 0, sizeof(float) * NUM_DECOMPOSE);
-
-    int upcoming[MAX_SEARCH_DEPTH + 2];
-    int num_upcoming = 0;
-    if (state->hold_piece != PIECE_N) upcoming[num_upcoming++] = state->hold_piece;
-    for (int i = state->next_queue_idx; i < queue_len && num_upcoming < MAX_SEARCH_DEPTH + 2; i++)
-        upcoming[num_upcoming++] = queue[i];
-
-    BoardStats bs = compute_board_stats(state->board, board_height,
-                                        upcoming, num_upcoming, state->col_heights);
-
-    int effective_h = bs.max_height + state->garbage_remaining;
-    if (spawn_envelope_blocked_c(state->board) || effective_h >= DEATH_HEIGHT_CAP) {
-        d[D_HEIGHT] = -1e6f;
-        return;
-    }
-
-    float h_ratio = (float)effective_h / (float)HEIGHT_REF;
-    float hole_mult = 1.0f + 0.5f * h_ratio;
-
-    // Survival
-    d[D_HEIGHT] = -W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio
-                  - W_AVG_HEIGHT * bs.avg_height;
-    if (effective_h >= HEIGHT_REF - NEAR_DEATH_ZONE) {
-        int slack = HEIGHT_REF - 1 - effective_h;
-        d[D_NEAR_DEATH] = -W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
-    }
-    d[D_BUMPINESS] = -W_BUMPINESS * bs.bumpiness_exempted;
-
-    // Holes
-    if (bs.holes > 0)
-        d[D_HOLES] = -W_HOLES * (float)bs.holes * hole_mult;
-    if (bs.hole_ceiling_weight > 0.0f)
-        d[D_HOLE_CEILING] = -W_HOLE_CEILING * bs.hole_ceiling_weight;
-
-    // B2B store
-    if (state->b2b >= 0) d[D_B2B_FLAT] = W_B2B_FLAT;
-    if (state->b2b > 0) {
-        d[D_B2B_SQRT] = W_B2B_SQRT * sqrtf((float)state->b2b);
-        d[D_B2B_LINEAR] = W_B2B_LINEAR * (float)state->b2b;
-    }
-
-    // Attack: realized attack + banked leaf-b2b credit
-    float b2b_credit = state->b2b > 0 ? (float)state->b2b : 0.0f;
-    if (state->total_attack + b2b_credit > 0.0f)
-        d[D_ATTACK] = W_ATTACK_TOTAL * (state->total_attack + b2b_credit);
-
-    // APP (attack-per-piece; counts stored b2b as pending surge attack)
-    if (state->pieces_placed > 0)
-        d[D_APP] = W_APP * ((state->total_attack + b2b_credit) / (float)state->pieces_placed);
-
-    // T-slot (queue-capped)
-    if (bs.t_spin_setups > 0 && bs.t_queue_count > 0) {
-        float tr = 0.0f;
-        if (bs.t_slot_quality == 2) tr = W_TSLOT;
-        else if (bs.t_slot_quality == 1) tr = W_TSLOT * 0.4f;
-        int usable_setups = bs.t_spin_setups < bs.t_queue_count ? bs.t_spin_setups : bs.t_queue_count;
-        tr *= (1.0f + 0.3f * (float)(usable_setups - 1));
-        d[D_TSLOT] = tr;
-    }
-
-    // b2b-maintaining (immobile/spin) clear slots
-    if (bs.immobile_clearing_placements > 0.0f) {
-        d[D_IMMOBILE_CLEAR] = W_IMMOBILE_CLEAR * sqrtf(bs.immobile_clearing_placements)
-                            + W_IMMOBILE_LINES * bs.immobile_clearable_lines;
-    }
-
-    if (state->garbage_prevented > 0.0f)
-        d[D_GARBAGE_PREVENT] = W_GARBAGE_PREVENT * state->garbage_prevented;
-}
-
-// Exported: enumerate depth-0 placements, return decomposed scores.
-// decompose_out must hold max_placements * NUM_DECOMPOSE floats.
-// Returns number of placements written.
-int b2b_decompose_c(
-    const uint16_t* board_rows, int board_height,
-    int active_piece, int hold_piece,
-    const int* queue, int queue_len,
-    int b2b, int combo, int total_garbage,
-    int garbage_push_delay,
-    float* decompose_out, int max_placements
-) {
-    if (!b2b_initialized) b2b_init_pieces();
-
-    // Treat any pending garbage as imminent (timer = 0).  The push timer in the
-    // env has already ticked once between the last move and this one, so by the
-    // time the search runs the front-of-queue item is effectively about to push.
-    // This also lets the depth-0 garbage_prevented reward fire on the move that
-    // actually executes.
-    (void)garbage_push_delay;
-    int init_gt = 0;
-    int count = 0;
-    Placement placements[MAX_PLACEMENTS];
-    int np;
-
-    // Active piece placements
-    np = find_placements(board_rows, board_height, active_piece, placements, MAX_PLACEMENTS, NULL);
-    for (int i = 0; i < np && count < max_placements; i++) {
-        Placement* pl = &placements[i];
-        SearchState s;
-        memset(&s, 0, sizeof(s));
-        memcpy(s.board, board_rows, sizeof(uint16_t) * board_height);
-        lock_piece_on_board(s.board, board_height, active_piece, pl->rot, pl->landing_row, pl->col);
-        int clears = clear_lines(s.board, board_height);
-        bool pc = true;
-        for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
-        AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
-        s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-        s.total_attack = ar.attack;
-        s.total_lines_cleared = clears; s.hold_piece = hold_piece;
-        s.pieces_placed = 1;
-        s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
-        { int gr = total_garbage; int gc = 0; int prevented = 0;
-          bool was_imminent = (init_gt <= 0 && gr > 0);
-          if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
-          if (was_imminent) {
-              bool would_push = (clears == 0 && gr > 0);
-              prevented = would_push ? gc : total_garbage;
-          }
-          s.garbage_remaining = gr; s.garbage_timer = init_gt; s.garbage_prevented = (float)prevented; }
-        compute_col_heights_full(s.board, board_height, s.col_heights);
-        evaluate_state_decompose(&s, board_height, queue, queue_len,
-                                  &decompose_out[count * NUM_DECOMPOSE]);
-        count++;
-    }
-
-    // Hold piece placements
-    if (hold_piece != 0) {
-        np = find_placements(board_rows, board_height, hold_piece, placements, MAX_PLACEMENTS, NULL);
-        for (int i = 0; i < np && count < max_placements; i++) {
-            Placement* pl = &placements[i];
-            SearchState s;
-            memset(&s, 0, sizeof(s));
-            memcpy(s.board, board_rows, sizeof(uint16_t) * board_height);
-            lock_piece_on_board(s.board, board_height, hold_piece, pl->rot, pl->landing_row, pl->col);
-            int clears = clear_lines(s.board, board_height);
-            bool pc = true;
-            for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
-            AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
-            s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-            s.total_attack = ar.attack;
-            s.total_lines_cleared = clears; s.hold_piece = active_piece;
-            s.pieces_placed = 1;
-            s.next_queue_idx = 0; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
-            { int gr = total_garbage; int gc = 0; int prevented = 0;
-          bool was_imminent = (init_gt <= 0 && gr > 0);
-          if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
-          if (was_imminent) {
-              bool would_push = (clears == 0 && gr > 0);
-              prevented = would_push ? gc : total_garbage;
-          }
-          s.garbage_remaining = gr; s.garbage_timer = init_gt; s.garbage_prevented = (float)prevented; }
-            compute_col_heights_full(s.board, board_height, s.col_heights);
-            evaluate_state_decompose(&s, board_height, queue, queue_len,
-                                      &decompose_out[count * NUM_DECOMPOSE]);
-            count++;
-        }
-    } else if (queue_len > 0) {
-        int swap = queue[0];
-        np = find_placements(board_rows, board_height, swap, placements, MAX_PLACEMENTS, NULL);
-        for (int i = 0; i < np && count < max_placements; i++) {
-            Placement* pl = &placements[i];
-            SearchState s;
-            memset(&s, 0, sizeof(s));
-            memcpy(s.board, board_rows, sizeof(uint16_t) * board_height);
-            lock_piece_on_board(s.board, board_height, swap, pl->rot, pl->landing_row, pl->col);
-            int clears = clear_lines(s.board, board_height);
-            bool pc = true;
-            for (int r = 0; r < board_height; r++) { if (s.board[r] != 0) { pc = false; break; } }
-            AttackResult ar = compute_attack(clears, pl->spin_type, b2b, combo, pc);
-            s.b2b = ar.new_b2b; s.combo = ar.new_combo;
-            s.total_attack = ar.attack;
-            s.total_lines_cleared = clears; s.hold_piece = active_piece;
-            s.pieces_placed = 1;
-            s.next_queue_idx = 1; s.b2b_broken = ar.b2b_broken; s.prev_b2b = b2b;
-            { int gr = total_garbage; int gc = 0; int prevented = 0;
-          bool was_imminent = (init_gt <= 0 && gr > 0);
-          if (ar.attack > 0 && gr > 0) { gc = ((int)ar.attack > gr) ? gr : (int)ar.attack; gr -= gc; }
-          if (was_imminent) {
-              bool would_push = (clears == 0 && gr > 0);
-              prevented = would_push ? gc : total_garbage;
-          }
-          s.garbage_remaining = gr; s.garbage_timer = init_gt; s.garbage_prevented = (float)prevented; }
-            compute_col_heights_full(s.board, board_height, s.col_heights);
-            evaluate_state_decompose(&s, board_height, queue, queue_len,
-                                      &decompose_out[count * NUM_DECOMPOSE]);
-            count++;
-        }
-    }
-
-    return count;
 }
 
 // ============================================================
@@ -2164,14 +1852,10 @@ static inline void expand_and_insert(
     child.b2b = ar.new_b2b;
     child.combo = ar.new_combo;
     child.total_attack = parent->total_attack + ar.attack;
-    child.total_lines_cleared = parent->total_lines_cleared + clears;
     child.pieces_placed = parent->pieces_placed + 1;
     child.hold_piece = new_hold_piece;
     child.next_queue_idx = new_queue_idx;
     child.depth0_placement_idx = parent->depth0_placement_idx;
-    child.b2b_broken = parent->b2b_broken || ar.b2b_broken;
-    child.prev_b2b = parent->b2b_broken ? parent->prev_b2b
-                   : (ar.b2b_broken ? parent->b2b : parent->prev_b2b);
     child.bag_seen = new_bag_seen;
 
     bool pushed_garbage = false;
@@ -2215,6 +1899,9 @@ static inline void expand_and_insert(
     }
 
     if (placement_is_dead(&child, board_height)) return;
+
+    latch_unlicensed_cash(&child, clears, pl->spin_type, perfect_clear, parent->combo,
+                          mean_col_heights(parent->col_heights), ar.attack);
 
     // Full eval for every surviving child (no aspiration prune - it was the main
     // source of nondeterminism and its omission only makes the beam MORE thorough).
@@ -2363,13 +2050,10 @@ void b2b_search_c(
         s->b2b = ar.new_b2b;
         s->combo = ar.new_combo;
         s->total_attack = ar.attack;
-        s->total_lines_cleared = clears;
         s->pieces_placed = 1;
         s->hold_piece = hold_piece;
         s->next_queue_idx = 0;
         s->depth0_placement_idx = depth0_count;
-        s->b2b_broken = ar.b2b_broken;
-        s->prev_b2b = b2b;
         s->bag_seen = initial_bag_seen;
 
         bool pushed_garbage = false;
@@ -2409,6 +2093,8 @@ void b2b_search_c(
             compute_col_heights_full(s->board, board_height, s->col_heights);
         }
 
+        latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                              mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
@@ -2452,13 +2138,10 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
             s->next_queue_idx = 0;
             s->depth0_placement_idx = depth0_count;
-            s->b2b_broken = ar.b2b_broken;
-            s->prev_b2b = b2b;
             s->bag_seen = initial_bag_seen;
 
             bool pushed_garbage = false;
@@ -2498,6 +2181,8 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
+            latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                                  mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
@@ -2538,13 +2223,10 @@ void b2b_search_c(
             s->b2b = ar.new_b2b;
             s->combo = ar.new_combo;
             s->total_attack = ar.attack;
-            s->total_lines_cleared = clears;
             s->pieces_placed = 1;
             s->hold_piece = active_piece;
             s->next_queue_idx = 1;
             s->depth0_placement_idx = depth0_count;
-            s->b2b_broken = ar.b2b_broken;
-            s->prev_b2b = b2b;
             s->bag_seen = initial_bag_seen;
 
             bool pushed_garbage = false;
@@ -2584,6 +2266,8 @@ void b2b_search_c(
                 compute_col_heights_full(s->board, board_height, s->col_heights);
             }
 
+            latch_unlicensed_cash(s, clears, pl->spin_type, perfect_clear, combo,
+                                  mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
                 root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
@@ -2735,7 +2419,6 @@ void b2b_search_c(
             int norm_col = fallback_pl.col + B2B_PIECES[fp].orientations[fallback_pl.rot].min_col;
             *out_action_index = fallback_is_hold * 160 + fallback_pl.rot * 40
                               + norm_col * 4 + fallback_pl.spin_type;
-            b2b_last_placement = fallback_pl;
             b2b_write_sequence(fallback_meta, fallback_pl.bfs_state,
                                fallback_is_hold, max_len, out_best_sequence);
         } else {
@@ -2770,12 +2453,6 @@ void b2b_search_c(
     int norm_col = best_pl->col + B2B_PIECES[played_piece].orientations[best_pl->rot].min_col;
     *out_action_index = is_hold * 160 + best_pl->rot * 40 + norm_col * 4 + best_pl->spin_type;
 
-    // Store full placement info for C game loop (avoids lossy action_idx round-trip)
-    b2b_last_placement.rot = best_pl->rot;
-    b2b_last_placement.col = best_pl->col;
-    b2b_last_placement.landing_row = best_pl->landing_row;
-    b2b_last_placement.spin_type = best_pl->spin_type;
-
     // Reconstruct key sequence
     BFSStateMeta* meta_src = is_hold ? depth0_meta_hold : depth0_meta_active;
     b2b_write_sequence(meta_src, best_pl->bfs_state, is_hold, max_len, out_best_sequence);
@@ -2807,20 +2484,12 @@ void b2b_search_c(
 }
 
 // ============================================================
-// Full Game Loop in C (for optimizer - no Python overhead)
+// Simulation helpers: bag RNG (replica of TetrioRandom.py) + garbage queue
 // ============================================================
-
-// --- TetrioRNG: exact replica of TetrioRandom.py ---
 
 typedef struct {
     int64_t t;
 } TetrioRNG;
-
-static void rng_init(TetrioRNG* rng, int seed) {
-    int64_t t = seed % 2147483647;
-    if (t <= 0) t += 2147483646;
-    rng->t = t;
-}
 
 static int rng_next_int(TetrioRNG* rng) {
     rng->t = (16807 * rng->t) % 2147483647;
@@ -2841,73 +2510,6 @@ static void rng_next_bag(TetrioRNG* rng, int* bag) {
         int j = (int)(rng_next_float(rng) * (i + 1));
         int tmp = bag[i]; bag[i] = bag[j]; bag[j] = tmp;
     }
-}
-
-// --- Simple xorshift RNG for garbage generation ---
-
-typedef struct {
-    uint32_t state;
-} SimpleRNG;
-
-static void srng_init(SimpleRNG* rng, uint32_t seed) {
-    rng->state = seed ? seed : 1;
-}
-
-static uint32_t srng_next(SimpleRNG* rng) {
-    uint32_t x = rng->state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    rng->state = x;
-    return x;
-}
-
-static float srng_float(SimpleRNG* rng) {
-    return (float)(srng_next(rng) & 0x7FFFFFFF) / (float)0x7FFFFFFF;
-}
-
-// --- Piece queue (bag-based) ---
-
-#define BAG_SIZE 7
-#define MAX_QUEUE 16
-
-typedef struct {
-    TetrioRNG rng;
-    int bag[BAG_SIZE];
-    int bag_pos;
-    int queue[MAX_QUEUE];
-    int queue_len;
-    int queue_size;
-} PieceQueue;
-
-static void pq_init(PieceQueue* pq, int seed, int qsize) {
-    rng_init(&pq->rng, seed);
-    pq->bag_pos = BAG_SIZE; // force first bag generation
-    pq->queue_len = 0;
-    pq->queue_size = qsize;
-}
-
-static int pq_next_piece(PieceQueue* pq) {
-    if (pq->bag_pos >= BAG_SIZE) {
-        rng_next_bag(&pq->rng, pq->bag);
-        pq->bag_pos = 0;
-    }
-    return pq->bag[pq->bag_pos++];
-}
-
-static void pq_fill(PieceQueue* pq) {
-    while (pq->queue_len < pq->queue_size) {
-        pq->queue[pq->queue_len++] = pq_next_piece(pq);
-    }
-}
-
-static int pq_pop(PieceQueue* pq) {
-    if (pq->queue_len <= 0) return PIECE_N;
-    int piece = pq->queue[0];
-    for (int i = 0; i < pq->queue_len - 1; i++)
-        pq->queue[i] = pq->queue[i + 1];
-    pq->queue_len--;
-    return piece;
 }
 
 // --- Garbage queue ---
@@ -2963,221 +2565,6 @@ static int garb_total(const GarbEntry* gq, int cnt) {
     return t;
 }
 
-// --- Game config & result structs (exported) ---
-
-typedef struct {
-    int seed;
-    float garbage_chance;
-    int garbage_min;
-    int garbage_max;
-    int garbage_push_delay;
-} GameConfig;
-
-typedef struct {
-    int steps_completed;
-    int survived;
-    float total_attack;
-    int max_b2b;
-    int end_height;
-    float avg_height;
-    int max_height;
-    int max_combo;
-    float avg_combo;   // mean combo over placements that cleared >=1 line
-} GameResult;
-
-// --- Game loop entry point ---
-
-void b2b_run_eval_games(
-    int num_games,
-    const GameConfig* configs,
-    int num_steps,
-    int search_depth,
-    int beam_width,
-    int queue_size,
-    GameResult* results
-) {
-    if (!b2b_initialized) b2b_init_pieces();
-
-    for (int g = 0; g < num_games; g++) {
-        GameConfig cfg = configs[g];
-        GameResult* res = &results[g];
-
-        // --- Init game state ---
-        uint16_t board[BOARD_ROWS];
-        memset(board, 0, sizeof(board));
-        int bh = 40; // board height (20 visible + 20 buffer)
-
-        PieceQueue pq;
-        pq_init(&pq, cfg.seed, queue_size);
-        pq_fill(&pq);
-        int active_piece = pq_pop(&pq);
-        pq_fill(&pq);
-        int hold_piece = PIECE_N;
-        int b2b = -1, combo = -1;
-
-        SimpleRNG grng;
-        srng_init(&grng, (uint32_t)(cfg.seed * 7 + 12345));
-        GarbEntry gq[MAX_GARB_ENTRIES];
-        int gcnt = 0;
-
-        float total_attack = 0.0f;
-        int max_b2b_val = 0;
-        int max_combo_val = 0;
-        long combo_sum = 0;     // sum of combo over clearing placements
-        int combo_clears = 0;   // number of clearing placements
-        float height_sum = 0.0f;
-        int last_height = 0, peak_height = 0;
-        int steps_done = 0;
-        bool died = false;
-
-        for (int step = 0; step < num_steps; step++) {
-            if (b2b > max_b2b_val) max_b2b_val = b2b;
-
-            int tg = garb_total(gq, gcnt);
-
-            // --- Compute bag_seen for speculative search ---
-            // pq.bag[0..bag_pos-1] are pieces already drawn from current bag
-            uint8_t cur_bag_seen = 0;
-            if (pq.bag_pos < BAG_SIZE) {
-                for (int bi2 = 0; bi2 < pq.bag_pos; bi2++) {
-                    cur_bag_seen |= (uint8_t)(1 << pq.bag[bi2]);
-                }
-            }
-            // If bag_pos >= BAG_SIZE, cur_bag_seen stays 0 (fresh bag)
-
-            // --- Beam search (reuses b2b_search_c - sequence is discarded) ---
-            int action_idx;
-            int64_t dummy_seq[15];
-            b2b_search_c(
-                board, bh, active_piece, hold_piece,
-                pq.queue, pq.queue_len, b2b, combo, tg,
-                cfg.garbage_push_delay,
-                (int)cur_bag_seen,
-                search_depth, beam_width, 15,
-                &action_idx, dummy_seq,
-                0, NULL, NULL, NULL, NULL, NULL   // no per-root output in the C game loop
-            );
-
-            if (action_idx < 0) { died = true; break; }
-
-            // --- Read placement directly from b2b_search_c's result ---
-            // (avoids lossy action_idx round-trip - preserves BFS landing row)
-            int is_hold   = action_idx / 160;
-            int rot       = b2b_last_placement.rot;
-            int col       = b2b_last_placement.col;
-            int lr        = b2b_last_placement.landing_row;
-            int spin_type = b2b_last_placement.spin_type;
-
-            // Determine played piece & update hold/queue
-            int played;
-            if (!is_hold) {
-                played = active_piece;
-                active_piece = pq_pop(&pq);
-            } else if (hold_piece != PIECE_N) {
-                played = hold_piece;
-                hold_piece = active_piece;
-                active_piece = pq_pop(&pq);
-            } else {
-                hold_piece = active_piece;
-                played = pq_pop(&pq);
-                active_piece = pq_pop(&pq);
-            }
-            pq_fill(&pq);
-
-            // --- Apply placement ---
-            lock_piece_on_board(board, bh, played, rot, lr, col);
-            int clears = clear_lines(board, bh);
-
-            bool pc = true;
-            for (int r = 0; r < bh; r++) {
-                if (board[r] != 0) { pc = false; break; }
-            }
-
-            AttackResult ar = compute_attack(clears, spin_type, b2b, combo, pc);
-            total_attack += ar.attack;
-            b2b = ar.new_b2b;
-            combo = ar.new_combo;
-
-            // Track combo (combo counter is post-clear; >0 means a chain is live)
-            if (clears > 0) {
-                if (combo > max_combo_val) max_combo_val = combo;
-                combo_sum += combo;
-                combo_clears++;
-            }
-
-            // --- Garbage handling ---
-            if (ar.attack > 0) garb_cancel(gq, &gcnt, (int)ar.attack);
-
-            if (clears == 0) {
-                garb_tick(gq, gcnt);
-                garb_push_one(board, bh, gq, &gcnt); // one tier per step
-            }
-
-            // Generate new garbage
-            if (cfg.garbage_chance > 0.0f && cfg.garbage_max > 0) {
-                if (srng_float(&grng) <= cfg.garbage_chance) {
-                    int nr;
-                    if (cfg.garbage_min == cfg.garbage_max) {
-                        nr = cfg.garbage_min;
-                    } else {
-                        nr = cfg.garbage_min +
-                             (int)(srng_float(&grng) *
-                                   (cfg.garbage_max - cfg.garbage_min + 1));
-                        if (nr > cfg.garbage_max) nr = cfg.garbage_max;
-                    }
-                    if (nr > 0 && gcnt < MAX_GARB_ENTRIES) {
-                        int gap = (int)(srng_float(&grng) * BOARD_COLS);
-                        if (gap >= BOARD_COLS) gap = BOARD_COLS - 1;
-                        gq[gcnt].rows = nr;
-                        gq[gcnt].col = gap;
-                        gq[gcnt].timer = cfg.garbage_push_delay;
-                        gcnt++;
-                    }
-                }
-            }
-
-            // Immediate push for delay=0
-            if (cfg.garbage_push_delay == 0) {
-                garb_push_all(board, bh, gq, &gcnt);
-            }
-
-            // --- Track stats ---
-            int h = 0;
-            for (int r = 0; r < bh; r++) {
-                if (board[r] != 0) { h = bh - r; break; }
-            }
-            height_sum += (float)h;
-            last_height = h;
-            if (h > peak_height) peak_height = h;
-            steps_done++;
-
-            // --- Death check (rows 0..3 for bh=24) ---
-            for (int r = 0; r < bh - 20; r++) {
-                if (board[r] != 0) { died = true; break; }
-            }
-            if (died) break;
-        }
-
-        // Check final b2b
-        if (b2b > max_b2b_val) max_b2b_val = b2b;
-
-        // Credit banked surge potential: a survived game ending on a held b2b chain (>=4) has
-        // unrealized attack the fixed-length window cut off (surge releases `b2b` on break).
-        // Without this, hoarding strategies are undercounted vs continuous-cash-out ones.
-        if (!died && b2b >= 4) total_attack += (float)b2b;
-
-        res->steps_completed = steps_done;
-        res->survived = died ? 0 : 1;
-        res->total_attack = total_attack;
-        res->max_b2b = max_b2b_val;
-        res->end_height = died ? 20 : last_height;
-        res->avg_height = (steps_done > 0) ? height_sum / (float)steps_done : 0.0f;
-        res->max_height = peak_height;
-        res->max_combo = max_combo_val;
-        res->avg_combo = (combo_clears > 0) ? (float)combo_sum / (float)combo_clears : 0.0f;
-    }
-}
-
 // Apply one placement to a plain-occupancy bitboard and score it - the deterministic
 // core of PyTetrisEnv._lock_piece + Scorer.judge, reused by the MCTS placement step.
 // `board` is in/out (length board_height, plain occupancy, no GARB markers); it is
@@ -3215,8 +2602,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*attack (clipped) with an unclipped -w_death on terminal edges; the leaf
-// bootstrap is the net value directly. Dirichlet noise + final sampling stay in Python.
+// w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)), with an unclipped
+// -w_death on terminal edges; the leaf bootstrap is the net value directly. Dirichlet noise
+// + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -3224,9 +2612,18 @@ void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
                                  int piece_type, int start_row, int start_col, int start_rot,
                                  int max_len, int is_hold,
                                  int64_t* out_sequences, int32_t* out_landing_rows);
+// Every unique resting placement (rot, norm_col, landing_row, spin); returns count written.
+int find_unique_placements_c(const uint16_t* board_rows, int board_height,
+                             int piece_type, int start_row, int start_col, int start_rot,
+                             int max_len, int is_hold, int max_out,
+                             int32_t* out_rot, int32_t* out_norm_col,
+                             int32_t* out_landing_row, int32_t* out_spin,
+                             int64_t* out_sequences);
 
-#define MCAP 128          // candidate capacity (slots)
-#define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
+// Keep in sync with MCTS_CANDIDATE_CAPACITY / MCTS_BRANCH_CAPACITY (Python).
+#define MCAP 256          // candidate capacity (slots)
+#define MBRANCH 128       // per-branch cap (no-hold 0..127, hold 128..255)
+#define MENUM_MAX 512     // enum scratch capacity per branch
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
 #define MCLIP 10.0f       // reward clip
@@ -3306,6 +2703,7 @@ static int mstate_draw(MState* s) {
     return p;
 }
 static int mstate_pop(MState* s) {
+    if (s->qlen <= 0) return PIECE_N;
     int p = s->queue[0];
     for (int i = 0; i < s->qlen - 1; i++) s->queue[i] = s->queue[i + 1];
     s->qlen--;
@@ -3382,35 +2780,40 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     return attack;
 }
 
-// --- enumerate candidates into node (reuse env pathfinder); false if dead (no legal) ---
+// --- enumerate candidates into node: every unique resting placement per hold/no-hold
+//     branch, packed in BFS first-seen order, truncated at MBRANCH; false if dead ---
 static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
-    static __thread int32_t lr_nh[160], lr_h[160];
-    static __thread int64_t seq_scratch[160 * 32];   // discarded; max_len<=32
+    static __thread int32_t erot[MENUM_MAX], encol[MENUM_MAX], elr[MENUM_MAX], espin[MENUM_MAX];
     const uint16_t* board = node->st.board;
     int ml = cfg->max_len;
-    find_placement_candidates_c(board, cfg->board_height, node->st.active, SPAWN_ROW, 3, 0,
-                                ml, 0, seq_scratch, lr_nh);
+    int n_nh = find_unique_placements_c(board, cfg->board_height, node->st.active,
+                                        SPAWN_ROW, 3, 0, ml, 0, MENUM_MAX,
+                                        erot, encol, elr, espin, NULL);
     int holdpiece = node->st.hold != PIECE_N ? node->st.hold : node->st.queue[0];
-    find_placement_candidates_c(board, cfg->board_height, holdpiece, SPAWN_ROW, 3, 0,
-                                ml, 1, seq_scratch, lr_h);
+    // Second call reuses the same TLS buffers after packing no-hold.
     node->n_legal = 0;
-    int cnt = 0;
-    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
-        if (lr_nh[i] < 0) continue;
-        int slot = cnt++;
+    int pack_nh = n_nh < MBRANCH ? n_nh : MBRANCH;
+    for (int i = 0; i < pack_nh; i++) {
+        int slot = i;
         node->legal[node->n_legal++] = slot;
-        node->desc[slot][0] = 0; node->desc[slot][1] = i / 40;
-        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_nh[i];
-        node->desc[slot][4] = i % 4;
+        node->desc[slot][0] = 0;
+        node->desc[slot][1] = erot[i];
+        node->desc[slot][2] = encol[i];
+        node->desc[slot][3] = elr[i];
+        node->desc[slot][4] = espin[i];
     }
-    cnt = 0;
-    for (int i = 0; i < 160 && cnt < MBRANCH; i++) {
-        if (lr_h[i] < 0) continue;
-        int slot = MBRANCH + cnt++;
+    int n_h = find_unique_placements_c(board, cfg->board_height, holdpiece,
+                                       SPAWN_ROW, 3, 0, ml, 1, MENUM_MAX,
+                                       erot, encol, elr, espin, NULL);
+    int pack_h = n_h < MBRANCH ? n_h : MBRANCH;
+    for (int i = 0; i < pack_h; i++) {
+        int slot = MBRANCH + i;
         node->legal[node->n_legal++] = slot;
-        node->desc[slot][0] = 1; node->desc[slot][1] = i / 40;
-        node->desc[slot][2] = (i % 40) / 4; node->desc[slot][3] = lr_h[i];
-        node->desc[slot][4] = i % 4;
+        node->desc[slot][0] = 1;
+        node->desc[slot][1] = erot[i];
+        node->desc[slot][2] = encol[i];
+        node->desc[slot][3] = elr[i];
+        node->desc[slot][4] = espin[i];
     }
     return node->n_legal > 0;
 }
@@ -3540,12 +2943,11 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 node->child[slot] = leaf;
                 // Death (top-out/holes, or a resulting no-legal position) is the loss signal.
                 // The attack part goes through the reward clip; the w_death penalty is applied
-                // UNCLIPPED (return_scale units only) so raising w_death actually deepens the
-                // terminal Q instead of saturating at -MCLIP and being tuned away.
+                // UNCLIPPED (return_scale units only).
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
-                    // Terminal Phi=0: refund the parent's b2b potential.
+                    // Phi(terminal) = 0, so the shaping term is -w_b2b*Phi(parent).
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
                         - cfg->w_death / (cfg->return_scale + 1e-8f)
@@ -3645,6 +3047,7 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
     memset(s, 0, sizeof(*s));
     for (int r = 0; r < e->cfg.board_height; r++) s->board[r] = board[r];
     s->active = active; s->hold = hold;
+    if (qlen > MAXVQ) qlen = MAXVQ;
     s->qlen = qlen; for (int i = 0; i < qlen; i++) s->queue[i] = queue[i];
     s->b2b = b2b; s->combo = combo;
     s->rng.t = rng_t;
@@ -3745,8 +3148,7 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             leaf->expanded = true;
             leaf->awaiting_eval = false;
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
-            // Bootstrap is the net value directly; the net learns V_shaped = V_true - Phi
-            // (b2b's worth is carried by the per-edge potential shaping, not added here).
+            // Bootstrap is the net value directly; the bank is priced per-edge by Phi.
             float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
             mtree_backup(cfg, t->path[p], t->path_len[p], boot);
@@ -3786,8 +3188,13 @@ void mcts_destroy(void* h) {
     free(e);
 }
 
-// --- parity hooks (single-state enumerate / step; drive the /tmp gates that re-verify the
-//     deterministic core after a subtree re-sync re-applies these edits) ---
+// Capacity handshake for Python CMCTS (must match MCTS_CANDIDATE_CAPACITY).
+int mcts_candidate_capacity(void) { return MCAP; }
+int mcts_branch_capacity(void) { return MBRANCH; }
+// ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
+int mcts_create_arity(void) { return 17; }
+
+// --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.
 int mcts_debug_enum(const uint16_t* board, int board_height, int active, int hold, int queue0,
                     int max_len, int* out_desc) {

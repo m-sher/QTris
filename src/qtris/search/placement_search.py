@@ -14,7 +14,10 @@ import tensorflow as tf
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.Pieces import PieceType
-from qtris.data.placement_features import build_placement_inference
+from qtris.data.placement_features import (
+    MCTS_CANDIDATE_CAPACITY,
+    build_placement_inference,
+)
 
 ROW_NORM = 39  # board height - 1 (40-row board); landing rows are absolute
 _FORCED_DROP = np.array([Keys.START, Keys.HARD_DROP] + [Keys.PAD] * 13, dtype=np.int64)
@@ -47,6 +50,53 @@ def clone_sim_env(env):
     clone._pathfinding = False
     clone._garbage_chance = 0.0
     return clone
+
+
+def descriptor_key_sequence(env, desc, max_len=None):
+    """Key sequence for a placement descriptor `(is_hold, rot, norm_col, landing_row,
+    spin)`, matched against the multi-landing enum on all four placement fields.
+    Returns a START+HARD_DROP sequence when the pathfinder yields no match.
+    """
+    is_hold, rot, norm_col, landing_row, spin = (int(x) for x in desc)
+    ml = int(max_len if max_len is not None else env._max_len)
+    if is_hold:
+        piece = (
+            env._spawn_piece(env._hold_piece)
+            if env._hold_piece != PieceType.N
+            else env._spawn_piece(env._queue[0])
+        )
+    else:
+        piece = env._active_piece
+    finder = env._key_sequence_finder
+    if not hasattr(finder, "find_unique_placements"):
+        # Finder without find_unique_placements: dense lookup keyed by
+        # (rot, norm_col, spin); landing_row is not matched.
+        seqs, lrs = finder.find_placement_candidates(
+            board=env._board, piece=piece, max_len=ml, is_hold=bool(is_hold)
+        )
+        idx = rot * 40 + norm_col * 4 + spin
+        if 0 <= idx < 160 and lrs[idx] >= 0:
+            return np.asarray(seqs[idx], dtype=np.int64)
+    else:
+        rots, ncols, lrs, spins, seqs = finder.find_unique_placements(
+            board=env._board,
+            piece=piece,
+            max_len=ml,
+            is_hold=bool(is_hold),
+            max_out=512,
+            with_sequences=True,
+        )
+        for i in range(len(rots)):
+            if (
+                int(rots[i]) == rot
+                and int(ncols[i]) == norm_col
+                and int(lrs[i]) == landing_row
+                and int(spins[i]) == spin
+            ):
+                return np.asarray(seqs[i], dtype=np.int64)
+    forced = np.full(ml, Keys.PAD, dtype=np.int64)
+    forced[0], forced[1] = Keys.START, Keys.HARD_DROP
+    return forced
 
 
 def placement_step(env, searcher, desc):
@@ -192,13 +242,20 @@ def enumerate_node(env, searcher, cfg):
 
 
 def _policy_value_batch(net, boards, pieces, bcgs, placements, masks):
+    # Pad the dense-path packing up to the net's pinned candidate width.
+    pl = np.stack(placements)
+    mk = np.stack(masks)
+    pad = MCTS_CANDIDATE_CAPACITY - pl.shape[1]
+    if pad > 0:
+        pl = np.pad(pl, ((0, 0), (0, pad), (0, 0)))
+        mk = np.pad(mk, ((0, 0), (0, pad)))
     logits, value = net.policy_value(
         (
             tf.constant(np.concatenate(boards), tf.float32),
             tf.constant(np.concatenate(pieces), tf.int64),
             tf.constant(np.concatenate(bcgs), tf.float32),
-            tf.constant(np.stack(placements), tf.float32),
-            tf.constant(np.stack(masks), tf.bool),
+            tf.constant(pl, tf.float32),
+            tf.constant(mk, tf.bool),
         )
     )
     return logits.numpy(), value.numpy()[:, 0]

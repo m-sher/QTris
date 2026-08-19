@@ -24,7 +24,7 @@ def run_game(seed, num_steps=200, search_depth=7, beam_width=128,
              garbage_chance=0.15, garbage_min=1, garbage_max=4, queue_size=5):
     """Run a single headless game and return stats dict."""
     env = PyTetrisEnv(
-        queue_size=queue_size, max_holes=None, max_height=20,
+        queue_size=queue_size, max_holes=None,
         max_steps=None, max_len=15, pathfinding=False,
         seed=seed, idx=0,
         garbage_chance=garbage_chance, garbage_min=garbage_min,
