@@ -10,11 +10,11 @@ def _run(argv, monkeypatch):
     return main()
 
 
-ONE_V_ONE = ["--mode", "1v1", "--algo", "az"]
+ONE_V_ONE = ["--mode", "1v1"]
 
 
 def test_1v1_rejects_gamma(monkeypatch, capsys):
-    """1v1 AZ exits 2 on --gamma, naming the flag."""
+    """1v1 exits 2 on --gamma, naming the flag."""
     with pytest.raises(SystemExit) as exc:
         _run([*ONE_V_ONE, "--gamma", "0.95"], monkeypatch)
     assert exc.value.code == 2

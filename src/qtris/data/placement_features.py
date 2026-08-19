@@ -12,7 +12,7 @@ import numpy as np
 
 PLACEMENT_FEATURE_DIM = 18
 MODEL_ROWS = 24  # model-visible board height (net input is (MODEL_ROWS, 10, 1))
-# Dense-path packing (BC / PPO / pretrain): top-K per hold/no-hold branch.
+# Dense-path packing (BC dataset + pretrain): top-K per hold/no-hold branch.
 BRANCH_CAPACITY = 64
 CANDIDATE_CAPACITY = 2 * BRANCH_CAPACITY  # 128
 # Placement MCTS slot capacity; keep in sync with C MCAP in b2b_search.c (handshake in cmcts).

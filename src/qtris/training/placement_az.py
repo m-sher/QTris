@@ -1,7 +1,6 @@
 """Single-player AlphaZero self-improvement loop for the placement model.
 
-Same solo-play env + random-garbage settings as the PPO trainer
-(`qtris.training.placement`), but PPO is replaced by an AlphaZero loop: PUCT MCTS
+Solo play against random garbage. PUCT MCTS
 (`PlacementMCTS`) plays self-play games using the net's policy as priors and its value
 head at leaves; the net is then trained to imitate the search (policy -> root visit
 distribution) and to regress the search-bootstrapped self-play return (attack minus the

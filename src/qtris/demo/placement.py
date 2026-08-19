@@ -78,7 +78,7 @@ def main(args):
     load_checkpoint(p_model, args.checkpoint)
 
     # return_scale normalizes the per-edge attack, b2b and death terms against the value
-    # head. Read from the AZ checkpoint; BC/PPO checkpoints have none and use 1.0.
+    # head. Read from the AZ checkpoint; BC checkpoints have none and use 1.0.
     mcts_return_scale = 1.0
     try:
         _ck = tf.train.latest_checkpoint(args.checkpoint)

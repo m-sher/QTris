@@ -1,7 +1,7 @@
 # QTris
 
 Vision-transformer reinforcement-learning agent for modern Tetris, trained by behavioral
-cloning from a fast C beam-search oracle then refined with PPO or AlphaZero-style MCTS, in
+cloning from a fast C beam-search oracle then refined with AlphaZero-style MCTS, in
 a Tetris environment added here as a subtree (mine).
 
 The current placement agent (AlphaZero-style MCTS, trained by 1v1 self-play), ranks env's legal candidate placements optimizing APP while handling incoming garbage:
@@ -16,18 +16,16 @@ paired cross-attention decoder layers mix board and piece representations. The
 `PlacementPolicyValueNet` head **ranks the env's legal candidate placements** (up to 128)
 by cross-attention and scores the state, one merged policy + value net. It is bootstrapped
 by behavioral cloning against a C beam-search oracle (`CB2BSearch`), then improved with
-on-policy **PPO** or **AlphaZero-style MCTS** self-play (single-player and 1v1).
+**AlphaZero-style MCTS** self-play (single-player and 1v1).
 
 ## Training & data pipeline
 
 - **Pretraining (BC):** distill the beam/oracle datasets into a policy (and value). Soft
   cross-entropy to the oracle's per-candidate scores; value regresses the oracle return.
   `uv run pretrain`.
-- **PPO:** single-player on-policy refinement, which can keep a BC **expert anchor** via
-  `--expert-dataset`. `uv run train`.
 - **AlphaZero-style MCTS:** PUCT self-play with a multi-generation replay buffer; the policy
   imitates the search visit counts and the value regresses the search-bootstrapped return.
-  `uv run train --algo az`, or `--mode 1v1` to rotate an opponent pool of past checkpoints.
+  `uv run train`, or `--mode 1v1` to rotate an opponent pool of past checkpoints.
 - **Data generation:** collect expert datasets with the C beam search, or **DAgger**
   (roll a trained policy forward and relabel its states with the oracle).
   `uv run datagen [--dagger]`.
@@ -42,12 +40,9 @@ uv sync                                                    # install (requires P
 # Behavioral-cloning pretrain from the beam/oracle dataset
 uv run pretrain
 
-# PPO refinement
-uv run train                                               # single-player
-
 # AlphaZero-style MCTS self-play
-uv run train --algo az --num-simulations 128
-uv run train --algo az --mode 1v1                          # self-play w/ opponent pool
+uv run train --num-simulations 128                         # single-player
+uv run train --mode 1v1                                    # self-play w/ opponent pool
 
 # Generate / relabel training data
 uv run datagen --num-steps 200000
