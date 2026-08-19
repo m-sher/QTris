@@ -137,19 +137,6 @@ def main() -> None:
         help="placement 1v1 only: forward window (placements) for the blend channels.",
     )
     az.add_argument(
-        "--fpu-relative",
-        action="store_true",
-        help="placement 1v1 only: score unvisited children at the parent's mean backed-up "
-        "return minus --fpu-reduction instead of at 0.",
-    )
-    az.add_argument(
-        "--fpu-reduction",
-        type=float,
-        default=0.0,
-        help="placement 1v1 only: reduction subtracted from the parent's mean backed-up "
-        "return to price an unvisited child. Only read when --fpu-relative is set.",
-    )
-    az.add_argument(
         "--temp-moves",
         type=int,
         default=12,

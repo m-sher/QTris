@@ -395,8 +395,6 @@ def main(args):
     td_lambda = getattr(args, "td_lambda", 0.9)
     td_blend = getattr(args, "td_blend", 0.0)
     blend_horizon = getattr(args, "blend_horizon", 16)
-    fpu_relative = int(getattr(args, "fpu_relative", False))
-    fpu_reduction = getattr(args, "fpu_reduction", 0.0)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -426,8 +424,6 @@ def main(args):
         w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
         w_b2b=_resolve(args, "w_b2b", 0.0),
-        fpu_relative=int(getattr(args, "fpu_relative", False)),
-        fpu_reduction=getattr(args, "fpu_reduction", 0.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -521,8 +517,6 @@ def main(args):
         td_lambda=td_lambda,
         td_blend=td_blend,
         blend_horizon=blend_horizon,
-        fpu_relative=fpu_relative,
-        fpu_reduction=fpu_reduction,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,

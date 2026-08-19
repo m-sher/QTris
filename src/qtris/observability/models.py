@@ -260,8 +260,6 @@ class OneVsOnePlacementAZConfig(BaseModel):
     td_lambda: float = 0.9
     td_blend: float = 0.0
     blend_horizon: int = 16
-    fpu_relative: int = 0
-    fpu_reduction: float = 0.0
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None

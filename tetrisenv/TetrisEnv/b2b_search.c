@@ -2647,9 +2647,6 @@ typedef struct {
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
-    int fpu_relative;            // 0: unvisited children score 0. 1: they score the parent's
-                                 // mean backed-up return minus fpu_reduction.
-    float fpu_reduction;
 } MConfig;
 
 typedef struct MNode {
@@ -2660,9 +2657,6 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
-    // Real-backup totals over this node's edges. mtree_backup is the only writer, so these
-    // stay free of the virtual loss that N/W/Q carry while a round's leaves are in flight.
-    float w_clean, n_clean;
     struct MNode* child[MCAP];
 } MNode;
 
@@ -2868,13 +2862,10 @@ static int mcts_select(const MNode* node, const MConfig* cfg) {
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
     float best = -1e30f; int best_slot = node->legal[0];
     float sq = sqrtf(total + 1e-8f);
-    float fpu = (cfg->fpu_relative && node->n_clean > 0.0f)
-                    ? node->w_clean / node->n_clean - cfg->fpu_reduction
-                    : 0.0f;
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         float n = node->N[slot];
-        float q = n > 0 ? node->Q[slot] : fpu;
+        float q = n > 0 ? node->Q[slot] : 0.0f;
         float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
@@ -2890,8 +2881,6 @@ static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
         node->N[slot] += 1.0f;
         node->W[slot] += g;
         node->Q[slot] = node->W[slot] / node->N[slot];
-        node->w_clean += g;
-        node->n_clean += 1.0f;
     }
 }
 
@@ -3001,8 +2990,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss, float w_b2b, int fpu_relative,
-                  float fpu_reduction) {
+                  int leaves_per_round, float vloss, float w_b2b) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3037,8 +3025,6 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
     e->cfg.leaves_per_round = leaves_per_round;
     e->cfg.vloss = vloss;
-    e->cfg.fpu_relative = fpu_relative;
-    e->cfg.fpu_reduction = fpu_reduction;
     e->trees = (MTree*)calloc(num_trees, sizeof(MTree));
     for (int i = 0; i < num_trees; i++) {
         e->trees[i].pool = (MNode*)calloc((size_t)max_nodes, sizeof(MNode));
@@ -3206,7 +3192,7 @@ void mcts_destroy(void* h) {
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 19; }
+int mcts_create_arity(void) { return 17; }
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.
