@@ -6,12 +6,10 @@ writes the numpy fields named in `_image_fields` as images.
 
 Hierarchy:
     PPOConfigBase           - 10 shared PPO knobs
-      SingleAgentTrainConfig  - adds expert_coef + early_stopping (single-player)
-      OneVsOneTrainConfig     - adds 1v1 self-play knobs
+      SingleAgentTrainConfig  - adds expert_coef + early_stopping
 
     PPOLogBase              - 20 shared per-step metrics (incl. board/scores images)
       SingleAgentPPOLog       - adds single-agent reward channels + expert co-train metrics
-      OneVsOnePPOLog          - adds win/loss outcomes + derived APP metrics
 """
 
 from __future__ import annotations
@@ -43,13 +41,6 @@ class SingleAgentTrainConfig(PPOConfigBase):
 
     expert_coef: float
     early_stopping: bool = True
-
-
-class OneVsOneTrainConfig(PPOConfigBase):
-    """1v1 self-play trainer."""
-
-    pool_save_interval: int
-    max_pool_size: int
 
 
 class LogPayloadModel(BaseModel):
@@ -148,52 +139,6 @@ class SingleAgentPPOLog(PPOLogBase):
         **PPOLogBase._tag_groups,
         "rewards": PPOLogBase._tag_groups["rewards"] + ("avg_reward", "avg_deaths"),
         "expert": ("expert_loss", "expert_accuracy", "expert_coef"),
-    }
-
-
-class OneVsOnePPOLog(PPOLogBase):
-    """1v1 per-step metrics."""
-
-    avg_net_attacks: float
-    avg_episodes: float
-
-    # Derived gameplay (attacks/pieces/clears ratios)
-    APP_reward: float
-    APP_gross: float
-    APP_net: float
-    reward_per_clear: float
-    att_per_clear: float
-    cancel_rate: float
-
-    # Outcome counts
-    total_wins: int
-    total_losses: int
-    total_nondec: int
-    win_rate: float
-    decisive_wr: float
-    wr_ema: float
-
-    _tag_groups: dict[str, tuple[str, ...]] = {
-        **PPOLogBase._tag_groups,
-        "rewards": PPOLogBase._tag_groups["rewards"]
-        + ("avg_net_attacks", "avg_episodes"),
-        "gameplay": PPOLogBase._tag_groups["gameplay"]
-        + (
-            "APP_reward",
-            "APP_gross",
-            "APP_net",
-            "reward_per_clear",
-            "att_per_clear",
-            "cancel_rate",
-        ),
-        "outcomes": (
-            "total_wins",
-            "total_losses",
-            "total_nondec",
-            "win_rate",
-            "decisive_wr",
-            "wr_ema",
-        ),
     }
 
 

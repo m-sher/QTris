@@ -4,7 +4,6 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="datagen")
-    parser.add_argument("family", choices=["ar", "placement"])
     parser.add_argument(
         "--dagger",
         action="store_true",
@@ -14,7 +13,7 @@ def main() -> None:
         "--checkpoint",
         type=Path,
         default=None,
-        help="Required for --dagger. Path to PolicyModel checkpoint directory to roll out.",
+        help="Required for --dagger. Path to the policy checkpoint directory to roll out.",
     )
     parser.add_argument(
         "--num-steps", type=int, default=200_000, help="Number of env steps to collect."
@@ -23,8 +22,7 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="Output dataset path (defaults to datasets/tetris_expert_dataset_b2b for ar; "
-        "datasets/tetris_oracle_placement for placement).",
+        help="Output dataset path (default: datasets/tetris_oracle_placement).",
     )
     parser.add_argument(
         "--seed",
@@ -41,7 +39,7 @@ def main() -> None:
         "--label-states",
         type=Path,
         default=None,
-        help="placement only: run the oracle on states saved during AZ training (a dir of "
+        help="Run the oracle on states saved during AZ training (a dir of "
         "shard_* tf.data shards) and write the labeled dataset to --output. Skips the rollout.",
     )
     parser.add_argument(
@@ -54,19 +52,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.label_states is not None:
-        if args.family != "placement":
-            parser.error("--label-states is placement-only.")
         from qtris.data.dagger import main_label as run
     elif args.dagger:
         if args.checkpoint is None:
             parser.error("--dagger requires --checkpoint.")
         if args.seed is None:
-            args.seed = 10_000_000  # match DAgger's old default (far from beam seeds)
+            args.seed = 10_000_000  # far from the beam seeds
         from qtris.data.dagger import main as run
-    elif args.family == "ar":
-        if args.seed is None:
-            args.seed = 0
-        from qtris.data.gen_ar import main as run
     else:
         if args.seed is None:
             args.seed = 0

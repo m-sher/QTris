@@ -3,20 +3,18 @@ import argparse
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="train")
-    parser.add_argument("family", choices=["ar", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--algo",
         choices=["ppo", "az"],
         default="ppo",
-        help="placement single-player only: 'ppo' (default) or 'az' (AlphaZero MCTS "
-        "self-play).",
+        help="single-player only: 'ppo' (default) or 'az' (AlphaZero MCTS self-play).",
     )
     parser.add_argument("--num-generations", type=int, default=1_000_000)
     parser.add_argument(
         "--expert-dataset",
         default=None,
-        help="placement ppo only: path to the BC dataset for the PPO expert anchor "
+        help="--algo ppo only: path to the BC dataset for the PPO expert anchor "
         "(omit to train plain PPO with no expert anchor).",
     )
     parser.add_argument(
@@ -26,7 +24,7 @@ def main() -> None:
     )
 
     az = parser.add_argument_group(
-        "AlphaZero (placement --algo az)", "Knobs for the MCTS self-play trainer."
+        "AlphaZero (--algo az)", "Knobs for the MCTS self-play trainer."
     )
     az.add_argument(
         "--num-games",
@@ -44,44 +42,44 @@ def main() -> None:
         "--max-game-steps",
         type=int,
         default=512,
-        help="placement 1v1 only: hard per-game placement cap; a game still alive at the "
+        help="1v1 only: hard per-game placement cap; a game still alive at the "
         "cap is flushed as a draw.",
     )
     az.add_argument(
         "--max-pool-size",
         type=int,
         default=30,
-        help="placement 1v1 only: max opponent-pool snapshots kept on disk (gen_0 pinned).",
+        help="1v1 only: max opponent-pool snapshots kept on disk (gen_0 pinned).",
     )
     az.add_argument(
         "--pool-interval",
         type=int,
         default=10,
-        help="placement 1v1 only: generations between gated opponent-pool snapshots.",
+        help="1v1 only: generations between gated opponent-pool snapshots.",
     )
     az.add_argument(
         "--pool-wr-gate",
         type=float,
         default=0.55,
-        help="placement 1v1 only: decisive-WR EMA the learner must beat to add a snapshot.",
+        help="1v1 only: decisive-WR EMA the learner must beat to add a snapshot.",
     )
     az.add_argument(
         "--eval-interval",
         type=int,
         default=10,
-        help="placement 1v1 only: generations between win_rate_vs_ref evals (vs frozen gen_0).",
+        help="1v1 only: generations between win_rate_vs_ref evals (vs frozen gen_0).",
     )
     az.add_argument(
         "--eval-games",
         type=int,
         default=32,
-        help="placement 1v1 only: games per win_rate_vs_ref eval.",
+        help="1v1 only: games per win_rate_vs_ref eval.",
     )
     az.add_argument(
         "--td-lambda",
         type=float,
         default=0.9,
-        help="placement 1v1 only: TD(lambda) for the value target (1=raw outcome z on "
+        help="1v1 only: TD(lambda) for the value target (1=raw outcome z on "
         "every position; lower bootstraps toward near-term root value).",
     )
     az.add_argument(
@@ -120,21 +118,21 @@ def main() -> None:
         "--gamma",
         type=float,
         default=None,
-        help="placement single-player only: discount for MCTS backup + MC return target "
-        "(default 0.99). Rejected for placement 1v1, whose reward is terminal-only.",
+        help="single-player only: discount for MCTS backup + MC return target "
+        "(default 0.99). Rejected for 1v1, whose reward is terminal-only.",
     )
     az.add_argument(
         "--td-blend",
         type=float,
         default=0.0,
-        help="placement 1v1 only: weight of the realized near-term production channel in "
+        help="1v1 only: weight of the realized near-term production channel in "
         "the value target; 0 disables the blend. Terminal rows stay pure z.",
     )
     az.add_argument(
         "--blend-horizon",
         type=int,
         default=16,
-        help="placement 1v1 only: forward window (placements) for the blend channels.",
+        help="1v1 only: forward window (placements) for the blend channels.",
     )
     az.add_argument(
         "--temp-moves",
@@ -165,7 +163,7 @@ def main() -> None:
         type=float,
         default=None,
         help="per-edge search reward weight on attack (also scales the realized return). "
-        "Default 1.0 for single-player, 0.0 for placement 1v1.",
+        "Default 1.0 for single-player, 0.0 for 1v1.",
     )
     az.add_argument(
         "--w-death",
@@ -177,7 +175,7 @@ def main() -> None:
         "--w-b2b",
         type=float,
         default=0.0,
-        help="placement 1v1 only: potential-based b2b-build search shaping "
+        help="1v1 only: potential-based b2b-build search shaping "
         "(Phi=min(max(0,b2b),12); 0=off).",
     )
     az.add_argument(
@@ -231,8 +229,8 @@ def main() -> None:
     az.add_argument(
         "--save-states",
         default=None,
-        help="placement 1v1 only: dir to dump per-generation state shards (both players) for "
-        "offline oracle relabeling via `datagen placement --label-states`.",
+        help="1v1 only: dir to dump per-generation state shards (both players) for "
+        "offline oracle relabeling via `datagen --label-states`.",
     )
     az.add_argument(
         "--no-harvest",
@@ -285,26 +283,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.algo == "az" and args.family != "placement":
-        parser.error("--algo az is only supported for `train placement`.")
-
     if args.mode == "1v1":
-        if args.family == "placement":
-            if args.algo != "az":
-                parser.error(
-                    "placement 1v1 supports only --algo az (opponent-pool AlphaZero)."
-                )
-            if args.gamma is not None:
-                parser.error(
-                    "placement 1v1 does not accept --gamma: its reward is terminal-only "
-                    "(z in {-1,0,1}) and the TD(lambda) target is undiscounted. Use "
-                    "--td-lambda to trade outcome grounding against bootstrap."
-                )
-            from qtris.training._1v1_placement_az import main as run
-        else:
-            from qtris.training._1v1 import main as run
-    elif args.family == "ar":
-        from qtris.training.ar import main as run
+        if args.algo != "az":
+            parser.error("1v1 supports only --algo az (opponent-pool AlphaZero).")
+        if args.gamma is not None:
+            parser.error(
+                "1v1 does not accept --gamma: its reward is terminal-only "
+                "(z in {-1,0,1}) and the TD(lambda) target is undiscounted. Use "
+                "--td-lambda to trade outcome grounding against bootstrap."
+            )
+        from qtris.training._1v1_placement_az import main as run
     elif args.algo == "az":
         from qtris.training.placement_az import main as run
     else:

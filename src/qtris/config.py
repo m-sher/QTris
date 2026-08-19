@@ -1,8 +1,7 @@
 """Canonical hyperparameter defaults for QTris.
 
-Each model carries defaults matching the AR trainer (the "primary" variant).
-Per-trainer overrides via construction:
-    PPOConfig(num_collection_steps=256, target_kl=0.02, expert_coef=0.1)
+Overrides go in at construction:
+    PretrainConfig(value_anchor_q=0.9, value_anchor_t=0.7)
 """
 
 from pydantic import BaseModel
@@ -10,7 +9,6 @@ from pydantic import BaseModel
 
 class ModelConfig(BaseModel):
     piece_dim: int = 8
-    key_dim: int = 12
     depth: int = 64
     num_heads: int = 4
     num_layers: int = 4
@@ -18,38 +16,17 @@ class ModelConfig(BaseModel):
     max_len: int = 15
     queue_size: int = 5
     num_row_tiers: int = 2
-    num_sequences: int = 320
 
 
 class EnvConfig(BaseModel):
     max_holes: int = 50
-    max_steps: int = 512
     garbage_chance: float = 0.15
     garbage_min: int = 1
     garbage_max: int = 4
     garbage_push_delay: int = 1
-    pathfinding: bool = True
-
-
-class PPOConfig(BaseModel):
-    gamma: float = 0.99
-    lam: float = 0.95
-    ppo_clip: float = 0.2
-    value_clip: float = 0.5
-    entropy_coef: float = 0.01
-    temperature: float = 1.0
-    mini_batch_size: int = 512
-    num_epochs: int = 4
-    num_envs: int = 64
-    num_collection_steps: int = 64
-    early_stopping: bool = True
-    target_kl: float = 0.03
-    expert_coef: float = 0.005
 
 
 class PretrainConfig(BaseModel):
-    return_clip_low: float = -150.0
-    return_clip_high: float = 100.0
     batch_size: int = 128
     epochs: int = 10
     learning_rate: float = 3e-4
