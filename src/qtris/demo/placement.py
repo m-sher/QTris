@@ -136,9 +136,9 @@ def main(args):
                 dirichlet_eps=0.0,
                 leaves_per_round=getattr(args, "leaves_per_round", 4),
                 gamma=1.0,
-                w_attack=0.00,
+                w_attack=0.05,
                 w_death=1.0,
-                w_b2b=0.00,
+                w_b2b=0.06,
             ),
         )
         if getattr(args, "num_simulations", 0) > 0

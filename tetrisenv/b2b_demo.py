@@ -46,6 +46,7 @@ PIECE_PREVIEW_CELLS = {
 }
 
 # ── Layout constants ─────────────────────────────────────────
+# The env board is 40 rows; the bottom 24 (4 buffer + 20 visible) are rendered.
 CELL = 28
 MINI_CELL = 18
 BOARD_VISIBLE_ROWS = 20
@@ -181,12 +182,13 @@ class Button:
 class Spinner:
     """Integer value with +/- buttons."""
 
-    def __init__(self, x, y, label, value, lo, hi, step, font, small_font):
+    def __init__(self, x, y, label, value, lo, hi, step, font, small_font, mul=None):
         self.label = label
         self.value = value
         self.lo = lo
         self.hi = hi
         self.step = step
+        self.mul = mul  # geometric stepping factor, used instead of step
         self.font = font
         self.small_font = small_font
         self.minus_rect = pygame.Rect(x, y, 28, 26)
@@ -220,12 +222,18 @@ class Spinner:
 
     def handle_click(self, pos):
         if self.minus_rect.collidepoint(pos):
+            if self.mul:
+                self.value = max(self.lo, self.value // self.mul)
+                return True
             if isinstance(self.value, float):
                 self.value = round(max(self.lo, self.value - self.step), 2)
             else:
                 self.value = max(self.lo, self.value - self.step)
             return True
         if self.plus_rect.collidepoint(pos):
+            if self.mul:
+                self.value = min(self.hi, self.value * self.mul)
+                return True
             if isinstance(self.value, float):
                 self.value = round(min(self.hi, self.value + self.step), 2)
             else:
@@ -235,13 +243,24 @@ class Spinner:
 
 
 # ── Drawing helpers ──────────────────────────────────────────
+def display_row_offset(board_height, display_rows=BOARD_ROWS):
+    """Rows above the rendered slice on a tall board (16 on a 40-row field)."""
+    return board_height - display_rows
+
+
+def display_board_slice(vis_board, display_rows=BOARD_ROWS):
+    """Bottom `display_rows` of the env board (playfield + a few buffer rows)."""
+    return vis_board[-display_rows:]
+
+
 def draw_board(surface, vis_board, ox, oy):
-    """Draw the 24-row board with grid lines."""
+    """Draw the visible 24-row slice (bottom of a tall board) with grid lines."""
+    display = display_board_slice(vis_board)
     for r in range(BOARD_ROWS):
         for c in range(BOARD_COLS):
             x = ox + c * CELL
             y = oy + r * CELL
-            val = int(vis_board[r, c])
+            val = int(display[r, c])
             color = PIECE_COLORS.get(val, PIECE_COLORS[0])
             if val == 0:
                 color = (12, 12, 18) if r >= BOARD_HIDDEN_ROWS else (6, 6, 10)
@@ -286,6 +305,27 @@ def draw_mini_piece(surface, piece_type, x, y, cell_size=MINI_CELL):
                          border_radius=2)
 
 
+QUEUE_GAP = 8
+
+
+def queue_layout(n, avail_h, avail_w, cell=MINI_CELL, gap=QUEUE_GAP):
+    """Columns and cell size that fit n previews into avail_h by avail_w.
+
+    Columns are added before cell size is reduced.
+    """
+    if n <= 0:
+        return 1, cell, cell * 2 + gap
+    while cell >= 6:
+        for cols in (1, 2, 3):
+            if cols * cell * 4 + (cols - 1) * gap > avail_w:
+                break
+            rows = (n + cols - 1) // cols
+            if rows * (cell * 2 + gap) <= avail_h:
+                return cols, cell, cell * 2 + gap
+        cell -= 2
+    return 3, 6, 6 * 2 + gap
+
+
 def draw_active_ghost(surface, env, ox, oy):
     """Draw the active piece's ghost (hard-drop preview) on the board."""
     piece = env._active_piece
@@ -298,12 +338,14 @@ def draw_active_ghost(surface, env, ox, oy):
         loc = loc + [1, 0]
     color = PIECE_COLORS.get(piece.piece_type.value, (200, 200, 200))
     ghost_color = (color[0] // 3, color[1] // 3, color[2] // 3)
+    offset = display_row_offset(env._board.shape[0])
     for cr, cc in cells:
         r = loc[0] + cr
         c = loc[1] + cc
-        if 0 <= r < BOARD_ROWS and 0 <= c < BOARD_COLS:
+        sr = r - offset
+        if 0 <= sr < BOARD_ROWS and 0 <= c < BOARD_COLS:
             x = ox + c * CELL
-            y = oy + r * CELL
+            y = oy + sr * CELL
             pygame.draw.rect(surface, ghost_color,
                              (x + 2, y + 2, CELL - 4, CELL - 4), 2, border_radius=3)
 
@@ -483,7 +525,7 @@ def main():
         "search_depth": Spinner(sp_x, sp_start_y, "Search Depth",
                                 4, 1, 16, 1, font, small_font),
         "beam_width": Spinner(sp_x, sp_start_y + sp_gap, "Beam Width",
-                              64, 4, 256, 4, font, small_font),
+                              64, 4, 2048, 4, font, small_font, mul=2),
         "speed": Spinner(sp_x, sp_start_y + sp_gap * 2, "Speed (steps/s)",
                          5, 1, 60, 1, font, small_font),
         "queue_size": Spinner(sp_x, sp_start_y + sp_gap * 3, "Queue Size",
@@ -786,24 +828,7 @@ def main():
         draw_mini_piece(screen, env._hold_piece, rx, ry, MINI_CELL)
         ry += MINI_CELL * 2 + 16
 
-        # Queue
-        queue_lbl = big_font.render("NEXT", True, ACCENT)
-        screen.blit(queue_lbl, (rx, ry))
-        ry += 28
-        for i, pt in enumerate(env._queue):
-            draw_mini_piece(screen, pt, rx, ry, MINI_CELL)
-            ry += MINI_CELL * 2 + 8
-        ry += 8
-
-        # Separator
-        pygame.draw.line(screen, BORDER_COLOR, (rx, ry), (rx + RIGHT_PANEL_W - 32, ry))
-        ry += 12
-
-        # Stats
-        stats_lbl = big_font.render("STATS", True, ACCENT)
-        screen.blit(stats_lbl, (rx, ry))
-        ry += 28
-
+        # The queue layout below is sized against the height these rows need.
         stat_lines = [
             ("Step", f"{env._step_num}"),
             ("B2B", f"{env._scorer._b2b}"),
@@ -815,6 +840,29 @@ def main():
             ("Garbage Q", f"{env._get_total_garbage()}"),
             ("History", f"{history_idx}/{len(history)-1}"),
         ]
+        below_queue_h = (8 + 12 + 28 + 20 * len(stat_lines) + 8 + 20
+                         + (20 if last_action_idx >= 0 else 0))
+
+        # Queue
+        queue_lbl = big_font.render("NEXT", True, ACCENT)
+        screen.blit(queue_lbl, (rx, ry))
+        ry += 28
+        q_cols, q_cell, q_step = queue_layout(
+            len(env._queue), BREAKDOWN_TOP - ry - below_queue_h, RIGHT_PANEL_W - 32)
+        q_step_x = q_cell * 4 + QUEUE_GAP
+        for i, pt in enumerate(env._queue):
+            draw_mini_piece(screen, pt, rx + (i % q_cols) * q_step_x,
+                            ry + (i // q_cols) * q_step, q_cell)
+        ry += ((len(env._queue) + q_cols - 1) // q_cols) * q_step + 8
+
+        # Separator
+        pygame.draw.line(screen, BORDER_COLOR, (rx, ry), (rx + RIGHT_PANEL_W - 32, ry))
+        ry += 12
+
+        # Stats
+        stats_lbl = big_font.render("STATS", True, ACCENT)
+        screen.blit(stats_lbl, (rx, ry))
+        ry += 28
 
         for label, value in stat_lines:
             l = stat_font.render(f"{label}:", True, LABEL_DIM)

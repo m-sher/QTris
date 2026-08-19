@@ -70,7 +70,7 @@
 #define MAX_PLACEMENTS 512
 
 // Beam search limits
-#define MAX_BEAM_WIDTH 256
+#define MAX_BEAM_WIDTH 2048
 #define MAX_SEARCH_DEPTH 16
 
 // ============================================================
