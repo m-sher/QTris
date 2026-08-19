@@ -6,13 +6,12 @@ from qtris.config import PretrainConfig
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="pretrain")
-    parser.add_argument("family", choices=["ar", "flat", "placement"])
+    parser.add_argument("family", choices=["ar", "placement"])
     parser.add_argument(
         "--dataset",
         type=Path,
         default=None,
         help="Path to expert dataset (defaults: datasets/tetris_expert_dataset_b2b for ar; "
-        "datasets/tetris_expert_dataset_flat for flat; "
         "datasets/tetris_oracle_placement for placement).",
     )
     parser.add_argument(
@@ -32,7 +31,7 @@ def main() -> None:
         "(its latest is used) or a specific ckpt prefix (e.g. "
         "checkpoints/placement_pretrained_policy/ckpt-2335). Defaults to the family's "
         "own save-dir latest. New checkpoints still save to the family's default dir; "
-        "for ar/flat this targets the policy checkpoint (value resumes from its own dir).",
+        "for ar this targets the policy checkpoint (value resumes from its own dir).",
     )
     parser.add_argument("--num-epochs", type=int, default=10)
     parser.add_argument(
@@ -40,21 +39,21 @@ def main() -> None:
         type=int,
         default=128,
         help="Per-step batch size. ar scores batch x --cand-topk sequences through "
-        "the key decoder, so keep it modest (128 ~ 5.8GB at depth 64, K 32); flat and "
-        "placement score the candidate set in one cheap pass (encoder stays O(batch)) "
-        "and can go higher (pass 256-512).",
+        "the key decoder, so keep it modest (128 ~ 5.8GB at depth 64, K 32); placement "
+        "scores the candidate set in one cheap pass (encoder stays O(batch)) and can go "
+        "higher (pass 256-512).",
     )
     parser.add_argument(
         "--policy-only",
         action="store_true",
-        help="ar/flat: train only the policy head, skip the separate value model "
+        help="ar: train only the policy head, skip the separate value model "
         "(no effect for placement, which trains its shared policy+value net jointly).",
     )
     parser.add_argument(
         "--cand-topk",
         type=int,
         default=32,
-        help="ar only (flat/placement score every candidate, so it does not apply): "
+        help="ar only (placement scores every candidate, so it does not apply): "
         "number of top-scored candidate moves distilled per position (memory/compute lever).",
     )
     parser.add_argument(
@@ -95,10 +94,8 @@ def main() -> None:
 
     if args.family == "ar":
         from qtris.pretraining.ar import main as run
-    elif args.family == "placement":
-        from qtris.pretraining.placement import main as run
     else:
-        from qtris.pretraining.flat import main as run
+        from qtris.pretraining.placement import main as run
     run(args)
 
 

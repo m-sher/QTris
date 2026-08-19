@@ -15,7 +15,7 @@ stores):
   * Record (state, dense search target).
 
 ``family`` selects which policy checkpoint drives the rollout and which target
-schema is stored: ar/flat use gen_ar's dense 320-action schema; placement uses
+schema is stored: ar uses gen_ar's dense 320-action schema; placement uses
 gen_placement's 128-slot placement schema. Within a family the DAgger output
 matches the pretrain dataset, so transitions accumulate across BC + DAgger rounds.
 """
@@ -31,7 +31,6 @@ from tqdm import tqdm
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.models.ar.model import PolicyModel
-from qtris.models.flat.model import FlatPolicyModel
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.gen_ar import NUM_ACTIONS, dense_target
 from qtris.data.placement_features import (
@@ -181,8 +180,6 @@ def collect_dagger(
         valid_sequences = obs["sequences"].astype(np.int64)
 
         # Policy's greedy choice under valid-sequence masking (drives the env).
-        # PolicyModel and FlatPolicyModel share predict(): both return the
-        # selected key-sequence as the first tuple element.
         b_in = tf.constant(board[None, ...], dtype=tf.float32)
         p_in = tf.constant(pieces[None, ...], dtype=tf.int64)
         g_in = tf.constant(bcg[None, ...], dtype=tf.float32)
@@ -529,27 +526,6 @@ def _build_ar_model(args):
     return p_model
 
 
-def _build_flat_model(args):
-    num_sequences = 160 * args.num_row_tiers
-    p_model = FlatPolicyModel(
-        batch_size=1,
-        piece_dim=args.piece_dim,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        num_layers=args.num_layers,
-        dropout_rate=args.dropout_rate,
-        num_sequences=num_sequences,
-    )
-    p_model(
-        (
-            keras.Input(shape=(24, 10, 1), dtype=tf.float32),
-            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
-            keras.Input(shape=(3,), dtype=tf.float32),
-        )
-    )
-    return p_model
-
-
 def _build_placement_model(args):
     p_model = PlacementPolicyValueNet(
         batch_size=1,
@@ -741,11 +717,6 @@ def main(cli_args):
             "policy_checkpoint": "checkpoints/ar_pretrained_policy",
             "dataset_path": "datasets/tetris_expert_dataset_b2b",
             "build_model": _build_ar_model,
-        },
-        "flat": {
-            "policy_checkpoint": "checkpoints/flat_pretrained_policy",
-            "dataset_path": "datasets/tetris_expert_dataset_flat",
-            "build_model": _build_flat_model,
         },
         "placement": {
             "policy_checkpoint": "checkpoints/placement_pretrained_policy",

@@ -3,7 +3,7 @@ import argparse
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="train")
-    parser.add_argument("family", choices=["ar", "flat", "placement"])
+    parser.add_argument("family", choices=["ar", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--algo",
@@ -305,13 +305,10 @@ def main() -> None:
             from qtris.training._1v1 import main as run
     elif args.family == "ar":
         from qtris.training.ar import main as run
-    elif args.family == "placement":
-        if args.algo == "az":
-            from qtris.training.placement_az import main as run
-        else:
-            from qtris.training.placement import main as run
+    elif args.algo == "az":
+        from qtris.training.placement_az import main as run
     else:
-        from qtris.training.flat import main as run
+        from qtris.training.placement import main as run
 
     import sys
     import tf_agents

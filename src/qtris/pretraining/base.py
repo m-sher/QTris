@@ -1,9 +1,6 @@
 """Shared pretraining helpers (surge-correction return remapping).
 
-Used by both `pretraining/ar.py` and `pretraining/flat.py` to normalize the
-expert dataset's returns into the current env's reachable range. The math
-below was a fix for a reward-shaping change in the env - see surge_correction
-docstring.
+Normalizes the expert dataset's returns into the current env's reachable range.
 """
 
 import math
@@ -60,10 +57,10 @@ def resolve_resume_checkpoint(resume_from, manager):
 
 
 class PretrainerBase:
-    """Shared dataset loading for AR + Flat pretrainers.
+    """Shared dataset loading for the family pretrainers.
 
-    Subclasses (Pretrainer, FlatPretrainer) provide the family-specific
-    `_train_step` and `train`; everything here is identical across both.
+    Subclasses provide the family-specific `_train_step` and `train`;
+    everything here is identical across them.
     """
 
     def __init__(

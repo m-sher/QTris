@@ -296,7 +296,7 @@ def main(args):
         elif not np.any(key_sequence.numpy()[0] == Keys.HARD_DROP):
             # No surviving placement (near-death): the env locks + scores only on a
             # HARD_DROP (else its `is_spin` is unbound), so commit a hard drop to top
-            # out + auto-reset, the same death path the flat/ar demos take.
+            # out + auto-reset, the same death path the ar demo takes.
             forced = np.full(max_len, Keys.PAD, dtype=np.int64)
             forced[0], forced[1] = Keys.START, Keys.HARD_DROP
             key_sequence = tf.constant(forced[None], dtype=tf.int64)

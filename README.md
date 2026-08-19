@@ -1,7 +1,7 @@
 # QTris
 
 Vision-transformer reinforcement-learning agents for modern Tetris. A shared transformer
-encoder feeds three interchangeable policy families, trained by behavioral cloning from a
+encoder feeds two interchangeable policy families, trained by behavioral cloning from a
 fast C beam-search oracle then refined with PPO or AlphaZero-style MCTS, in a Tetris environment
 added here as a subtree (mine).
 
@@ -21,29 +21,28 @@ MCTS** self-play.
 
 ## Models
 
-All three share the encoder above and differ only in how they represent an action.
+Both share the encoder above and differ only in how they represent an action.
 
 | Family | Action representation | Policy / value | Modes |
 | --- | --- | --- | --- |
 | **AR** | Variable-length key-press **sequence**, decoded autoregressively one key at a time | Separate policy + `ValueModel` (asymmetric, two-board value in 1v1) | pretrain, PPO single, PPO 1v1 |
-| **Flat** | Fixed **320-way categorical** over a pre-enumerated placement set, scored in one pass | Separate policy + `ValueModel` | pretrain, PPO single, PPO 1v1 |
 | **Placement** | **Ranks the env's legal candidate placements** via cross-attention (up to 128 candidates) | Merged `PlacementPolicyValueNet` (state-only value) | pretrain, PPO single, AlphaZero-style MCTS |
 
 ## Training & data pipeline
 
 - **Pretraining (BC):** distill the beam/oracle datasets into a policy (and value). Soft
   cross-entropy to the oracle's per-candidate scores; value regresses the oracle return.
-  `uv run pretrain {ar,flat,placement}`.
-- **PPO:** on-policy refinement. **Single-player** for all families; **1v1 self-play** for
-  AR and Flat, rotating an opponent pool of past checkpoints through an asymmetric value
+  `uv run pretrain {ar,placement}`.
+- **PPO:** on-policy refinement. **Single-player** for both families; **1v1 self-play** for
+  AR, rotating an opponent pool of past checkpoints through an asymmetric value
   head. Placement PPO can keep a BC **expert anchor** via `--expert-dataset`.
-  `uv run train {ar,flat} [--mode 1v1]`, `uv run train placement`.
+  `uv run train ar [--mode 1v1]`, `uv run train placement`.
 - **AlphaZero-style MCTS** *(placement only)*: PUCT self-play with a multi-generation replay
   buffer; the policy imitates the search visit counts and the value regresses the
   search-bootstrapped return. `uv run train placement --algo az`.
 - **Data generation:** collect expert datasets with the C beam search, or **DAgger**
   (roll a trained policy forward and relabel its states with the oracle).
-  `uv run datagen {ar,flat,placement} [--dagger]`.
+  `uv run datagen {ar,placement} [--dagger]`.
 
 The expert throughout is the C beam-search engine `CB2BSearch`.
 
@@ -53,11 +52,11 @@ The expert throughout is the C beam-search engine `CB2BSearch`.
 uv sync                                                    # install (requires Python 3.11)
 
 # Behavioral-cloning pretrain from the beam/oracle dataset
-uv run pretrain placement                                  # or: pretrain ar / pretrain flat
+uv run pretrain placement                                  # or: pretrain ar
 
 # PPO refinement
 uv run train ar                                            # single-player
-uv run train flat --mode 1v1                               # 1v1 self-play w/ opponent pool
+uv run train ar --mode 1v1                                 # 1v1 self-play w/ opponent pool
 
 # AlphaZero-style MCTS self-play (placement only)
 uv run train placement --algo az --num-simulations 128

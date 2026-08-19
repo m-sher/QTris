@@ -1,6 +1,6 @@
 """Tetris-specific shared encoders: board CNN + BCG tokenizer.
 
-Shared by PolicyModel / ValueModel / AsymmetricValueModel / FlatPolicyModel.
+Shared by PolicyModel / ValueModel / AsymmetricValueModel / PlacementPolicyValueNet.
 They are NOT generic NN code (they know the board is 24x10x1 and the BCG state
 is a 3-tuple of scalars), so they live under `qtris.models.` rather than
 `qtris.nn.`.
@@ -14,7 +14,7 @@ from keras import layers
 def make_patches(depth: int) -> keras.Sequential:
     """Board (24,10,1) -> sequence of `depth`-dim patches.
 
-    Identical across all AR + Flat models. The Sequential's inner layers use
+    Identical across all models. The Sequential's inner layers use
     auto-generated names; the global Keras name counter must be in the same
     state when this is called from each model's `__init__` so the variable
     scopes (and thus checkpoint keys) stay consistent.
@@ -61,7 +61,7 @@ def tokenize_bcg(
     """Log-compress + project a (B, 3) BCG tuple into (B, 3, depth) tokens.
 
     Per-feature projections + layernorm passed as kwargs so each model owns
-    its own submodules (AR uses 'relu' activation, Flat uses None) and the
+    its own submodules (AR uses 'relu' activation, placement uses None) and the
     variable graph stays under the model's existing attribute names
     (`_bcg_proj_b2b`, `_bcg_proj_combo`, `_bcg_proj_garbage`, `_bcg_ln`).
     """

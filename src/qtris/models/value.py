@@ -1,8 +1,4 @@
-"""Value head model. Shared between AR and Flat training.
-
-Lives at `qtris.models.value` (not under `ar/`) so that `flat/model.py`
-doesn't need to cross-import from `ar/model.py`.
-"""
+"""Value head model for AR training."""
 
 import tensorflow as tf
 import keras

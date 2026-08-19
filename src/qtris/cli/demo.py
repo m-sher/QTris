@@ -4,13 +4,13 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="demo")
-    parser.add_argument("family", choices=["ar", "flat", "placement"])
+    parser.add_argument("family", choices=["ar", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=None,
-        help="Required for `demo ar` / `demo flat` / `demo ar --mode 1v1`. "
+        help="Required for `demo ar` / `demo ar --mode 1v1`. "
         "Path to a tf.train.CheckpointManager directory.",
     )
     parser.add_argument(
@@ -99,11 +99,6 @@ def main() -> None:
             parser.error(
                 "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
             )
-        if args.family == "flat":
-            parser.error(
-                "flat 1v1 demo not yet implemented; use `demo ar --mode 1v1` or "
-                "`demo placement --mode 1v1`."
-            )
         if args.family == "placement":
             from qtris.demo.placement_1v1 import main as run
         else:
@@ -113,10 +108,8 @@ def main() -> None:
             parser.error(f"`demo {args.family}` requires --checkpoint.")
         if args.family == "ar":
             from qtris.demo.ar import main as run
-        elif args.family == "placement":
-            from qtris.demo.placement import main as run
         else:
-            from qtris.demo.flat import main as run
+            from qtris.demo.placement import main as run
     run(args)
 
 

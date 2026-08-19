@@ -1,7 +1,7 @@
 """Shared `keras.Model` base for QTris policy/value architectures.
 
 Hosts the `process_obs` method that's identical across PolicyModel,
-ValueModel, AsymmetricValueModel, and FlatPolicyModel. The base class
+ValueModel, and AsymmetricValueModel. The base class
 owns no Variables; it assumes the subclass `__init__` creates the
 submodule attributes the method reads:
     self.make_patches, self.patch_pos_encoding,

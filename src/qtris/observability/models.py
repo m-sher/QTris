@@ -6,7 +6,7 @@ writes the numpy fields named in `_image_fields` as images.
 
 Hierarchy:
     PPOConfigBase           - 10 shared PPO knobs
-      SingleAgentTrainConfig  - adds expert_coef + early_stopping (ar/flat)
+      SingleAgentTrainConfig  - adds expert_coef + early_stopping (single-player)
       OneVsOneTrainConfig     - adds 1v1 self-play knobs
 
     PPOLogBase              - 20 shared per-step metrics (incl. board/scores images)
@@ -39,7 +39,7 @@ class PPOConfigBase(BaseModel):
 
 
 class SingleAgentTrainConfig(PPOConfigBase):
-    """ar/flat trainers."""
+    """Single-player PPO trainers (ar, placement)."""
 
     expert_coef: float
     early_stopping: bool = True
@@ -48,7 +48,6 @@ class SingleAgentTrainConfig(PPOConfigBase):
 class OneVsOneTrainConfig(PPOConfigBase):
     """1v1 self-play trainer."""
 
-    flat: bool
     pool_save_interval: int
     max_pool_size: int
 
@@ -136,7 +135,7 @@ class PPOLogBase(LogPayloadModel):
 
 
 class SingleAgentPPOLog(PPOLogBase):
-    """ar/flat per-step metrics."""
+    """Single-player PPO per-step metrics."""
 
     avg_reward: float
     avg_deaths: float
