@@ -205,10 +205,6 @@ def test_enumerator_and_scorer_agree_on_difficulty():
     `Scorer.py:33-98` re-derives the label when the keys are executed. They are independent
     implementations. Difficulty is the observable: for
     a 1-3 line clear, b2b increments iff the classifier saw a spin.
-
-    A third copy lives at `b2b_search.c:669-750`, but it is `static` and reachable only
-    through the beam/oracle datagen path, which the MCTS never calls. It is therefore not
-    covered here; the two above are the ones on live paths.
     """
     searcher = CB2BSearch()
     base = _env()

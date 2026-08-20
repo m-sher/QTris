@@ -4,46 +4,42 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="demo")
-    parser.add_argument("family", choices=["ar", "flat", "placement"])
     parser.add_argument("--mode", choices=["single", "1v1"], default="single")
     parser.add_argument(
         "--checkpoint",
         type=Path,
         default=None,
-        help="Required for `demo ar` / `demo flat` / `demo ar --mode 1v1`. "
-        "Path to a tf.train.CheckpointManager directory.",
+        help="Path to a tf.train.CheckpointManager directory.",
     )
     parser.add_argument(
         "--opponent",
         type=Path,
         default=None,
-        help="Required for `demo <family> --mode 1v1`. Opponent's checkpoint directory.",
+        help="Required for `--mode 1v1`. Opponent's checkpoint directory.",
     )
     parser.add_argument(
         "--search",
         action="store_true",
-        help="placement only: pick moves with the neural-guided beam search "
-        "(policy prior + value leaf) instead of greedy top-1.",
+        help="pick moves with the neural-guided beam search (policy prior + value "
+        "leaf) instead of greedy top-1.",
     )
     parser.add_argument(
-        "--depth", type=int, default=1, help="placement --search: lookahead plies."
+        "--depth", type=int, default=1, help="--search: lookahead plies."
     )
-    parser.add_argument(
-        "--beam", type=int, default=8, help="placement --search: beam width."
-    )
+    parser.add_argument("--beam", type=int, default=8, help="--search: beam width.")
     parser.add_argument(
         "--gate",
         type=int,
         default=8,
-        help="placement --search: top-K candidates expanded per node.",
+        help="--search: top-K candidates expanded per node.",
     )
     parser.add_argument(
         "--num-simulations",
         type=int,
         default=0,
-        help="placement only: play with PUCT MCTS (net policy priors + value leaves) "
+        help="play with PUCT MCTS (net policy priors + value leaves) "
         "at this simulation budget, greedy by visit count - the AlphaZero way to play "
-        "an `--algo az` checkpoint. 0 = off (use greedy top-1 or --search).",
+        "an AZ checkpoint. 0 = off (use greedy top-1 or --search).",
     )
     parser.add_argument(
         "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
@@ -60,21 +56,21 @@ def main() -> None:
         "--garbage-chance",
         type=float,
         default=0.15,
-        help="placement only: per-step garbage chance for the chance model "
+        help="per-step garbage chance for the chance model "
         "(0 = no garbage at all; ignored when --garbage-traces is set).",
     )
     parser.add_argument(
         "--garbage-traces",
         type=str,
         default=None,
-        help="placement only: trace-replay garbage from this library dir "
+        help="trace-replay garbage from this library dir "
         "(replaces the chance model; see train --garbage-traces).",
     )
     parser.add_argument(
         "--trace-tier",
         type=str,
         default=None,
-        help="placement --garbage-traces: tier subdir to draw from "
+        help="--garbage-traces: tier subdir to draw from "
         "(default: last sorted = strongest).",
     )
     parser.add_argument(
@@ -96,27 +92,12 @@ def main() -> None:
 
     if args.mode == "1v1":
         if args.checkpoint is None or args.opponent is None:
-            parser.error(
-                "`demo <family> --mode 1v1` requires --checkpoint and --opponent."
-            )
-        if args.family == "flat":
-            parser.error(
-                "flat 1v1 demo not yet implemented; use `demo ar --mode 1v1` or "
-                "`demo placement --mode 1v1`."
-            )
-        if args.family == "placement":
-            from qtris.demo.placement_1v1 import main as run
-        else:
-            from qtris.demo.ar_1v1 import main as run
+            parser.error("`demo --mode 1v1` requires --checkpoint and --opponent.")
+        from qtris.demo.placement_1v1 import main as run
     else:
         if args.checkpoint is None:
-            parser.error(f"`demo {args.family}` requires --checkpoint.")
-        if args.family == "ar":
-            from qtris.demo.ar import main as run
-        elif args.family == "placement":
-            from qtris.demo.placement import main as run
-        else:
-            from qtris.demo.flat import main as run
+            parser.error("`demo` requires --checkpoint.")
+        from qtris.demo.placement import main as run
     run(args)
 
 

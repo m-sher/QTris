@@ -11,7 +11,7 @@ dependencies = [
     "tensorflow[and-cuda]==2.15.1",
     "tetrisenv",
     # TODO: drop tf-agents dep - pins typing-extensions==4.5.0, blocks pydantic v2
-    # + py3.12 + TF 2.18 upgrades (see notes.md "Dependency modernization").
+    # + py3.12 + TF 2.18 upgrades.
     "tf-agents==0.19.0",
     "tqdm>=4.67.3",
     "wandb>=0.19.11",

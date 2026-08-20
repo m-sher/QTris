@@ -44,7 +44,7 @@ class PyTetris1v1Env(py_environment.PyEnvironment):
         self._random = random.Random(seed)
 
         # Player 1 (training agent) and Player 2 (opponent)
-        # Both have no random garbage — garbage comes from opponent attacks
+        # Both have no random garbage; garbage comes from opponent attacks
         self._env1 = PyTetrisEnv(
             queue_size=queue_size,
             max_holes=max_holes,

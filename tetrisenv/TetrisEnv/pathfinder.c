@@ -67,8 +67,7 @@ typedef struct {
 
 // State tracking
 typedef struct {
-    int16_t parent;      // Index of parent state in visited/queue logic? 
-                         // No, we need parent state index.
+    int16_t parent;      // Index of the parent state.
     int8_t last_move;
     int16_t depth;
     int8_t delta_r;
@@ -91,12 +90,10 @@ static int8_t I_KICKS[4][4][5][2];
 void init_pieces() {
     if (initialized) return;
 
-    // Zero out everything first
     memset(PIECES, 0, sizeof(PIECES));
     memset(KICKS, 0, sizeof(KICKS));
     memset(I_KICKS, 0, sizeof(I_KICKS));
 
-    // Helper to set orientations
     // I Piece
     // 0: [[1,0],[1,1],[1,2],[1,3]] -> Row 1: 1111(bin)=15. 
     PIECES[PIECE_I].orientations[0] = (PieceOrientation){ .row_masks={0, 15, 0, 0}, .min_col=0, .max_col=3, .min_row=1, .max_row=1, .row_offsets={0,1,2,3} };
@@ -165,20 +162,8 @@ void init_pieces() {
 
     // --- Kicks ---
     // Standard Kicks (J, L, S, T, Z)
-    // 0->1 (0->R): (0,0), (-1,0), (-1,+1), (0,-2), (-1,-2)  => NOTE: Offsets in code are (row, col).
-    // RotationSystem.py kicks are:
-    // (0,1): [[0,0], [0,-1], [-1,-1], [+2,0], [+2,-1]] -> NOTE: Py code uses (row, col) but let's check values.
-    // Py: (0, 1): [[+0, -1], [-1, -1], [+2, +0], [+2, -1]] -> These are 4 values? No, standard SRS has 5 tests including (0,0).
-    // Wait, RotationSystem.py:
-    // (0, 1): [[+0, -1], [-1, -1], [+2, +0], [+2, -1]]
-    // It seems to omit (0,0) because that's checked implicitly before kicks?
-    // "kick_piece" loops over kick_table.
-    // "if (piece.r, new_r) not in kick_table.keys()":
-    // "for delta_loc in kick_table[(piece.r, new_r)]:"
-    // It seems (0,0) IS NOT in the table in Python. It's handled by basic rotation check first.
-    // If basic rotation fails, THEN it checks kicks.
-    // Standard SRS usually lists 5 tests, 1st is (0,0).
-    // I will follow Python's logic: Basic check first, then list.
+    // Offsets are (row, col). The identity (0,0) test is absent from these tables: the
+    // unkicked rotation is checked before the kick list.
     
     // Copying values from RotationSystem.py exactly.
     // (0, 1) -> 0->R
@@ -337,13 +322,11 @@ int encode_state(int r, int c, int rot, int piece_type) {
     int min_col = PIECES[piece_type].orientations[rot].min_col;
     int norm_col = c + min_col;
     if (norm_col < 0 || norm_col >= BOARD_COLS) return -1;
-    if (r < 0 || r >= BOARD_ROWS) return -1; // Should check bound
+    if (r < 0 || r >= BOARD_ROWS) return -1;
     
     return ((r * BOARD_COLS) + norm_col) * 4 + rot;
 }
 
-// Decode not strictly needed if we store (r,c,rot) in Queue, but we store ID to save space?
-// Actually, Queue storing int16 is fine.
 void decode_state(int state, int* r, int* c, int* rot, int piece_type) {
     *rot = state % 4;
     int base = state / 4;
@@ -361,7 +344,6 @@ static int detect_t_spin(const uint16_t* board, int board_height, int r, int c, 
     // Board bounds check included
     
     // Front corners depend on rotation.
-    // 0 (Up): Front=(0,0),(0,2), Back=(2,0),(2,2) ? No.
     // "Front" means the side the T is pointing to.
     // T points: 0=Up, 1=Right, 2=Down, 3=Left.
     // 0: Pointing Up (row 0, col 1). Front corners are (0,0) and (0,2). Back are (2,0), (2,2).
@@ -374,12 +356,6 @@ static int detect_t_spin(const uint16_t* board, int board_height, int r, int c, 
     
     int corners[4][2] = {{0,0}, {0,2}, {2,2}, {2,0}}; // TL, TR, BR, BL
     
-    // Define front corner indices for each rotation (indices into corners array)
-    // Rot 0: TL, TR (0, 1)
-    // Rot 1: TR, BR (1, 2)
-    // Rot 2: BR, BL (2, 3)
-    // Rot 3: BL, TL (3, 0)
-    
     for (int i=0; i<4; i++) {
         int cr = r + corners[i][0];
         int cc = c + corners[i][1];
@@ -390,9 +366,8 @@ static int detect_t_spin(const uint16_t* board, int board_height, int r, int c, 
         } else if (cr < 0) {
             filled = true; // Ceiling counts as filled (matches Scorer.py logic)
         } else {
-            if (board[cr] & (1 << cc)) filled = true; // wait, board[cr] bit order?
+            if (board[cr] & (1 << cc)) filled = true;
             // Collision logic: 1<<c. So bit 0 is col 0.
-            // Correct.
         }
         
         if (filled) {
@@ -460,7 +435,7 @@ static void write_sequence(
         curr = meta[curr].parent;
     }
 
-    // Drop a trailing soft-drop: the appended hard-drop re-descends to the same row (issue #23).
+    // Drop a trailing soft-drop: the appended hard-drop re-descends to the same row.
     int start = (len > 0 && path[0] == KEY_SOFT_DROP) ? 1 : 0;
 
     int p = 0;
@@ -706,8 +681,8 @@ void find_sequences_c(
 
 // Dense placement-candidate enumeration for the candidate-ranking net: every reachable
 // resting placement, keyed by rot*40 + norm_col*4 + spin_type (one slot; deepest landing row
-// kept on collision). No death-pruning — death is the env's termination, not a filter — so a
-// playable board never yields an empty set. Encoding matches datagen (b2b_search).
+// kept on collision). No death-pruning, so a playable board never yields an empty set.
+// Encoding matches datagen (b2b_search).
 void find_placement_candidates_c(
     const uint16_t* board_rows,
     const int board_height,
@@ -722,10 +697,9 @@ void find_placement_candidates_c(
 ) {
     if (!initialized) init_pieces();
 
-    // Scratch is stack-local (not `static`) so this entry is reentrant - the C MCTS engine
-    // calls it from OpenMP-parallel leaf enumeration. ~52KB/call; the loops below re-init it,
-    // so single-threaded env use is behaviourally unchanged. (init_pieces must be primed once
-    // single-threaded before any parallel call - see mcts_create.)
+    // Scratch is stack-local so this entry is reentrant: the C MCTS engine calls it from
+    // OpenMP-parallel leaf enumeration. ~52KB/call. (init_pieces must be primed once
+    // single-threaded before any parallel call, see mcts_create.)
     StateMeta meta[STATE_SPACE];
     bool visited[STATE_SPACE];
     int queue[QUEUE_CAPACITY];

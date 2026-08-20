@@ -44,7 +44,7 @@ from qtris.training.placement_az import _gen_log_probs, train_step
 
 
 def _resolve(args, name, default):
-    """Per-family default for a shared CLI flag whose argparse default is None."""
+    """This trainer's default for a shared CLI flag whose argparse default is None."""
     v = getattr(args, name, None)
     return default if v is None else v
 
@@ -90,7 +90,7 @@ def _pos(r):
 
 def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     """Commit both pre-chosen placements, then replicate PyTetris1v1Env._step's garbage
-    exchange / push timing / death logic on the raw sub-envs (PyTetris1v1Env.py:151-249).
+    exchange / push timing / death logic on the raw sub-envs.
     Returns (p1_died, p2_died, attack1, attack2)."""
     # placement_step already cancels each player's own pending garbage and (auto_push_garbage
     # =False) does NOT push to the board, so net = attack - cancelled is the queue delta.
@@ -300,7 +300,6 @@ def _save_pool(net, gen, pool_dir, max_pool_size):
     net.save_weights(prefix)
     snaps = _pool_snaps(pool_dir)
     while len(snaps) > max_pool_size:
-        # Pin gen_0; evict the next-oldest snapshot.
         victim = snaps[1] if os.path.basename(snaps[0]) == "gen_0" else snaps[0]
         for f in glob.glob(victim + ".*"):
             os.remove(f)
@@ -412,8 +411,7 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # Outcome-z value target; search reward = small attack credit + b2b-build shaping,
-    # own-death = -1, undiscounted, scale 1.
+    # Outcome-z value target; own-death = -1, undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -466,7 +464,7 @@ def main(args):
     ratings_path = os.path.join(pool_dir, "ratings.json")
     legacy_elo = os.path.join(pool_dir, "elo.json")
     if os.path.exists(legacy_elo) and not os.path.exists(games_path):
-        os.remove(legacy_elo)  # so a stale publisher fails loudly, not silently
+        os.remove(legacy_elo)
         print("Migrated to WHR ratings: removed legacy elo.json.", flush=True)
     whr = None
     if elo_enabled:

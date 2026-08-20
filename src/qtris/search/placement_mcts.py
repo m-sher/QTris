@@ -48,9 +48,8 @@ class PlacementMCTS:
 
     def _net_eval(self, boards, pieces, bcg, pls, masks):
         # Pad to a fixed batch (num_trees * leaves_per_round) so the jit_compiled net sees one
-        # shape: forward is ~flat in batch on GPU (~1.4ms at 16..256), but each *new* batch size
-        # triggers a ~2s XLA recompile. Without this, the per-round leaf count varies and the
-        # recompiles swamp the call-count savings. Padded rows are masked off and sliced away.
+        # shape: each new batch size triggers an XLA recompile. Padded rows are masked off
+        # and sliced away.
         nv = boards.shape[0]
         fb = self._fullb
         if nv < fb:

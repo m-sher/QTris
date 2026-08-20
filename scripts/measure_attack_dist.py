@@ -1,6 +1,6 @@
 """Measure the AZ placement bot's outgoing attack distribution, and optionally
 record attack-stream traces for trace-replay garbage (see --garbage-traces in
-`train placement --algo az`).
+`train`).
 
 Measurement:  uv run python scripts/measure_attack_dist.py
 Trace library: uv run python scripts/measure_attack_dist.py \

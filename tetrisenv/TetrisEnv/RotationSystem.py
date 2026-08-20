@@ -73,7 +73,7 @@ class RotationSystem:
         }
 
         self.kicks = {
-            # (kick_from, kick_to): (offset1, offset2, offset3, offset4)
+            # (kick_from, kick_to): row/col offsets tried in order
             (0, 1): np.array(
                 [[+0, -1], [-1, -1], [+2, +0], [+2, -1]], dtype=np.int32
             ),  # 0 -> R | CW
@@ -113,7 +113,7 @@ class RotationSystem:
         }
 
         self.i_kicks = {
-            # (kick_from, kick_to): (offset1, offset2, offset3, offset4)
+            # (kick_from, kick_to): row/col offsets tried in order
             (0, 1): np.array(
                 [[+0, +1], [+0, -2], [+1, -2], [-2, +1]], dtype=np.int32
             ),  # 0 -> R | CW
@@ -161,16 +161,12 @@ class RotationSystem:
         delta_r: int,
         board: np.ndarray,
     ) -> Tuple[bool, np.ndarray, np.ndarray, int, int, np.ndarray]:
-        # Do I ever need to check this?
         if (piece.r, new_r) not in kick_table.keys():
-            # Rotation not possible, raise error
             raise ValueError(f"Rotation not possible from {piece.r} to {new_r}")
 
         kicked = False
         for delta_loc in kick_table[(piece.r, new_r)]:
-            # Check each kick and perform the first valid
             if not overlaps(cells=cells, loc=piece.loc + delta_loc, board=board):
-                # Kick doesn't overlap, so apply it and break
                 piece.r = new_r
                 piece.delta_r = delta_r
 

@@ -313,9 +313,7 @@ static inline uint64_t state_hash(const SearchState* s, int board_height) {
 }
 
 // Transposition-cache hash: like state_hash but also mixes in the path-dependent
-// fields that feed evaluate_state (total_attack, garbage_prevented).  Two states
-// sharing board+b2b+combo+hold+queue_idx but arriving via different clear histories
-// would otherwise map to the same TT slot and return the wrong cached score.
+// fields that feed evaluate_state (total_attack, garbage_prevented).
 static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     uint64_t h = state_hash(s, board_height);
     union { float f; uint32_t u; } a, gp;
@@ -334,9 +332,7 @@ static inline uint64_t tt_hash(const SearchState* s, int board_height) {
 
 // ── Cross-call transposition cache ───────────────────────────
 // Caches leaf evaluate_state scores across successive b2b_search_c calls.
-// Since the queue shifts by one piece per external call, ~6/7 of candidate
-// leaves reuse work from the previous call.  Entries older than
-// TT_GENERATION_EXPIRY generations are treated as misses.
+// Entries older than TT_GENERATION_EXPIRY generations are treated as misses.
 #define TT_SIZE (1u << 16)
 #define TT_MASK (TT_SIZE - 1u)
 #define TT_GENERATION_EXPIRY 4u
@@ -379,23 +375,10 @@ static int8_t B2B_I_KICKS[4][4][5][2];
 // Scale discipline:
 //   - Instant-death: -1e6 (inviolable).
 //   - Near-death cliff: -5000..-10000 (dominates any achievable positive reward).
-//   - Max achievable positive reward in the reachable regime ≈ 160.
-//   - Hole penalties cap so the bot cannot suicide to "avoid fixing" a bad board.
-//   - B2B value is sublinear (sqrt) so surge payoff wins at high chains,
-//     while holding wins at low chains.
 static const int   NEAR_DEATH_ZONE   = 4;        // rows from the death line where the cliff fires
 static float W_NEAR_DEATH      = 5000.0f;  // per row of slack inside the zone
 static float W_HEIGHT_QUARTIC  = 80.0f;    // -W * h_ratio^4
-static float W_AVG_HEIGHT      = 40.0f;     // -W * avg_height.  Linear penalty on total stack volume
-                                                   // (cells occupied per column, averaged).  Encourages
-                                                   // "board emptiness" - a clean board with b2b=N beats a
-                                                   // messy board with b2b=N because future options are
-                                                   // preserved.  Pairs with b2b-reward terms to reward
-                                                   // b2b-per-piece efficiency: hoarding spin slots without
-                                                   // cashing them in is explicitly penalized via the cells
-                                                   // those slots consume.  At avg_height=10 the penalty is
-                                                   // -30 - big enough to discourage unnecessary upstacking
-                                                   // but well below the survival wall and raw b2b rewards.
+static float W_AVG_HEIGHT      = 40.0f;    // -W * avg_height (mean column height)
 static float W_BUMPINESS       = 1.0f;
 
 static float W_HOLES           = 6.0f;     // * holes (enclosed cavities) * (1 + 0.5h), uncapped
@@ -658,14 +641,7 @@ static int detect_t_spin(const uint16_t* board, int board_height,
     for (int i = 0; i < 4; i++) if (filled[i]) total_filled++;
     if (total_filled < 3) return SPIN_NONE;
 
-    // Determine front/back corners based on rotation
-    // Scorer.py: back cell = the cell NOT in the piece's cells for that rotation
-    // Rot 0: back=row2,col1 -> back_idx=3 (corner indices BL=3, TL=0 are back-side)
-    // Rot 1: back=row1,col0 -> back_idx=0 (TL=0, BL=3 are back-side)
-    // Rot 2: back=row0,col1 -> back_idx=0 (TL=0, TR=1 are back-side)
-    // Rot 3: back=row1,col2 -> back_idx=1 (TR=1, BR=2 are back-side)
-
-    // Actually: from Scorer.py, the "back" cell is the one missing from the T shape.
+    // From Scorer.py, the "back" cell is the one missing from the T shape.
     // T orientations (cells in 3x3):
     // Rot 0: [0,1],[1,0],[1,1],[1,2] -> missing edge cell is [2,1] -> back direction is down
     //   Back corners: BL(2,0)=idx3, BR(2,2)=idx2. Front: TL(0,0)=idx0, TR(0,2)=idx1
@@ -1067,9 +1043,8 @@ static int find_placements(const uint16_t* board_rows, int board_height,
 // from the top row via orthogonal movement through empty cells.
 //
 // `top_filled` is the first non-empty row (board_height if the board is empty).
-// Every row above it is wholly empty and 4-connected to row 0, so the flood
-// would mark it full_mask; set those directly and seed the BFS at top_filled
-// instead of walking the air column. Output is bit-identical.
+// Every row above it is wholly empty and 4-connected to row 0, so those rows are
+// set to full_mask directly and the BFS seeds at top_filled.
 static void compute_reachability(const uint16_t* board, int board_height,
                                   int top_filled, uint16_t* reachable) {
     const uint16_t full_mask = (1 << BOARD_COLS) - 1;
@@ -1181,14 +1156,8 @@ static int count_hole_sections(const uint16_t* board,
 // of filled cells above it in the same column, weighted by how high the
 // hole is in the stack (higher holes = more urgent = higher weight).
 //
-// This penalizes upstacking over enclosed holes - each filled cell placed
-// above an enclosed hole makes it harder to clear, and holes near the top
-// of the stack are more dangerous.
-//
-// Returns a float score (not an integer count) because of height weighting.
-//
 // Scanning starts at `top_filled`: above it every cell is empty, so filled_above
-// stays 0 and the `filled_above > 0` test can never fire. Bit-identical result.
+// stays 0 and the `filled_above > 0` test can never fire.
 static float compute_hole_ceiling_weight(const uint16_t* board, int board_height,
                                           int top_filled, const uint16_t* reachable) {
     float total_weight = 0.0f;
@@ -1260,7 +1229,7 @@ static int detect_t_spin_setups(const uint16_t* board, int board_height,
     // Anchors with r + 2 < top_filled are skipped: c spans 0..BOARD_COLS-3 and the
     // loop bound keeps r + 2 <= board_height - 1, so all four corners are in bounds
     // (no out-of-bounds "filled") and all sit in wholly empty rows, giving
-    // corner_count == 0 < 3. Starting at top_filled - 2 is bit-identical.
+    // corner_count == 0 < 3, so the scan starts at top_filled - 2.
     int scan_start = top_filled - 2;
     if (scan_start < 0) scan_start = 0;
 
@@ -1421,11 +1390,9 @@ static ImmobilePlacementResult count_immobile_placements(
     for (int r = 0; r < board_height; r++) {
         if (board[r] != 0) { top_filled = r; break; }
     }
-    // Start a few rows above to catch pieces partially above the stack.
-    // End a few rows below because an immobile placement requires adjacent
-    // stack cells - pieces sitting multiple rows below the stack top cannot
-    // be immobile (no walls to trap them except in rare hole cavities, which
-    // we intentionally skip as a cost/value trade-off).
+    // Start a few rows above to catch pieces partially above the stack.  End a few rows
+    // below: an immobile placement needs adjacent stack cells, so pieces well under the
+    // stack top (outside rare hole cavities) cannot be immobile.
     int scan_start = top_filled - 3;
     if (scan_start < 0) scan_start = 0;
     int scan_end = top_filled + 5;
@@ -1512,11 +1479,9 @@ static ImmobilePlacementResult count_immobile_placements(
             }
         }
 
-        // Apply queue-count cap.  A piece that appears once in the queue can
-        // only use ONE spin slot on the next drop, so crediting four slots
-        // equally was over-rewarding redundant construction.  For non-T
-        // immobile placements, clears are almost always singles (ALL_MINI
-        // logic), so capping lines at queue_count * 4 is a safe ceiling.
+        // Apply queue-count cap: a piece appearing once in the queue can only use ONE
+        // spin slot on the next drop.  For non-T immobile placements clears are almost
+        // always singles (ALL_MINI logic), so queue_count * 4 is a safe line ceiling.
         int qc = 0;
         if (piece_queue_count != NULL && pt >= 0 && pt < 8) qc = piece_queue_count[pt];
         if (qc <= 0) qc = 1; // defensive: weight was non-zero, so piece IS in queue
@@ -1613,8 +1578,8 @@ static BoardStats compute_board_stats(const uint16_t* board, int board_height,
                                                            top_filled, reachable);
     }
 
-    // The only reader of t_spin_setups/t_slot_quality is gated on t_queue_count > 0,
-    // and both stay 0 from the memset, so skipping the sweep here changes nothing.
+    // t_spin_setups and t_slot_quality stay 0 from the memset; their only reader is
+    // gated on t_queue_count > 0.
     if (s.t_queue_count > 0) {
         s.t_spin_setups = detect_t_spin_setups(board, board_height, top_filled,
                                                &s.t_slot_quality);
@@ -1717,8 +1682,7 @@ static float evaluate_state(const SearchState* state, int board_height,
         score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
     }
     // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
-    // Unlicensed leftover-I/PC must not be paid for emptying the well: use the
-    // parent skyline so D_cash at combo<0 does not beat TSD/Imm1 on W_AVG_HEIGHT.
+    // The volume penalty reads the parent skyline on an unlicensed D_cash lock.
     score -= W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio;
     {
         float avg_h = state->unlicensed_cash ? state->parent_avg_height : bs.avg_height;
@@ -1903,8 +1867,7 @@ static inline void expand_and_insert(
     latch_unlicensed_cash(&child, clears, pl->spin_type, perfect_clear, parent->combo,
                           mean_col_heights(parent->col_heights), ar.attack);
 
-    // Full eval for every surviving child (no aspiration prune - it was the main
-    // source of nondeterminism and its omission only makes the beam MORE thorough).
+    // Full eval for every surviving child.
     child.score = evaluate_state(&child, board_height, queue, queue_len);
     child.sort_hash = state_hash(&child, board_height);  // cached tiebreak key for finalize_beam
 
@@ -1990,7 +1953,6 @@ void b2b_search_c(
     // Per-root best descendant score, tracked across ALL depths (pre-prune) so
     // every root placement keeps a score even after the beam prunes its subtree -
     // gives a full candidate distribution despite the beam converging to one root.
-    // Observe-only: does not affect the beam/pruning, so move quality is unchanged.
     const bool want_roots = (out_num_roots != NULL && max_roots > 0);
     static __thread float root_best[MAX_PLACEMENTS * 2];
     if (want_roots) {
@@ -2103,8 +2065,7 @@ void b2b_search_c(
         depth0_is_hold[depth0_count] = 0;
         depth0_count++;
         // Near-death roots are emitted as (very-low-scored) candidates but NOT expanded:
-        // skipping next_beam_size++ reuses this slot, keeping the search beam identical to
-        // the death-pruned version (no play regression) while widening the label set.
+        // skipping next_beam_size++ reuses this slot for the next root.
         if (placement_is_dead(s, board_height)) { continue; }
         next_beam_size++;
     }
@@ -2412,9 +2373,8 @@ void b2b_search_c(
     // ---- Extract best result ----
     if (curr_beam_size == 0) {
         if (have_fallback) {
-            // All placements were pruned as dead - use the first available
-            // placement as a last-resort move so the caller always gets a
-            // valid action (prevents crashes from an all-PAD sequence).
+            // All placements were pruned as dead - emit the first available placement so
+            // the caller always gets a valid action.
             int fp = fallback_piece;
             int norm_col = fallback_pl.col + B2B_PIECES[fp].orientations[fallback_pl.rot].min_col;
             *out_action_index = fallback_is_hold * 160 + fallback_pl.rot * 40
@@ -2854,9 +2814,8 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
 }
 
 // --- PUCT ---
-// Q is used in return_scale units directly (no per-tree min-max): min-max pins the worst
-// edge to 0 and the best to 1, which caps the death penalty's pull at one normalized unit
-// regardless of w_death. Raw return_scale units let a large w_death actually dominate.
+// Q enters PUCT in raw return_scale units, unnormalized, so w_death's magnitude carries
+// straight into selection.
 static int mcts_select(const MNode* node, const MConfig* cfg) {
     float total = 0.0f;
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
@@ -2998,19 +2957,16 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     MEngine* e = (MEngine*)calloc(1, sizeof(MEngine));
     e->num_trees = num_trees;
     e->max_nodes = max_nodes;
-    // Per-round C work is tiny (one small tree per game), so the net dominates and the
-    // search is net-bound. A few threads beat both serial and all-cores: using every
-    // logical core oversubscribes this small work and is slower than serial. Cap low
-    // (~quarter of logical cores), <= num_trees, and let OMP_NUM_THREADS lower it further.
+    // Per-round C work is tiny (one small tree per game), so the search is net-bound.
+    // Cap threads low (~quarter of logical cores), <= num_trees, and let OMP_NUM_THREADS
+    // lower it further.
     int cap = omp_get_num_procs() / 4; if (cap < 1) cap = 1;
     int envmax = omp_get_max_threads();
     e->n_threads = num_trees;
     if (e->n_threads > cap) e->n_threads = cap;
     if (e->n_threads > envmax) e->n_threads = envmax;
-    // Size the pool itself (not just the per-region count): libgomp's default pool spans all
-    // logical cores and its idle threads busy-wait, stealing CPU from the TF net threads.
-    // Save/restore the process default (mcts_destroy) so we don't shrink other OpenMP users
-    // (e.g. the b2b beam search) if they share the process.
+    // Size the pool itself, not just the per-region count.  The process default is saved
+    // here and restored in mcts_destroy.
     e->prev_omp_threads = omp_get_max_threads();
     omp_set_num_threads(e->n_threads);
     e->cfg.board_height = board_height; e->cfg.queue_size = queue_size;

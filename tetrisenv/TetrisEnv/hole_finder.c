@@ -18,11 +18,9 @@ typedef struct {
 int count_enclosed_holes(const uint16_t* board_rows, int board_height) {
     if (board_height <= 0) return 0;
 
-    // Init visited
     bool* visited = (bool*)calloc(board_height * BOARD_COLS, sizeof(bool));
     if (!visited) return -1;
 
-    // Queue for BFS
     Point queue[QUEUE_CAPACITY];
     int head = 0;
     int tail = 0;
@@ -49,12 +47,10 @@ int count_enclosed_holes(const uint16_t* board_rows, int board_height) {
             int nr = curr.r + dr[i];
             int nc = curr.c + dc[i];
 
-            // Bounds check
             if (nr < 0 || nr >= board_height || nc < 0 || nc >= BOARD_COLS) {
                 continue;
             }
 
-            // Check if visited
             int nidx = nr * BOARD_COLS + nc;
             if (visited[nidx]) {
                 continue;
@@ -62,7 +58,6 @@ int count_enclosed_holes(const uint16_t* board_rows, int board_height) {
 
             // Check if empty
             if ((board_rows[nr] & (1 << nc)) == 0) {
-                // Found reachable empty cell
                 visited[nidx] = true;
                 queue[tail++] = (Point){nr, nc};
                 tail %= QUEUE_CAPACITY;
@@ -70,7 +65,6 @@ int count_enclosed_holes(const uint16_t* board_rows, int board_height) {
         }
     }
 
-    // Count enclosed holes
     // Enclosed hole = Empty AND Not Visited
     int enclosed_holes = 0;
     for (int r = 0; r < board_height; r++) {

@@ -115,7 +115,7 @@
           return;
         }
 
-        // sigma is null-safe: old payloads still in KV carry no sigma field.
+        // sigma may be absent from a payload.
         const sig = (e) =>
           e.sigma == null || e.is_reference ? "" : ` <span class="sigma">&plusmn;${Math.round(e.sigma)}</span>`;
         const genOf = (id) => (id.startsWith("gen_") ? Number(id.slice(4)) : Infinity);
@@ -128,8 +128,8 @@
         const best = pool.length ? Math.max(...pool.map((e) => e.rating)) : null;
 
         // Shared Elo axis for the per-row bars: span every entry's rating ± sigma,
-        // padded so the widest bar never touches the column edges. sigma-null
-        // (old payloads) and the reference (sigma 0) collapse to a bare point.
+        // padded so the widest bar never touches the column edges. Missing sigma
+        // and the reference (sigma 0) collapse to a bare point.
         const sigOf = (e) => (e.sigma == null ? 0 : e.sigma);
         let lo = Math.min(...entries.map((e) => e.rating - sigOf(e)));
         let hi = Math.max(...entries.map((e) => e.rating + sigOf(e)));
@@ -155,7 +155,7 @@
         // that band the posterior calls it a coin flip, so stay neutral.
         const deltaStr =
           delta == null
-            ? "—"
+            ? "-"
             : (delta >= 0 ? "+" : "") + Math.round(delta) + (lsig != null ? ` ±${Math.round(lsig)}` : "");
         const deltaCls =
           delta == null || lsig == null
@@ -166,9 +166,9 @@
                 ? "delta-neg"
                 : "";
         cards.innerHTML =
-          card("Learner", lr == null ? "—" : Math.round(lr) + (learner ? sig(learner) : "")) +
+          card("Learner", lr == null ? "-" : Math.round(lr) + (learner ? sig(learner) : "")) +
           card("vs reference", deltaStr, deltaCls) +
-          card("Best pool", best == null ? "—" : Math.round(best));
+          card("Best pool", best == null ? "-" : Math.round(best));
 
         const rows = entries
           .map((e, i) => {

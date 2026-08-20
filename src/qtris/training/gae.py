@@ -1,7 +1,7 @@
-"""GAE + raw-return reducers, shared across all PPO trainers.
+"""GAE + raw-return reducers for the AZ value target.
 
-Functions take `num_collection_steps` and `num_envs` as args. `tf.function`
-traces per unique value, but in practice each training run uses one value.
+`num_collection_steps` and `num_envs` are static: `tf.function` retraces per
+unique pair.
 """
 
 import tensorflow as tf

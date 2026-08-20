@@ -55,7 +55,7 @@ def test_improving_trajectory_recovered(tmp_path):
 
 
 def test_star_inflation_regression(tmp_path):
-    """The motivating bug: ~50% vs recent snapshots + 37.5% vs the anchor must fit
+    """~50% vs recent snapshots + 37.5% vs the anchor must fit
     BELOW init, at any tie_sigma (not an artifact of the tie constant)."""
     for tie in (40.0, 100.0, 250.0):
         rng = np.random.default_rng(2)
@@ -320,8 +320,8 @@ def test_fit_failure_keeps_previous_ratings(tmp_path, monkeypatch):
 
 
 def test_legacy_resume_snapshots_not_glued_to_learner(tmp_path):
-    """Legacy migration: snapshots created long before the first logged epoch
-    (empty log, old pool on disk) must not be pinned to the resumed learner.
+    """Snapshots created long before the first logged epoch (empty log, pool already
+    on disk) must not be pinned to the resumed learner.
     The distance-scaled tie keeps their sigma honest and lets games dominate."""
     rng = np.random.default_rng(9)
     book = _book(tmp_path)

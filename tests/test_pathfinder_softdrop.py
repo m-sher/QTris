@@ -1,11 +1,11 @@
-"""Issue #23: the env pathfinder must not emit a redundant trailing soft-drop.
+"""The env pathfinder must not emit a redundant trailing soft-drop.
 
 The BFS records a placement only at a resting state, so its reconstructed path ends in a
 soft-drop that settles the piece; the appended hard-drop then re-descends to the same row,
-making that soft-drop redundant. `write_sequence` now strips it.
+making that soft-drop redundant. `write_sequence` strips it.
 
 Two guarantees, both exercised against the REAL env over boards drawn from random play:
-  1. no emitted sequence contains SOFT_DROP immediately before HARD_DROP (the fix), and
+  1. no emitted sequence contains SOFT_DROP immediately before HARD_DROP, and
   2. re-inserting that trailing soft-drop changes nothing the env scores (so stripping it is
      behavior-preserving: same locked board, clears, attack, spin).
 """
@@ -77,7 +77,7 @@ def _boards_from_play(seed: int, steps: int):
 
 
 def test_no_redundant_softdrop_before_harddrop():
-    """No emitted placement sequence settles with SOFT_DROP -> HARD_DROP (regression guard)."""
+    """No emitted placement sequence settles with SOFT_DROP -> HARD_DROP."""
     total = 0
     for _, obs in _boards_from_play(seed=7, steps=40):
         for row in _valid_rows(obs):

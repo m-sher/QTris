@@ -18,14 +18,11 @@ class CKeySequenceFinder(KeySequenceFinder):
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         
         # Search for pathfinder*.so (handling various platform suffixes)
-        # Also check parent dir in case of build layout quirks
         candidates = glob.glob(os.path.join(curr_dir, "pathfinder*.so")) + \
                      glob.glob(os.path.join(curr_dir, "..", "pathfinder*.so")) + \
                      glob.glob(os.path.join(curr_dir, "pathfinder.so")) # Explicit fallback
                      
         if not candidates:
-             # If running from source and not yet built, this might fail.
-             # But usually setup.py build_ext --inplace puts it in source tree.
              lib_path = os.path.join(curr_dir, "pathfinder.so")
         else:
             lib_path = candidates[0]
@@ -33,7 +30,6 @@ class CKeySequenceFinder(KeySequenceFinder):
         try:
             self._lib = ctypes.CDLL(lib_path)
         except OSError as e:
-            # If checking during build process or CI, this might happen.
             # We allow instantiation but methods will fail.
             print(f"Warning: Could not load C pathfinding library at {lib_path}: {e}")
             self._lib = None
@@ -103,7 +99,7 @@ class CKeySequenceFinder(KeySequenceFinder):
         t_start = time.perf_counter()
         
         # Prepare Board
-        # Convert to bitmasks (same logic as BitboardKeySequenceFinder)
+        # Pack each row into a uint16 column bitmask
         occupied = (board != 0).astype(np.uint16)
         mask_rows = (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
         if not mask_rows.flags['C_CONTIGUOUS']:

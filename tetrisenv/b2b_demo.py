@@ -518,7 +518,7 @@ def main():
 
     # ── Config spinners ──────────────────────────────────────
     sp_x = 18
-    sp_start_y = 178  # leaves room for the 3 button rows above
+    sp_start_y = 178  # leaves room for the button rows above
     sp_gap = 50
 
     spinners = {
@@ -599,7 +599,7 @@ def main():
 
     def refresh_search():
         """Search the CURRENT position and update the move/strip state, WITHOUT
-        advancing the game. Used by step-forward and on reset."""
+        advancing the game."""
         nonlocal last_action_idx, last_sequence
         nonlocal last_cand_actions, last_cand_scores
         if game_over:
@@ -884,8 +884,6 @@ def main():
             act_detail = stat_font.render(act_str, True, LABEL_DIM)
             screen.blit(act_detail, (rx, ry))
             ry += 20
-
-        # (Move distribution + component breakdown now render in the bottom strip.)
 
         # Game over overlay
         if game_over:
