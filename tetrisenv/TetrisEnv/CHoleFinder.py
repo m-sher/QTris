@@ -9,7 +9,6 @@ class CHoleFinder:
         # Load Library
         curr_dir = os.path.dirname(os.path.abspath(__file__))
         
-        # Search for hole_finder*.so
         candidates = glob.glob(os.path.join(curr_dir, "hole_finder*.so")) + \
                      glob.glob(os.path.join(curr_dir, "..", "hole_finder*.so")) + \
                      glob.glob(os.path.join(curr_dir, "hole_finder.so"))
@@ -45,7 +44,6 @@ class CHoleFinder:
         # Board is expected to be float or int where !=0 is occupied.
         occupied = (board != 0).astype(np.uint16)
         
-        # Calculate row masks
         mask_rows = (occupied * self._col_bits).sum(axis=1, dtype=np.uint16)
         
         if not mask_rows.flags['C_CONTIGUOUS']:

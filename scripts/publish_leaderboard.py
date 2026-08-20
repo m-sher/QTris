@@ -85,7 +85,7 @@ def build_payload(pool_dir):
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "gen": book.get("fitted_at_gen"),
         "best_pool": max(pool) if pool else None,
-        # Tail of the learner trajectory for a future sparkline; pages may ignore it.
+        # Tail of the learner trajectory; pages may ignore it.
         "trajectory": book.get("trajectory", [])[-200:],
         "entries": entries,
     }
@@ -122,7 +122,7 @@ def publish(payload, url, token):
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            # Cloudflare's bot check (error 1010) blocks the default Python-urllib UA.
+            # The endpoint's bot check rejects the default urllib User-Agent.
             "User-Agent": _USER_AGENT,
         },
         method="POST",

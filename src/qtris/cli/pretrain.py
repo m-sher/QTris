@@ -69,8 +69,7 @@ def main() -> None:
         type=float,
         default=0.0,
         help="AdamW decoupled weight decay (0.0 = off, ~ plain Adam). "
-        "XLA-safe regularizer for the overfitting placement net; sweep ~1e-3..1e-2 "
-        "watching the held-out val top1/top3.",
+        "Typical range 1e-3..1e-2.",
     )
     args = parser.parse_args()
 

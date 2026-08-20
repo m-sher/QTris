@@ -64,7 +64,7 @@ class AlphaZeroTrainConfig(BaseModel):
 
 
 class OneVsOnePlacementAZConfig(BaseModel):
-    """1v1 opponent-pool AlphaZero (placement family) trainer hyperparams.
+    """1v1 opponent-pool AlphaZero trainer hyperparams.
 
     TD(lambda) value target built from the outcome z in {-1,0,+1}; w_death=1, gamma=1,
     return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both

@@ -96,10 +96,7 @@ class Pretrainer:
         """Load a SEPARATE, frozen held-out placement set for validation top1/top3.
 
         Must be a dataset the model NEVER trains on (collect it once to its own path,
-        never merge it into the training dataset). An in-dataset split is NOT a valid
-        generalization signal here: warm-started runs have already trained on every
-        transition in the training file, so a carved-out 'val' subset is already
-        memorized. This separate never-trained set is the only honest held-out metric."""
+        never merge it into the training dataset)."""
         if not os.path.exists(val_path):
             raise FileNotFoundError(f"No val dataset at {val_path}.")
         ds = tf.data.Dataset.load(val_path)
@@ -134,9 +131,7 @@ class Pretrainer:
 
         center is the median, so 0 means a typical board - what 0 also means to the 1v1
         AZ tanh head this warm-starts. scale places the anchor quantile at anchor_t,
-        leaving range above it rather than saturating there. Both come from quantiles
-        because the oracle score's upper tail runs ~30x the median (deep beam lines
-        cashing a large surge)."""
+        leaving range above it rather than saturating there."""
         vmax = tf.sort(self._dataset_vmax(dataset))
         n = tf.shape(vmax)[0]
 
@@ -267,8 +262,7 @@ class Pretrainer:
                         flush=True,
                     )
 
-            # Held-out validation on a SEPARATE never-trained set - the only honest
-            # generalization signal (train Top1 is memorized-train accuracy).
+            # Held-out validation on the separate never-trained set.
             if val_ds is not None:
                 v_top1 = v_top3 = v_n = 0.0
                 for vbatch in val_ds:
@@ -348,8 +342,7 @@ def main(args):
         getattr(args, "resume_from", None), checkpoint_manager
     )
     if resume:
-        # Resumes a merged checkpoint fully, or warm-starts the shared trunk +
-        # policy head from an old policy-only checkpoint (value head stays fresh).
+        # expect_partial: a checkpoint without the value head leaves that head fresh.
         checkpoint.restore(resume).expect_partial()
         print(f"Restored checkpoint from {resume}.", flush=True)
 

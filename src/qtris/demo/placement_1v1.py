@@ -2,8 +2,8 @@
 
 Two placement nets duel in PyTetris1v1Env (real garbage exchange). Each move, per-player PUCT
 MCTS picks a placement; its key sequence is reconstructed from the env pathfinder and stepped
-through the full env (so the colored board renders, same path the solo/AR demos use). Renders
-both boards side by side and saves an mp4. Run via `demo placement --mode 1v1 --checkpoint P1
+through the full env (so the colored board renders, same path the solo demo uses). Renders
+both boards side by side and saves an mp4. Run via `demo --mode 1v1 --checkpoint P1
 --opponent P2` (same path for self-play).
 """
 
@@ -238,7 +238,7 @@ def main(cli_args):
     if confirm_save(screen, font):
         save_frames_as_video(frames, "DemoPlacement1v1.mp4")
 
-    # Replay slider (mirrors ar_1v1)
+    # Replay slider
     slider = Slider(
         screen,
         x=10,

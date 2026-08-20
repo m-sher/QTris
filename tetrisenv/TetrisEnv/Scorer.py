@@ -6,8 +6,6 @@ from typing import Tuple
 
 
 class Spins(Enum):
-    # TODO
-    # More spins
     NO_SPIN = 0
     T_SPIN_MINI = 1
     T_SPIN = 2
@@ -74,7 +72,6 @@ class Scorer:
                 )
 
                 if front_corners == 2 and back_corners >= 1:
-                    # Proper T spin
                     spin = Spins.T_SPIN
 
                 elif front_corners == 1 and back_corners == 2:
@@ -85,7 +82,6 @@ class Scorer:
                         # Not kicked far, T spin mini
                         spin = Spins.T_SPIN_MINI
                 else:
-                    # Fails to pass corner rules, not a T spin
                     spin = Spins.NO_SPIN
             else:
                 for direction in [(1, 0), (-1, 0), (0, 1), (0, -1)]:

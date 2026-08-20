@@ -35,7 +35,7 @@ def _surge_segments(num_rows: int) -> list:
 
 
 # 40-row board = 20 visible + 20 buffer; row 0 = top. Pieces spawn just above the visible field
-# and top out when the piece-agnostic spawn box (rows 17-18, cols 3-6) is blocked (matches fusion).
+# and top out when the piece-agnostic spawn box (rows 17-18, cols 3-6) is blocked.
 VISIBLE_ROWS = 20
 SPAWN_ROW = 17
 DEATH_HEIGHT_CAP = 35
@@ -240,7 +240,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         surge_lines = b2b_level if b2b_level >= 4 else 0
         combo_level = max(0.0, combo)
 
-        # Main goal (is to blow up and act like I don't know nobody ackackackackack)
+        # Main goal
         phi_target = (
             (self._b2b_coef * np.log(1 + b2b_level))
             + (self._surge_coef * (1.15**surge_lines - 1))
@@ -283,7 +283,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._active_piece = self._spawn_piece(self._next_bag.pop(0))
         self._queue = self._fill_queue([])
 
-        # Reset garbage queue
         self._garbage_queue = []
 
         # Trace-replay: draw a fresh trace + start offset for this episode.
@@ -302,11 +301,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         return ts.restart(observation=observation, reward_spec=self._reward_spec)
 
     def _step(self, key_sequence: np.ndarray) -> ts.TimeStep:
-        """
-        `_lock_piece` does not move piece to the bottom, and only tries
-        locking at the current location. Action sequences all already end in
-        hard drop."
-        """
+        """Execute one key sequence and return the resulting TimeStep. Sequences must end
+        in a hard drop: `_lock_piece` locks only at the piece's current location."""
         self._step_num += 1
 
         if self._episode_ended:
@@ -337,13 +333,12 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             self._remove_attack_from_garbage_queue(attack)
 
         garbage_pushed = False
-        if self._auto_push_garbage and clear == 0:  # No lines were cleared
+        if self._auto_push_garbage and clear == 0:
             self._tick_garbage_timers()
             board, vis_board, garbage_pushed = self._push_garbage_to_board(
                 board, vis_board
             )
 
-        # Check if new garbage should be added to queue
         self._add_to_garbage_queue()
 
         # delay=0: push newly generated garbage immediately (same step)
@@ -371,8 +366,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             current_phi = 0.0
             shaping_reward = 0.0
 
-        # Bonus for b2b-maintaining clears (spin/Tetris/PC). Fires only on
-        # extension events so it can't be farmed by stalling without clearing.
+        # Bonus for b2b-maintaining clears (spin/Tetris/PC), applied only when b2b rises.
         if b2b_val > pre_b2b:
             extension_bonus = self._b2b_extend_flat + self._b2b_extend_scale * max(
                 0, b2b_val
@@ -548,10 +542,9 @@ class PyTetrisEnv(py_environment.PyEnvironment):
     def _enumerate_placement_candidates(
         self,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Dense-320 placement candidates from pathfinding (the full legal set, no death-pruning
-        — death is this env's termination, not a filter, so a spawnable board never yields an
-        empty set). cand_scores is a validity sentinel (0.0 valid / -1e30 empty); the net ranks
-        and RL gets its value target from returns. Runs in-subprocess so it parallelizes."""
+        """Dense-320 placement candidates from pathfinding: the full legal set with no
+        death-pruning, so a spawnable board never yields an empty set. cand_scores is a
+        validity sentinel (0.0 valid / -1e30 empty)."""
         scores = np.full(NUM_PLACEMENT_ACTIONS, -1e30, dtype=np.float32)
         rows = np.zeros(NUM_PLACEMENT_ACTIONS, dtype=np.int32)
         seqs = np.full((NUM_PLACEMENT_ACTIONS, self._max_len), Keys.PAD, dtype=np.int64)
@@ -610,7 +603,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         cells = self._rotation_system.orientations[active_piece.piece_type][new_r]
 
         if not overlaps(cells=cells, loc=active_piece.loc, board=board):
-            # Applying rotation doesn't overlap, so do it
             active_piece.r = new_r
             active_piece.delta_r = try_delta_r
 
@@ -618,7 +610,6 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             active_piece.cells = cells
 
         else:
-            # Overlaps, so try kicks
             kick_table = (
                 self._rotation_system.i_kicks
                 if active_piece.piece_type == PieceType.I
@@ -688,9 +679,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         hold_piece: PieceType,
         queue: List[PieceType],
     ) -> Tuple[bool, Piece, PieceType, List[PieceType]]:
-        # Using `_can_hold` is unnecessary for this implementation
-        # since only valid action sequences exist and none include pressing
-        # the hold key twice. This is included in case of future changes.
+        # Valid action sequences never press hold twice, so `can_hold` is always True here.
         if can_hold:
             if hold_piece == PieceType.N:
                 # No piece held, so this is the first time holding
@@ -866,14 +855,12 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         return sum(rows for rows, _, _ in self._garbage_queue)
 
     def _get_heights(self, board: np.ndarray) -> np.ndarray:
-        # Get heights of each column in the board
         height_matrix = np.arange(board.shape[0], 0, -1)[..., None]
         heights = np.max(board * height_matrix, axis=0)
 
         return heights
 
     def _get_holes(self, board: np.ndarray) -> int:
-        # Count enclosed holes in the board
         return self._hole_finder.count_holes(board)
 
     def _get_skyline(self, heights: np.ndarray) -> float:
@@ -885,26 +872,20 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         return skyline
 
     def _get_bumpy(self, heights: np.ndarray) -> np.ndarray:
-        # Get bumpiness of the board
         bumpy = np.abs(heights[:-1] - heights[1:])
         return bumpy
 
     def _board_stats(self, board: np.ndarray) -> Tuple[float, float, float, float]:
-        # Get total heights of the board
         heights = self._get_heights(board)
         height_val = np.max(heights)
 
-        # Get number of holes in the board
         holes_val = self._get_holes(board)
 
-        # Get skyline of the board
         skyline_val = self._get_skyline(heights)
 
-        # Get bumpiness of the board
         bumpy = self._get_bumpy(heights)
         bumpy_val = np.sum(bumpy)
 
-        # Return heights, holes, and bumpy
         return height_val, holes_val, skyline_val, bumpy_val
 
     def _is_top_out(self, board: np.ndarray) -> bool:

@@ -39,7 +39,7 @@ def main() -> None:
         default=0,
         help="play with PUCT MCTS (net policy priors + value leaves) "
         "at this simulation budget, greedy by visit count - the AlphaZero way to play "
-        "an `--algo az` checkpoint. 0 = off (use greedy top-1 or --search).",
+        "an AZ checkpoint. 0 = off (use greedy top-1 or --search).",
     )
     parser.add_argument(
         "--c-puct", type=float, default=1.5, help="PUCT exploration constant."

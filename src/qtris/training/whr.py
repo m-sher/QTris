@@ -1,22 +1,14 @@
 """Whole-history rating (WHR) for the 1v1 opponent-pool AZ trainer.
 
-Replaces incremental anchored Elo with a batch MAP refit over an append-only game
-log: a Bradley-Terry likelihood on the Elo scale with gen_0 clamped at `init`, one
-learner rating per generation-with-games chained by a Gaussian random-walk prior
+A batch MAP refit over an append-only game log: a Bradley-Terry likelihood on the
+Elo scale with gen_0 clamped at `init`, one learner rating per
+generation-with-games chained by a Gaussian random-walk prior
 (`drift` Elo per sqrt-gen), one constant rating per pool snapshot soft-tied to the
 learner trajectory at its creation gen (`tie_sigma`), a weak level prior on the
 first epoch (`level_sigma`, makes the fit well-posed with zero anchor games), and
 a single context-offset parameter for exploration-temperature pool games vs
 greedy eval games (`ctx_sigma` prior; identifiable because gen_0 plays in both).
 Draws count as half a win. Sigmas are Laplace marginals from diag(inv(-H)).
-
-Tuning intuition: smoothing lag ~ a few gens at drift=8; the trajectory can track
-at most ~drift^2 * decisive_games_per_gen / SCALE Elo/gen (~11 at 30 games). If
-draw_rate exceeds ~0.25 ratings compress toward opponents (half-win model).
-
-The dense Cholesky fit is ~1 s/gen at 3000 epochs (measured); if runs exceed
-~5000 gens, the Hessian is tridiagonal (epoch chain) + arrow (snapshots/ctx), so
-a Thomas-sweep + Schur solver is the numpy-only escape hatch.
 """
 
 import glob
@@ -246,9 +238,7 @@ class WHRBook:
         level_prec = (SCALE / self.level_sigma) ** 2
         ctx_prec = (SCALE / self.ctx_sigma) ** 2
         # Tie variance grows with the random-walk distance between the snapshot's
-        # creation and its nearest epoch, so a legacy snapshot whose first logged
-        # epoch is hundreds of gens away gets an honestly weak tie instead of
-        # being glued to the resumed learner's level.
+        # creation and its nearest epoch.
         ties = []  # (snap param, epoch param, precision)
         for s in snaps:
             k = self._creation_gen(s)

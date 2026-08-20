@@ -16,11 +16,8 @@ HARD_DROP_ID = Keys.HARD_DROP
 
 class PlacementPolicyValueNet(QtrisModelBase):
     """Shared-encoder policy+value net (fusion-style). One `process_obs` pass yields
-    both a candidate-ranking policy (over up to 128 placements, conditioned on the
-    board via cross-attention) and a state-only value. The encoder + policy-head
-    submodule names are identical to the old policy-only model, so a policy-only
-    checkpoint warm-starts the shared trunk + policy head; the value head is new and
-    simply restores partial."""
+    both a candidate-ranking policy (over up to `candidate_capacity` placements,
+    conditioned on the board via cross-attention) and a state-only value."""
 
     def __init__(
         self,
@@ -117,9 +114,6 @@ class PlacementPolicyValueNet(QtrisModelBase):
 
     def process_obs(self, inputs, training=False):
         """Encoder pass returning the piece latent AND the board patch latent.
-
-        Overrides the base (which returns only `piece_dec`) so the candidate scorer
-        can cross-attend to the board patches, not just the piece/bcg summary.
 
         Plain method (no own @tf.function): composed by the non-jit training forward (`call`,
         training=True -> graph-mode dropout) and inlined into the jit inference wrappers

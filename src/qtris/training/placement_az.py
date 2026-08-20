@@ -158,9 +158,7 @@ def _trace_tier_map(num_games, trace_free_envs, tiers):
 
 
 # Difficulty-curriculum controller: keep per-game deaths inside [LO, HI] by ramping a
-# continuous difficulty index. Asymmetric (back off faster than ramp up) so a hard generation
-# is corrected before the spiral that weak search + over-hard garbage produces (the collapse
-# mechanism: difficulty above what competence + sims can survive).
+# continuous difficulty index. Asymmetric: it backs off faster than it ramps up.
 CUR_DEATH_LO, CUR_DEATH_HI = 0.4, 1.0
 CUR_STEP_UP, CUR_STEP_DOWN = 0.15, 0.40
 
@@ -234,7 +232,7 @@ def _estimate_return_var(mcts, envs, searcher, forced_drop, gamma, horizon, num_
     """Pre-training estimate of the discounted-return variance to seed return_scale, which is
     then FROZEN for the whole run. One short self-play rollout with the warm-started net, over
     the same attack-only return the value head regresses (pure MC, no bootstrap), gives a
-    calibrated scale; without it a fresh start would sit at 1.0 with wildly mis-scaled targets."""
+    calibrated scale."""
     rewards = np.zeros((horizon, num_envs), dtype=np.float32)
     dones = np.zeros((horizon, num_envs), dtype=np.float32)
     for env in envs:
@@ -361,7 +359,8 @@ def main(args):
         num_games,
         queue_size,
         max_holes=50,
-        max_steps=None,  # a cap counts truncations as deaths and cuts the bootstrap
+        # Episodes end only on death, so dones mark true terminals for the return.
+        max_steps=None,
         max_len=max_len,
         args=args,
         trace_pools=trace_pools,
@@ -379,10 +378,8 @@ def main(args):
     move_count = np.zeros(num_games, dtype=np.int64)
 
     # Seed return_scale from a warm-start rollout (skip when resuming a calibrated AZ ckpt,
-    # whose return_scale was restored above, or when --return-scale forces it), then FROZEN:
-    # AZ normalizes nothing (bounded z target) and MuZero min-max normalizes Q in-tree; a
-    # running return-variance EMA is a PPO-style trick, and its loosening (variance up ->
-    # scale up -> death penalty down) amplified every collapse.
+    # whose return_scale was restored above, or when --return-scale forces it); it is then
+    # frozen for the rest of the run.
     resumed = manager.latest_checkpoint is not None
     if not resumed:
         if return_scale_override is not None:
@@ -457,9 +454,9 @@ def main(args):
         for i, e in enumerate(envs):
             e._garbage_traces = trace_pools.get(cmap[i]) if cmap.get(i) else None
 
-    # Multi-generation replay of storable positions (decorrelates the tiny on-policy batches
-    # and resists drift off the pretrained init). Each entry is one generation's numpy arrays;
-    # oldest generations are evicted once the total position count exceeds replay_capacity.
+    # Multi-generation replay of storable positions. Each entry is one generation's numpy
+    # arrays; oldest generations are evicted once the total position count exceeds
+    # replay_capacity.
     replay = deque()
     replay_size = 0
 
@@ -519,7 +516,6 @@ def main(args):
                 _total, attack, clear, died = placement_step(
                     envs[i], searcher, res["descriptor"]
                 )
-                # attack-only realized reward, minus the death penalty on a fatal move
                 rewards[t, i] = cfg.w_attack * attack - (cfg.w_death if died else 0.0)
                 attacks[t, i] = attack
                 clears[t, i] = clear
@@ -558,15 +554,13 @@ def main(args):
         )
         value_tgt = returns.numpy()[..., 0] / (scale + 1e-8)
 
-        # Measured per-gen return variance: DIAGNOSTIC ONLY (a rise preceding a reward fall
-        # is the collapse fingerprint). return_scale stays frozen at its seed.
+        # Measured per-gen return variance: DIAGNOSTIC ONLY. return_scale stays frozen
+        # at its seed.
         raw_returns = compute_raw_returns(
             rewards[..., None], dones[..., None], cfg.gamma, horizon, num_games
         )
         gen_return_var = float(tf.math.reduce_variance(raw_returns))
 
-        # Append this generation's storable positions to the replay buffer; evict oldest gens
-        # once total positions exceed replay_capacity.
         replay.append(
             {
                 "boards": _flat(boards, sel),

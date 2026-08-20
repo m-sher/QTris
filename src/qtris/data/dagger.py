@@ -8,10 +8,7 @@ stores, so transitions accumulate across BC + DAgger rounds):
     masking).
   * At each visited state, query the beam search for the per-candidate scores +
     key-sequences and scatter them into the placement target.
-  * Step the env with the POLICY's choice (the DAgger invariant) - this shifts
-    the visited-state distribution toward what the policy sees in deployment,
-    the canonical fix for compounding error in BC on long-horizon games
-    (Ross & Bagnell, 2010).
+  * Step the env with the POLICY's choice (the DAgger invariant).
   * Record (state, search target).
 """
 
