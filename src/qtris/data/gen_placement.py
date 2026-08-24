@@ -137,7 +137,7 @@ def main(args):
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()
-    queue_size = 5
+    queue_size = 10
     max_len = 15
     max_holes = 50
     max_steps_env = 9999999

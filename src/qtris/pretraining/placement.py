@@ -24,6 +24,17 @@ def resolve_resume_checkpoint(resume_from, manager):
     return manager.latest_checkpoint
 
 
+MODEL_PIECE_TOKENS = 2 + 5  # active + hold + the model's 5-slot queue
+
+
+def _trim_pieces(example):
+    """Return the example with its [active, hold, queue...] stream cut to the tokens
+    the model reads."""
+    example = dict(example)
+    example["pieces"] = example["pieces"][:MODEL_PIECE_TOKENS]
+    return example
+
+
 class Pretrainer:
     """Behavioral cloning from the oracle's placement dataset: soft cross-entropy to
     the per-candidate scores, plus a bounded tanh value label."""
@@ -77,7 +88,7 @@ class Pretrainer:
 
         self._assign_tanh_value_norm(dataset)
 
-        cached = dataset.cache()
+        cached = dataset.map(_trim_pieces, num_parallel_calls=tf.data.AUTOTUNE).cache()
         for _ in cached:
             pass
 
@@ -106,7 +117,11 @@ class Pretrainer:
                 f"Val dataset at {val_path} is not the placement schema "
                 "(needs `cand_placements` + `cand_scores`)."
             )
-        return ds.batch(batch_size, drop_remainder=False).prefetch(tf.data.AUTOTUNE)
+        return (
+            ds.map(_trim_pieces, num_parallel_calls=tf.data.AUTOTUNE)
+            .batch(batch_size, drop_remainder=False)
+            .prefetch(tf.data.AUTOTUNE)
+        )
 
     @staticmethod
     def _dataset_vmax(dataset):
