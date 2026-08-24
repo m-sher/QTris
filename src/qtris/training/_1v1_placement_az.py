@@ -383,7 +383,7 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
-    learning_rate = getattr(args, "learning_rate", 1e-4)
+    learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 25_000)
     # Opponent-pool knobs.
     max_pool_size = getattr(args, "max_pool_size", 30)
