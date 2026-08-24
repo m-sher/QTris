@@ -312,8 +312,21 @@ static inline uint64_t state_hash(const SearchState* s, int board_height) {
                            s->garbage_remaining, s->garbage_timer);
 }
 
-// Transposition-cache hash: like state_hash but also mixes in the path-dependent
-// fields that feed evaluate_state (total_attack, garbage_prevented).
+// Transposition-cache hash: state_hash plus the path-dependent fields that feed
+// evaluate_state, and the queue the cached score was computed against.
+// Digest of this call's queue contents, which state_hash does not cover and the TT
+// outlives. Written once in the single-threaded prologue, read-only under OpenMP.
+static uint64_t g_queue_digest = 0;
+
+static void set_queue_digest(const int* queue, int queue_len) {
+    uint64_t h = 0x1d8e4e27c47d124fULL ^ (uint64_t)(uint32_t)queue_len;
+    for (int i = 0; i < queue_len; i++) {
+        uint64_t x = h ^ (uint64_t)(uint32_t)queue[i];
+        h = splitmix64(&x);
+    }
+    g_queue_digest = h;
+}
+
 static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     uint64_t h = state_hash(s, board_height);
     union { float f; uint32_t u; } a, gp;
@@ -327,6 +340,9 @@ static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     ph.f = s->parent_avg_height;
     h ^= (uint64_t)ua.u * 0x517cc1b727220a95ULL;
     h ^= (uint64_t)ph.u * 0x9e3779b97f4a7c15ULL;
+    // pieces_placed is the W_APP denominator, so it feeds the score and belongs in the key.
+    h ^= (uint64_t)(uint32_t)s->pieces_placed * 0x517cc1b727220a95ULL;
+    h ^= g_queue_digest;
     return h;
 }
 
@@ -1915,6 +1931,7 @@ void b2b_search_c(
     if (!b2b_initialized) b2b_init_pieces();
     if (!zobrist_initialized) zobrist_init();
     tt_new_generation();
+    set_queue_digest(queue, queue_len);
 
     // Clamp parameters
     if (search_depth > MAX_SEARCH_DEPTH) search_depth = MAX_SEARCH_DEPTH;
