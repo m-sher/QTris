@@ -20,7 +20,7 @@ from tf_agents.environments.tf_py_environment import TFPyEnvironment
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 from qtris.demo.constants import PIECE_COLORS, PIECE_DISPLAY
-from qtris.demo.panels import confirm_save
+from qtris.demo.panels import confirm_save, draw_death_envelope
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
 from qtris.demo.utils import load_checkpoint, save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
@@ -73,9 +73,9 @@ def main(cli_args):
         dirichlet_eps=0.0,
         leaves_per_round=leaves,
         gamma=1.0,
-        w_attack=0.0,
+        w_attack=0.01,
         w_death=1.0,
-        w_b2b=0.00,
+        w_b2b=0.02,
     )
     mcts1 = PlacementMCTS(p1_net, cfg)
     mcts2 = PlacementMCTS(p2_net, cfg)
@@ -95,6 +95,7 @@ def main(cli_args):
 
     # Layout: [garbage | board | queue sidebar] per side, sidebars facing the center gap.
     board_w, board_h = 250, 600
+    board_cell = board_w // 10  # 10 visible columns
     garbage_w = 25
     sidebar_w = 125  # solo demo scales the (5, 28) piece sidebar to 125 x 600
     gap = 30
@@ -154,12 +155,13 @@ def main(cli_args):
             blit_scaled(s, x, 28, sidebar_w, board_h)
             blit_scaled(b, x + sidebar_w, 28, board_w, board_h)
             blit_scaled(g, x + sidebar_w + board_w, 28, garbage_w, board_h)
-            label_x = x + sidebar_w + 5
+            board_x, label_x = x + sidebar_w, x + sidebar_w + 5
         else:  # P1: garbage | board | sidebar
             blit_scaled(g, x, 28, garbage_w, board_h)
             blit_scaled(b, x + garbage_w, 28, board_w, board_h)
             blit_scaled(s, x + garbage_w + board_w, 28, sidebar_w, board_h)
-            label_x = x + garbage_w + 5
+            board_x, label_x = x + garbage_w, x + garbage_w + 5
+        draw_death_envelope(screen, sub_env, board_x, 28, board_cell)
         screen.blit(big_font.render(label, True, color), (label_x, 33))
 
     def draw_stats(x, s, color):

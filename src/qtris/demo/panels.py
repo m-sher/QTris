@@ -122,23 +122,23 @@ def draw_board_area(screen, board, vis_board, sidebar, scores, garbage, piece_co
     screen.blit(scores_surf, (415, 0))
 
 
-def draw_death_envelope(screen, env):
+def draw_death_envelope(
+    screen, env, origin_x=BOARD_ORIGIN_X, origin_y=BOARD_ORIGIN_Y, cell=BOARD_CELL
+):
     """Overlay the spawn (death) envelope in translucent red once any column climbs above
-    DEATH_HEIGHT_WARN, warning that the stack is nearing the top-out box. Call after the board."""
+    DEATH_HEIGHT_WARN, warning that the stack is nearing the top-out box. Call after the
+    board, at the origin and cell size of the playfield being drawn."""
     if int(env._get_heights(env._board).max()) <= DEATH_HEIGHT_WARN:
         return
     offset = env._board.shape[0] - 24  # buffer rows above the rendered 24-row slice
-    overlay = pygame.Surface((BOARD_CELL, BOARD_CELL), pygame.SRCALPHA)
+    overlay = pygame.Surface((cell, cell), pygame.SRCALPHA)
     overlay.fill((255, 0, 0, 110))
     for board_row, col in SPAWN_ENVELOPE:
         slice_row = int(board_row) - offset
         if 0 <= slice_row < 24:
             screen.blit(
                 overlay,
-                (
-                    BOARD_ORIGIN_X + int(col) * BOARD_CELL,
-                    BOARD_ORIGIN_Y + slice_row * BOARD_CELL,
-                ),
+                (origin_x + int(col) * cell, origin_y + slice_row * cell),
             )
 
 

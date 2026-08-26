@@ -6,8 +6,7 @@ frozen past snapshots, via decoupled per-player MCTS: each player searches its o
 search horizon), the chosen placements are committed, and garbage is exchanged as
 `PyTetris1v1Env` does. The value head regresses TD(lambda) targets built from the realized
 game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recovers raw z
-on every position); with td_blend > 0 each non-terminal target is a convex blend with a
-realized near-term production channel (window saturating ratios of b2b level and attack
+on every position).
 rate), while the terminal row stays exactly z. The search runs at w_death=1, gamma=1,
 return_scale=1, w_attack=0, w_b2b=0; own-death = -1 is the only in-search terminal.
 
@@ -160,35 +159,9 @@ def _mean_or_none(xs):
 
 GROUNDING_BUCKETS = ((0, 10), (10, 30), (30, 60), (60, 1 << 30))
 
+
 # Ahat channel weights and half-saturation levels. Both channels are saturating ratios
 # x/(x+half), bounded in [0,1); half is the level scoring 0.5.
-BLEND_B2B_WEIGHT = 0.8
-BLEND_ATK_WEIGHT = 0.2
-B2B_HALF_SAT = 8.0
-ATK_HALF_SAT = 0.5
-
-
-def _ahat(atks, b2bs, horizon):
-    """Per-position (ahat, b2b_channel, atk_channel) arrays over forward windows of up to
-    `horizon` placements.
-
-    b2b is a state: each window step's level enters as its own ratio, then the window is
-    averaged. Attack is a flow: the window's attack-per-placement rate is computed first and
-    the ratio applied once."""
-    atks = np.asarray(atks, dtype=np.float64)
-    b2bs = np.maximum(np.asarray(b2bs, dtype=np.float64), 0.0)
-    n = len(atks)
-    b2b_ratio = b2bs / (b2bs + B2B_HALF_SAT)
-    b2b_ch = np.empty(n)
-    atk_ch = np.empty(n)
-    for i in range(n):
-        w = slice(i, min(i + horizon, n))
-        b2b_ch[i] = b2b_ratio[w].mean()
-        app = atks[w].mean()
-        atk_ch[i] = app / (app + ATK_HALF_SAT)
-    return BLEND_B2B_WEIGHT * b2b_ch + BLEND_ATK_WEIGHT * atk_ch, b2b_ch, atk_ch
-
-
 def _grounding(v_root, z, steps_to_end):
     """corr(v_root, z) and Brier(v_root, z) per steps-to-end bucket, keyed
     `corr_n0_10` / `brier_n0_10` and so on, with None for empty or degenerate buckets.
@@ -207,15 +180,11 @@ def _grounding(v_root, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, lam, blend, horizon):
+def _episode(pend, p1_died, p2_died, lam):
     """Stamp each player's value targets on its pending positions and return both players'
-    rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end, ahat_b2b,
-    ahat_atk)], game_len, p1_won, is_draw) keyed on the learner's (player-1) outcome, or
-    None if nothing was collected. z, steps_to_end, and the ahat channels are carried for
-    diagnostics and are not training inputs.
-
-    The target is (1-blend)*TD(lambda) + blend*Ahat on every row but a trajectory's last,
-    which stays at that player's z."""
+    rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
+    p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
+    collected. z and steps_to_end are carried for diagnostics and are not training inputs."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -232,15 +201,8 @@ def _episode(pend, p1_died, p2_died, lam, blend, horizon):
         if n == 0:
             continue
         targets = _td_lambda([p["v_root"] for p in positions], z, lam)
-        b2b_ch, atk_ch = np.zeros(n), np.zeros(n)
-        if blend > 0.0:
-            ahat, b2b_ch, atk_ch = _ahat(
-                [p["atk"] for p in positions], [p["b2b"] for p in positions], horizon
-            )
-            for i in range(n - 1):
-                targets[i] = (1.0 - blend) * targets[i] + blend * ahat[i]
         rows += [
-            (p, t, mask, z, n - 1 - i, b2b_ch[i], atk_ch[i])
+            (p, t, mask, z, n - 1 - i)
             for i, (p, t) in enumerate(zip(positions, targets))
         ]
     return rows, glen, z1 > 0.0, z1 == 0.0
@@ -383,7 +345,7 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
-    learning_rate = getattr(args, "learning_rate", 1e-4)
+    learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 25_000)
     # Opponent-pool knobs.
     max_pool_size = getattr(args, "max_pool_size", 30)
@@ -392,8 +354,6 @@ def main(args):
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 32)
     td_lambda = getattr(args, "td_lambda", 0.9)
-    td_blend = getattr(args, "td_blend", 0.0)
-    blend_horizon = getattr(args, "blend_horizon", 16)
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -422,6 +382,7 @@ def main(args):
         w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
         w_b2b=_resolve(args, "w_b2b", 0.0),
+        q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
@@ -502,6 +463,7 @@ def main(args):
         temp_moves=cfg.temp_moves,
         w_attack=cfg.w_attack,
         w_b2b=cfg.w_b2b,
+        q_norm=cfg.q_norm,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -513,8 +475,6 @@ def main(args):
         eval_interval=eval_interval,
         eval_games=eval_games,
         td_lambda=td_lambda,
-        td_blend=td_blend,
-        blend_horizon=blend_horizon,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -567,7 +527,7 @@ def main(args):
     for gen in range(gen0, gen0 + num_generations):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
-        gen_pos = []  # (pos, target, policy_mask, z, steps_to_end, ahat_b2b, ahat_atk)
+        gen_pos = []  # (pos, target, policy_mask, z, steps_to_end)
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
@@ -593,14 +553,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(
-                        pending[g],
-                        a["dead"],
-                        b["dead"],
-                        td_lambda,
-                        td_blend,
-                        blend_horizon,
-                    )
+                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -612,10 +565,6 @@ def main(args):
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
-                    pending[g]["p1"][-1]["atk"] = atk1
-                    pending[g]["p1"][-1]["b2b"] = post_b2b
-                    pending[g]["p2"][-1]["atk"] = atk2
-                    pending[g]["p2"][-1]["b2b"] = e2._scorer._b2b
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
                         n_difficult += 1
@@ -654,9 +603,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(
-                        pending[g], p1_died, p2_died, td_lambda, td_blend, blend_horizon
-                    )
+                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
@@ -735,8 +682,6 @@ def main(args):
         policy_mask = np.array([r[2] for r in gen_pos], dtype=np.float32)
         outcome_z = np.array([r[3] for r in gen_pos], dtype=np.float32)
         steps_to_end = np.array([r[4] for r in gen_pos], dtype=np.int64)
-        ahat_b2b = np.array([r[5] for r in gen_pos], dtype=np.float32)
-        ahat_atk = np.array([r[6] for r in gen_pos], dtype=np.float32)
         v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
         # gen_pos interleaves both players; policy_mask==1 is the learner.
         lrn = policy_mask == 1.0
@@ -919,14 +864,6 @@ def main(args):
                 pool_size=len(present),
                 elo=elo_tags,
                 grounding=grounding,
-                ahat_mean=float(
-                    BLEND_B2B_WEIGHT * ahat_b2b[lrn].mean()
-                    + BLEND_ATK_WEIGHT * ahat_atk[lrn].mean()
-                )
-                if td_blend > 0.0
-                else None,
-                ahat_b2b=float(ahat_b2b[lrn].mean()) if td_blend > 0.0 else None,
-                ahat_atk=float(ahat_atk[lrn].mean()) if td_blend > 0.0 else None,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )

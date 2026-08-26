@@ -107,19 +107,6 @@ def main() -> None:
         "(default 0.99). Rejected for 1v1, whose reward is terminal-only.",
     )
     parser.add_argument(
-        "--td-blend",
-        type=float,
-        default=0.0,
-        help="1v1 only: weight of the realized near-term production channel in "
-        "the value target; 0 disables the blend. Terminal rows stay pure z.",
-    )
-    parser.add_argument(
-        "--blend-horizon",
-        type=int,
-        default=16,
-        help="1v1 only: forward window (placements) for the blend channels.",
-    )
-    parser.add_argument(
         "--temp-moves",
         type=int,
         default=12,
@@ -141,7 +128,7 @@ def main() -> None:
         help="value-loss weight in the AZ loss.",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-4, help="Adam learning rate."
+        "--learning-rate", type=float, default=3e-4, help="Adam learning rate."
     )
     parser.add_argument(
         "--w-attack",
@@ -162,6 +149,13 @@ def main() -> None:
         default=0.0,
         help="1v1 only: potential-based b2b-build search shaping "
         "(Phi=min(max(0,b2b),12); 0=off).",
+    )
+    parser.add_argument(
+        "--q-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="1v1 only: rank PUCT on per-tree min-max normalised Q (MuZero style); "
+        "--no-q-norm ranks on raw return units.",
     )
     parser.add_argument(
         "--replay-capacity",

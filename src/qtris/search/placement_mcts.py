@@ -35,6 +35,7 @@ class MCTSConfig:
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
     w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
+    q_norm: bool = True  # rank on per-tree min-max normalised Q
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -54,7 +55,10 @@ class PlacementMCTS:
         fb = self._fullb
         if nv < fb:
             p = fb - nv
-            z = lambda a: np.concatenate([a, np.zeros((p, *a.shape[1:]), a.dtype)])  # noqa: E731
+
+            def z(a):
+                return np.concatenate([a, np.zeros((p, *a.shape[1:]), a.dtype)])
+
             boards, pieces, bcg, pls, masks = (
                 z(boards),
                 z(pieces),
@@ -103,9 +107,10 @@ class PlacementMCTS:
             queue_size=e0._queue_size,
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
-            auto_push_garbage=int(e0._auto_push_garbage),
-            # The sim extends its own queue from the mirrored bag RNG; the env flag only
-            # says who refills the real queue between moves.
+            # These flags govern who maintains the real state between moves, so the sim
+            # sets both for itself: queued garbage lands on a non-clearing move in every
+            # regime we play, and the sim extends its queue from the mirrored bag RNG.
+            auto_push_garbage=1,
             auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
@@ -117,6 +122,7 @@ class PlacementMCTS:
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
+            q_norm=self.cfg.q_norm,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -192,9 +198,10 @@ class PlacementMCTS:
             queue_size=e0._queue_size,
             max_holes=e0._max_holes,
             garbage_push_delay=e0._garbage_push_delay,
-            auto_push_garbage=int(e0._auto_push_garbage),
-            # The sim extends its own queue from the mirrored bag RNG; the env flag only
-            # says who refills the real queue between moves.
+            # These flags govern who maintains the real state between moves, so the sim
+            # sets both for itself: queued garbage lands on a non-clearing move in every
+            # regime we play, and the sim extends its queue from the mirrored bag RNG.
+            auto_push_garbage=1,
             auto_fill_queue=1,
             c_puct=self.cfg.c_puct,
             gamma=self.cfg.gamma,
@@ -206,6 +213,7 @@ class PlacementMCTS:
             leaves_per_round=self.cfg.leaves_per_round,
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
+            q_norm=self.cfg.q_norm,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

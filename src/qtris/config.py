@@ -37,8 +37,8 @@ class PretrainConfig(BaseModel):
 
 
 class DataGenConfig(BaseModel):
-    search_depth: int = 16
-    beam_width: int = 200
+    search_depth: int = 10
+    beam_width: int = 256
     death_trim_count: int = 20
     num_steps: int = 200_000
     seed: int = 0
