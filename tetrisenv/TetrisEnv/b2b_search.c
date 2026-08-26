@@ -2577,6 +2577,7 @@ typedef struct {
     int board_height, queue_size, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
     float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
+    int q_norm;                  // rank on per-tree min-max normalised Q instead of raw units
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -2607,6 +2608,10 @@ typedef struct {
     // its virtual loss and back up the real value.
     PathEntry path[MAX_LPR][MAX_PATH]; int path_len[MAX_LPR];
     MNode* pending[MAX_LPR]; int n_pending;
+    // Descents that collided with a pending leaf. Their virtual loss steers the round's
+    // later descents elsewhere and is reverted with the pending ones.
+    PathEntry cpath[MAX_LPR][MAX_PATH]; int cpath_len[MAX_LPR]; int n_collided;
+    float qmin, qmax;            // range of backed-up Q this tree has seen (q_norm)
 } MTree;
 
 typedef struct {
@@ -2789,22 +2794,24 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
 // --- PUCT ---
 // Q enters PUCT in raw return_scale units, unnormalized, so w_death's magnitude carries
 // straight into selection.
-static int mcts_select(const MNode* node, const MConfig* cfg) {
+static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float qmax) {
     float total = 0.0f;
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
     float best = -1e30f; int best_slot = node->legal[0];
     float sq = sqrtf(total + 1e-8f);
+    bool norm = cfg->q_norm && qmax > qmin;
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         float n = node->N[slot];
         float q = n > 0 ? node->Q[slot] : 0.0f;
+        if (norm && n > 0) q = (q - qmin) / (qmax - qmin);
         float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
     }
     return best_slot;
 }
-static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
+static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
@@ -2813,6 +2820,8 @@ static void mtree_backup(const MConfig* cfg, const PathEntry* path, int len,
         node->N[slot] += 1.0f;
         node->W[slot] += g;
         node->Q[slot] = node->W[slot] / node->N[slot];
+        if (node->Q[slot] < t->qmin) t->qmin = node->Q[slot];
+        if (node->Q[slot] > t->qmax) t->qmax = node->Q[slot];
     }
 }
 
@@ -2852,23 +2861,38 @@ static float mcts_scale_reward(const MConfig* cfg, float reward) {
 //     and their paths; terminal/dead leaves back up in-place; stops on collision or arena-full. ---
 static void mcts_collect_round(MTree* t, const MConfig* cfg) {
     t->n_pending = 0;
+    t->n_collided = 0;
     int L = cfg->leaves_per_round;
-    for (int li = 0; li < L && t->n_pending < MAX_LPR; li++) {
+    // Every descent that backs up counts as one simulation: a pending leaf (backed up when
+    // its evaluation arrives) or a dead end (backed up here). A collision counts for nothing,
+    // so it gets a virtual loss and the round keeps going, bounded so an exhausted frontier
+    // cannot spin.
+    int done = 0;
+    for (int attempt = 0; attempt < 4 * L && done < L && t->n_pending < MAX_LPR; attempt++) {
         PathEntry* path = t->path[t->n_pending];   // build into the next pending slot's buffer
         int plen = 0;
         MNode* node = t->root;
         while (1) {
             if (node->terminal || node->n_legal == 0) {  // dead end: real backup of 0 in-place
-                mtree_backup(cfg, path, plen, 0.0f);
+                mtree_backup(t, cfg, path, plen, 0.0f);
+                done++;
                 break;
             }
-            if (node->awaiting_eval) break;              // collision: another descent owns this leaf
-            int slot = mcts_select(node, cfg);
+            if (node->awaiting_eval) {                   // collision: another descent owns this leaf
+                if (t->n_collided < MAX_LPR) {
+                    memcpy(t->cpath[t->n_collided], path, sizeof(PathEntry) * plen);
+                    t->cpath_len[t->n_collided] = plen;
+                    t->n_collided++;
+                    mtree_apply_vloss(path, plen, cfg->vloss);
+                }
+                break;
+            }
+            int slot = mcts_select(node, cfg, t->qmin, t->qmax);
             path[plen].node = node; path[plen].slot = slot; plen++;
             MNode* child = node->child[slot];
             if (child == NULL) {
                 MNode* leaf = mtree_alloc(t);
-                if (leaf == NULL) { mtree_backup(cfg, path, plen, 0.0f); break; }  // arena full
+                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); done++; break; }  // arena full
                 leaf->st = node->st;
                 bool terminal = false;
                 float attack = mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal);
@@ -2885,7 +2909,8 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                         - cfg->w_death / (cfg->return_scale + 1e-8f)
                         - cfg->w_b2b * b2b_phi(node->st.b2b)
                               / (cfg->return_scale + 1e-8f);
-                    mtree_backup(cfg, path, plen, 0.0f);
+                    mtree_backup(t, cfg, path, plen, 0.0f);
+                    done++;
                     break;
                 }
                 // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)).
@@ -2898,6 +2923,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
                 t->n_pending++;
+                done++;
                 mtree_apply_vloss(path, plen, cfg->vloss);  // steer the next descent away
                 break;
             }
@@ -2922,7 +2948,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss, float w_b2b) {
+                  int leaves_per_round, float vloss, float w_b2b, int q_norm) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -2949,6 +2975,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.c_puct = c_puct; e->cfg.gamma = gamma;
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
     e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
+    e->cfg.q_norm = q_norm;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -2969,6 +2996,7 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
                    const int* garb_rows, const int* garb_col, const int* garb_timer, int gcnt) {
     MEngine* e = (MEngine*)h;
     MTree* t = &e->trees[tree];
+    t->qmin = 1e30f; t->qmax = -1e30f; t->n_collided = 0;
     t->root = NULL; t->alive = false; t->dead = false;
     t->pool_used = 0; t->n_pending = 0;
     MNode* root = mtree_alloc(t);
@@ -3080,9 +3108,12 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             // Bootstrap is the net value directly; the bank is priced per-edge by Phi.
             float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
-            mtree_backup(cfg, t->path[p], t->path_len[p], boot);
+            mtree_backup(t, cfg, t->path[p], t->path_len[p], boot);
             row++;
         }
+        for (int c = 0; c < t->n_collided; c++)
+            mtree_revert_vloss(t->cpath[c], t->cpath_len[c], cfg->vloss);
+        t->n_collided = 0;
     }
 }
 
@@ -3121,7 +3152,7 @@ void mcts_destroy(void* h) {
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 17; }
+int mcts_create_arity(void) { return 18; }
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.

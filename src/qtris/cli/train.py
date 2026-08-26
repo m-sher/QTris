@@ -164,6 +164,13 @@ def main() -> None:
         "(Phi=min(max(0,b2b),12); 0=off).",
     )
     parser.add_argument(
+        "--q-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="1v1 only: rank PUCT on per-tree min-max normalised Q (MuZero style); "
+        "--no-q-norm ranks on raw return units.",
+    )
+    parser.add_argument(
         "--replay-capacity",
         type=int,
         default=25_000,
