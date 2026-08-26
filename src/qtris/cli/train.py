@@ -107,19 +107,6 @@ def main() -> None:
         "(default 0.99). Rejected for 1v1, whose reward is terminal-only.",
     )
     parser.add_argument(
-        "--td-blend",
-        type=float,
-        default=0.0,
-        help="1v1 only: weight of the realized near-term production channel in "
-        "the value target; 0 disables the blend. Terminal rows stay pure z.",
-    )
-    parser.add_argument(
-        "--blend-horizon",
-        type=int,
-        default=16,
-        help="1v1 only: forward window (placements) for the blend channels.",
-    )
-    parser.add_argument(
         "--temp-moves",
         type=int,
         default=12,
