@@ -23,6 +23,7 @@
 // height). NET_ROWS is the model-visible slice (bottom 24) emitted to the net.
 #define SPAWN_ROW 17
 #define DEATH_HEIGHT_CAP 35
+#define PERFECT_CLEAR_ATTACK 5
 #define HEIGHT_REF 22
 #define NET_ROWS 24
 #define SPIN_STATES 2
@@ -812,8 +813,7 @@ static AttackResult compute_attack(int clears, int spin_type, int b2b, int combo
 
         // Base attack
         if (perfect_clear) {
-            int pc_table[5] = {0, 5, 6, 7, 9};
-            res.attack += pc_table[clears < 5 ? clears : 4];
+            res.attack += PERFECT_CLEAR_ATTACK;
         } else if (spin_type == SPIN_T_FULL) {
             int ts_table[5] = {0, 2, 4, 6, 0};
             res.attack += ts_table[clears < 5 ? clears : 4];

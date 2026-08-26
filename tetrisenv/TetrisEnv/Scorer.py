@@ -21,7 +21,9 @@ class Scorer:
         self._b2b = -1
         self._combo = -1
 
-    def judge(self, piece: Piece, board: np.ndarray, post_lock_board: np.ndarray, clears: int) -> Tuple[float, bool]:
+    def judge(
+        self, piece: Piece, board: np.ndarray, post_lock_board: np.ndarray, clears: int
+    ) -> Tuple[float, bool]:
         attack = 0
         spin = Spins.NO_SPIN
         surge = 0
@@ -109,7 +111,7 @@ class Scorer:
 
             # Compute base attack
             if perfect_clear:
-                attack += [0, 5, 6, 7, 9][clears]
+                attack += 5
 
             elif spin == Spins.T_SPIN:
                 attack += [0, 2, 4, 6, 0][clears]
