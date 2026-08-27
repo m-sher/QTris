@@ -1,0 +1,7 @@
+*.egg-info*
+/build
+/wandb
+/logdir
+/tests
+*__pycache__*
+*.so
