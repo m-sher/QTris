@@ -346,7 +346,7 @@ def main(args):
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 3e-4)
-    replay_capacity = getattr(args, "replay_capacity", 25_000)
+    replay_capacity = getattr(args, "replay_capacity", 8_000)
     # Opponent-pool knobs.
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)

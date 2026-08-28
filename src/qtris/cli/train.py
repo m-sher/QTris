@@ -160,7 +160,7 @@ def main() -> None:
     parser.add_argument(
         "--replay-capacity",
         type=int,
-        default=25_000,
+        default=8_000,
         help="max positions kept in the multi-generation replay buffer.",
     )
     parser.add_argument(
