@@ -44,11 +44,13 @@ def _load_lib():
         + [ctypes.c_int] * 2
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
         + [ctypes.c_float]  # w_b2b
-        + [ctypes.c_int]  # q_norm
+        + [ctypes.c_int] * 2  # q_norm, four_wide
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
     lib.mcts_candidate_capacity.restype = ctypes.c_int
+    lib.mcts_four_wide_wall_height.argtypes = []
+    lib.mcts_four_wide_wall_height.restype = ctypes.c_int
     # Arity handshake: the .so's mcts_create must take exactly the args passed below.
     try:
         lib.mcts_create_arity.argtypes = []
@@ -100,6 +102,14 @@ def _load_lib():
 _LIB = None
 
 
+def four_wide_wall_height():
+    """The wall height the C search levels to; must equal `FOUR_WIDE_WALL_HEIGHT`."""
+    global _LIB
+    if _LIB is None:
+        _LIB = _load_lib()
+    return int(_LIB.mcts_four_wide_wall_height())
+
+
 class CMCTS:
     def __init__(
         self,
@@ -122,6 +132,7 @@ class CMCTS:
         vloss=1.0,
         w_b2b=0.0,
         q_norm=True,
+        four_wide=False,
     ):
         global _LIB
         if _LIB is None:
@@ -161,6 +172,7 @@ class CMCTS:
             vloss,
             w_b2b,
             int(bool(q_norm)),
+            int(bool(four_wide)),
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr

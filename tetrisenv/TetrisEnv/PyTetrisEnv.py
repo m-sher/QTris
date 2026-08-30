@@ -43,10 +43,28 @@ SPAWN_ENVELOPE = np.array(
     [[17, 3], [17, 4], [17, 5], [18, 3], [18, 4], [18, 5], [18, 6]], dtype=np.int32
 )
 
+# 4-wide: columns 0-2 and 7-9 are held filled, leaving 3-6 playable. The wall height is one
+# row below the cap, the tallest that never tops out. `b2b_search.c` mirrors both constants.
+FOUR_WIDE_WALL_HEIGHT = DEATH_HEIGHT_CAP - 1
+FOUR_WIDE_WALL_COLS = np.array([0, 1, 2, 7, 8, 9], dtype=np.int32)
+
 
 def spawn_envelope_blocked(board: np.ndarray) -> bool:
     """True if the 7-cell spawn box is obstructed. `board` is the full (40,10) occupancy board."""
     return bool(np.any(board[SPAWN_ENVELOPE[:, 0], SPAWN_ENVELOPE[:, 1]] != 0.0))
+
+
+def apply_four_wide_walls(
+    board: np.ndarray, vis_board: Optional[np.ndarray] = None
+) -> None:
+    """Set the 4-wide side columns filled up to `FOUR_WIDE_WALL_HEIGHT` and empty above,
+    in place."""
+    top = board.shape[0] - FOUR_WIDE_WALL_HEIGHT
+    board[:top, FOUR_WIDE_WALL_COLS] = 0.0
+    board[top:, FOUR_WIDE_WALL_COLS] = 1.0
+    if vis_board is not None:
+        vis_board[:top, FOUR_WIDE_WALL_COLS] = 0
+        vis_board[top:, FOUR_WIDE_WALL_COLS] = PieceType.G.value
 
 
 class PyTetrisEnv(py_environment.PyEnvironment):
@@ -73,6 +91,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         placement_candidates: bool = False,
         garbage_traces: Optional[list] = None,
         garbage_trace_cap: int = 10,
+        four_wide: bool = False,
     ) -> None:
         self._attack_reward = 1.0
         self._b2b_coef = 2.0
@@ -117,6 +136,7 @@ class PyTetrisEnv(py_environment.PyEnvironment):
         self._auto_push_garbage = auto_push_garbage
         self._auto_fill_queue = auto_fill_queue
         self._use_shaping = use_shaping
+        self._four_wide = four_wide
 
         self._seed = seed
 
@@ -125,6 +145,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         self._board = np.zeros((40, 10), dtype=np.float32)
         self._vis_board = np.zeros((40, 10), dtype=np.int32)
+        if self._four_wide:
+            apply_four_wide_walls(self._board, self._vis_board)
 
         self._rotation_system = RotationSystem()
         self._key_sequence_finder = CKeySequenceFinder(
@@ -269,6 +291,8 @@ class PyTetrisEnv(py_environment.PyEnvironment):
 
         self._board[:] = 0.0
         self._vis_board[:] = 0
+        if self._four_wide:
+            apply_four_wide_walls(self._board, self._vis_board)
 
         self._scorer.reset()
 
@@ -348,6 +372,11 @@ class PyTetrisEnv(py_environment.PyEnvironment):
                 if not pushed:
                     break
                 garbage_pushed = True
+
+        # Re-level the 4-wide walls after garbage raised them and clears lowered them, so the
+        # stats and the death check below only ever see them at their one legal height.
+        if self._four_wide:
+            apply_four_wide_walls(board, vis_board)
 
         # Get board stats and compute supplementary rewards AFTER garbage
         height_val, holes_val, skyline_val, bumpy_val = self._board_stats(board)
@@ -772,7 +801,12 @@ class PyTetrisEnv(py_environment.PyEnvironment):
             if num_garbage_rows <= 0:
                 return
 
-        empty_column = self._random.randint(0, 9)
+        if self._four_wide:
+            # A gap under a wall column is refilled by the re-level, completing the row so
+            # the next lock clears it for free.
+            empty_column = self._random.randint(3, 6)
+        else:
+            empty_column = self._random.randint(0, 9)
 
         self._garbage_spawned_rows += num_garbage_rows
         self._garbage_spawned_events += 1

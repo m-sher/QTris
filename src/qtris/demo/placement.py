@@ -104,6 +104,7 @@ def main(args):
         garbage_traces = pools[tier]
         print(f"Trace garbage: tier {tier} ({len(garbage_traces)} traces)", flush=True)
 
+    four_wide = getattr(args, "four_wide", False)
     py_env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -117,6 +118,7 @@ def main(args):
         idx=0,
         num_row_tiers=num_row_tiers,
         garbage_traces=garbage_traces,
+        four_wide=four_wide,
     )
     env = TFPyEnvironment(py_env)
     searcher = CB2BSearch()
@@ -140,6 +142,7 @@ def main(args):
                 w_death=1.0,
                 w_b2b=0.02,
                 q_norm=True,
+                four_wide=four_wide,
             ),
         )
         if getattr(args, "num_simulations", 0) > 0
@@ -237,7 +240,9 @@ def main(args):
                 queue=queue,
                 b2b=int(py_env._scorer._b2b),
                 combo=int(py_env._scorer._combo),
-                total_garbage=int(py_env._get_total_garbage()),
+                # The beam death-prunes on tallest column plus pending rows, and the 4-wide
+                # walls sit one row under that line, so any pending count prunes everything.
+                total_garbage=0 if four_wide else int(py_env._get_total_garbage()),
                 garbage_push_delay=py_env._garbage_push_delay,
                 search_depth=search_depth,
                 beam_width=beam_width,

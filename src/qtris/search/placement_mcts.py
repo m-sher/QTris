@@ -36,6 +36,7 @@ class MCTSConfig:
     )
     w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
+    four_wide: bool = False  # hold the 4-wide side walls level on every in-tree board
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -123,6 +124,7 @@ class PlacementMCTS:
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
+            four_wide=self.cfg.four_wide,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -214,6 +216,7 @@ class PlacementMCTS:
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
+            four_wide=self.cfg.four_wide,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

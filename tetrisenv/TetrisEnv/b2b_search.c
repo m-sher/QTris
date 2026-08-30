@@ -28,6 +28,11 @@
 #define NET_ROWS 24
 #define SPIN_STATES 2
 
+// 4-wide: columns 0-2 and 7-9 held filled to the tallest height that never tops out.
+// PyTetrisEnv mirrors both constants as FOUR_WIDE_WALL_COLS / FOUR_WIDE_WALL_HEIGHT.
+#define FOUR_WIDE_WALL_MASK 0x0387u
+#define FOUR_WIDE_WALL_HEIGHT (DEATH_HEIGHT_CAP - 1)
+
 // Keys (same as pathfinder.c / Moves.py)
 #define KEY_START 0
 #define KEY_HOLD 1
@@ -2578,6 +2583,7 @@ typedef struct {
     int auto_push_garbage, auto_fill_queue;
     float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
     int q_norm;                  // rank on per-tree min-max normalised Q instead of raw units
+    int four_wide;               // hold cols 0-2 / 7-9 at FOUR_WIDE_WALL_HEIGHT every step
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -2677,6 +2683,14 @@ static int mcts_count_holes(const uint16_t* board, int bh) {
     return holes;
 }
 
+// --- 4-wide walls: filled up to FOUR_WIDE_WALL_HEIGHT, empty above ---
+static inline void four_wide_normalize(uint16_t* board, int bh) {
+    int top = bh - FOUR_WIDE_WALL_HEIGHT;
+    if (top < 0) top = 0;
+    for (int r = 0; r < top; r++) board[r] &= (uint16_t)~FOUR_WIDE_WALL_MASK;
+    for (int r = top; r < bh; r++) board[r] |= (uint16_t)FOUR_WIDE_WALL_MASK;
+}
+
 // --- one placement step (mirror placement_step / the b2b game-loop body); returns raw attack ---
 static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal) {
     int is_hold = d[0], rot = d[1], norm_col = d[2], landing_row = d[3], spin = d[4];
@@ -2707,6 +2721,10 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     // _add_to_garbage_queue is a no-op in sims (garbage_chance=0).
     if (cfg->auto_push_garbage && cfg->garbage_push_delay == 0)
         garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt);
+
+    // Same position as the env's re-level: after garbage, before the top-out check, and
+    // before the board is stored and enumerated.
+    if (cfg->four_wide) four_wide_normalize(s->board, cfg->board_height);
 
     bool garbage_top_out = board_topped_out(s->board, cfg->board_height);
     bool exceeded_holes = false;
@@ -2948,7 +2966,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss, float w_b2b, int q_norm) {
+                  int leaves_per_round, float vloss, float w_b2b, int q_norm,
+                  int four_wide) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -2976,6 +2995,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
     e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
     e->cfg.q_norm = q_norm;
+    e->cfg.four_wide = four_wide;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -3151,8 +3171,10 @@ void mcts_destroy(void* h) {
 // Capacity handshake for Python CMCTS (must match MCTS_CANDIDATE_CAPACITY).
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
+// Height handshake: the walls the search levels must be the ones the env builds.
+int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 18; }
+int mcts_create_arity(void) { return 19; }
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.

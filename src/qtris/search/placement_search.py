@@ -14,6 +14,7 @@ import tensorflow as tf
 
 from TetrisEnv.Moves import Keys
 from TetrisEnv.Pieces import PieceType
+from TetrisEnv.PyTetrisEnv import apply_four_wide_walls
 from qtris.data.placement_features import (
     MCTS_CANDIDATE_CAPACITY,
     build_placement_inference,
@@ -145,6 +146,8 @@ def placement_step(env, searcher, desc):
             board, vis, pushed = env._push_garbage_to_board(board, vis)
             if not pushed:
                 break
+    if env._four_wide:
+        apply_four_wide_walls(board)
 
     height_val, holes_val, skyline_val, bumpy_val = env._board_stats(board)
     attack_reward = env._attack_reward * attack

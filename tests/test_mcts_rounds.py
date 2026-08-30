@@ -93,7 +93,7 @@ def _root_counts(q_norm, seed, leaf_values):
 
 
 def test_num_simulations_is_a_count():
-    """Root visits sum to num_simulations exactly: a collision no longer ends the round."""
+    """Root visits sum to num_simulations exactly, even when descents collide."""
     for seed in (7, 11):
         counts = _root_counts(False, seed, leaf_values=0.0)
         assert counts.sum() == SIMS, counts.sum()
