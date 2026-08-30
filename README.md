@@ -54,7 +54,7 @@ uv run demo --mode 1v1 --checkpoint checkpoints/placement_az --opponent checkpoi
 ```
 
 Run any command with `--help` for the full flag surface (MCTS knobs, garbage schedule,
-search depth/beam, etc.).
+garbage traces, etc.).
 
 ## Environment
 

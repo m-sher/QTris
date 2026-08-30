@@ -318,8 +318,8 @@ def test_the_flag_reaches_the_search_through_placement_mcts():
     assert not np.array_equal(counts[0], counts[1])
 
 
-def test_the_cli_refuses_the_paths_the_beam_would_pick():
-    """Both demos are stubbed in sys.modules so a missing guard fails on the absent
+def test_the_cli_refuses_four_wide_outside_the_single_player_demo():
+    """The 1v1 demo is stubbed in sys.modules so a missing guard fails on the absent
     SystemExit instead of launching the real thing."""
     import sys
     import types
@@ -327,14 +327,21 @@ def test_the_cli_refuses_the_paths_the_beam_would_pick():
     from qtris.cli.demo import main
 
     stub = types.SimpleNamespace(main=lambda args: None)
-    base = ["demo", "--checkpoint", "ckpt", "--four-wide"]
-    for argv in (base + ["--search"], base + ["--mode", "1v1", "--opponent", "opp"]):
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(sys, "argv", argv)
-            mp.setitem(sys.modules, "qtris.demo.placement", stub)
-            mp.setitem(sys.modules, "qtris.demo.placement_1v1", stub)
-            with pytest.raises(SystemExit):
-                main()
+    argv = [
+        "demo",
+        "--checkpoint",
+        "ckpt",
+        "--four-wide",
+        "--mode",
+        "1v1",
+        "--opponent",
+        "opp",
+    ]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "argv", argv)
+        mp.setitem(sys.modules, "qtris.demo.placement_1v1", stub)
+        with pytest.raises(SystemExit):
+            main()
 
 
 def test_four_wide_is_off_in_every_search_default():
