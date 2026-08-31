@@ -134,6 +134,7 @@ def main(args):
                 w_b2b=0.02,
                 q_norm=True,
                 four_wide=four_wide,
+                w_residual=0.15 if four_wide else 0.0,
             ),
         )
         if getattr(args, "num_simulations", 0) > 0

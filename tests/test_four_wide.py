@@ -14,7 +14,12 @@ from TetrisEnv.PyTetrisEnv import (
     apply_four_wide_walls,
 )
 from TetrisEnv.CB2BSearch import CB2BSearch
-from qtris.search.cmcts import CANDIDATE_CAPACITY, CMCTS, four_wide_wall_height
+from qtris.search.cmcts import (
+    CANDIDATE_CAPACITY,
+    CMCTS,
+    four_wide_wall_height,
+    residual_match,
+)
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import (
     clone_sim_env,
@@ -349,3 +354,128 @@ def test_four_wide_is_off_in_every_search_default():
 
     assert MCTSConfig().four_wide is False
     assert inspect.signature(CMCTS.__init__).parameters["four_wide"].default is False
+    assert MCTSConfig().w_residual == 0.0
+    assert inspect.signature(CMCTS.__init__).parameters["w_residual"].default == 0.0
+
+
+def _walled_bit_board(mid_nibbles):
+    """(40,) uint16 rows: level walls plus the given middle nibbles (top first) stacked
+    on the floor. Nibble bit 0 is column 3."""
+    rows = np.zeros(40, dtype=np.uint16)
+    rows[40 - FOUR_WIDE_WALL_HEIGHT :] = 0x0387
+    for i, nibble in enumerate(mid_nibbles):
+        rows[40 - len(mid_nibbles) + i] |= nibble << 3
+    return rows
+
+
+def test_residual_matcher_recognizes_a_residual_and_demands_its_support():
+    """4res #1 (col 3 for three rows, col 6 joining, cols 4-5 supported beneath): present
+    support matches, an empty cell in the support row does not."""
+    assert residual_match(_walled_bit_board([0x1, 0x1, 0x9, 0x6])) == 1
+    assert residual_match(_walled_bit_board([0x1, 0x1, 0x9, 0x4])) == 0
+
+
+def test_residual_matcher_uses_the_floor_as_support():
+    """The same residual sitting directly on the floor: its support row falls below the
+    board, and the floor supplies the required filled cells."""
+    assert residual_match(_walled_bit_board([0x1, 0x1, 0x9])) == 1
+
+
+def test_residual_matcher_ignores_rows_below_a_short_template():
+    """4res #5 (three rows) on top of two full middle rows: the window rows past the
+    template's height carry no requirement."""
+    assert residual_match(_walled_bit_board([0x8, 0xE, 0x1, 0xF, 0xF])) == 1
+
+
+def test_residual_matcher_rejects_non_residual_stacks():
+    assert residual_match(_walled_bit_board([])) == 0
+    assert residual_match(_walled_bit_board([0xF])) == 0
+
+
+def test_residual_matcher_reads_an_env_board():
+    """The 2D occupancy path packs like set_root: an O dropped against the left wall of a
+    fresh 4-wide board leaves 4res #14."""
+    env = _make_env(pathfinding=True)
+    env.reset()
+    env._active_piece = env._spawn_piece(PieceType.O)
+    seq = np.full(15, Keys.PAD, dtype=np.int64)
+    seq[:3] = [Keys.START, Keys.DAS_LEFT, Keys.HARD_DROP]
+    env._step(seq)
+
+    assert env._board[-2:, [3, 4]].all()
+    assert residual_match(env._board) == 1
+
+
+def test_residual_header_matches_its_sources():
+    import importlib.util
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "gen_residuals", repo / "scripts" / "gen_residuals.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rendered = module.render(
+        (repo / "residuals-4.md").read_text(encoding="utf-8"),
+        (repo / "residuals-5.md").read_text(encoding="utf-8"),
+    )
+    committed = repo / "tetrisenv" / "TetrisEnv" / "residuals.h"
+    assert rendered == committed.read_text(encoding="utf-8")
+
+
+def _residual_counts(prime, piece, four_wide, w_residual):
+    """Visit counts from a deterministic search: flat priors, zero leaf values, `prime`
+    middle nibbles stacked on the floor, and a five-deep queue of one piece type. One leaf
+    per round, so the counts are decided by the edge rewards alone."""
+    env = _make_env()
+    env.reset()
+    for i, nibble in enumerate(prime):
+        for j in range(4):
+            if nibble & (1 << j):
+                env._board[40 - len(prime) + i, 3 + j] = 1.0
+    env._active_piece = env._spawn_piece(piece)
+    env._hold_piece = piece
+    env._queue = [piece] * 5
+    mcts = PlacementMCTS(
+        _FlatNet(),
+        MCTSConfig(
+            num_simulations=SIMS,
+            dirichlet_eps=0.0,
+            leaves_per_round=1,
+            gamma=1.0,
+            w_attack=0.0,
+            w_death=1.0,
+            w_b2b=0.0,
+            four_wide=four_wide,
+            w_residual=w_residual,
+        ),
+    )
+    res = mcts.search([env], 1.0, 0.0)[0]
+    assert not res["dead"]
+    return np.asarray(res["counts"], dtype=np.float64)
+
+
+def test_the_residual_weight_steers_the_search_only_in_four_wide():
+    """Bottom rows primed so that the clearing placements are exactly the placements
+    leaving a residual (a vertical I in column 3 clears into 5res #37, a flat I clears
+    the row it lands on): the weight must re-rank the visits, and with the four_wide
+    flag off it must change nothing."""
+    prime = [0xC, 0xE]
+
+    on = _residual_counts(prime, PieceType.I, True, 0.05)
+    off = _residual_counts(prime, PieceType.I, True, 0.0)
+    assert not np.array_equal(on, off)
+
+    plain_on = _residual_counts(prime, PieceType.I, False, 0.05)
+    plain_off = _residual_counts(prime, PieceType.I, False, 0.0)
+    assert np.array_equal(plain_on, plain_off)
+
+
+def test_the_residual_weight_ignores_non_clearing_matches():
+    """O pieces on a fresh board: no single placement clears, and the two-piece clear
+    empties the middle, so every residual match this budget reaches is a non-clearing
+    one and the weight must not move the visits."""
+    on = _residual_counts([], PieceType.O, True, 0.05)
+    off = _residual_counts([], PieceType.O, True, 0.0)
+    assert np.array_equal(on, off)

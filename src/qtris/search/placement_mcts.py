@@ -9,8 +9,9 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
 attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
 with `Phi = min(max(0, b2b), 12)`; terminal edges add an unclipped `-w_death` and carry
-`Phi(terminal) = 0`. The leaf bootstrap is the net value directly. PUCT uses Q in raw
-return_scale units. Dirichlet noise + sampling stay in Python.
+`Phi(terminal) = 0`. In four_wide mode a clearing edge that leaves the middle stack
+matching a residual template adds an unclipped `w_residual`. The leaf bootstrap is the net
+value directly. Dirichlet noise + sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ class MCTSConfig:
     w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
     four_wide: bool = False  # hold the 4-wide side walls level on every in-tree board
+    w_residual: float = (
+        0.0  # four_wide: bonus per clearing edge into a residual-matched stack
+    )
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -125,6 +129,7 @@ class PlacementMCTS:
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
             four_wide=self.cfg.four_wide,
+            w_residual=self.cfg.w_residual,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -217,6 +222,7 @@ class PlacementMCTS:
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
             four_wide=self.cfg.four_wide,
+            w_residual=self.cfg.w_residual,
         )
         out = np.zeros(n, dtype=np.float32)
         try:
