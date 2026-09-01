@@ -4,7 +4,9 @@ The whole simulation loop (descend / step / enumerate / backup) runs in C on a c
 bitboard+scalars node, OpenMP-threaded across the N self-play games; only the TF policy/value
 net stays in Python. Per move: build one C tree per game, evaluate the roots in one batched net
 call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one net call ->
-`apply_leaves` until the budget is spent, and read out per-root visit counts.
+`apply_leaves` until the budget is spent, and read out per-root visit counts plus the
+shaping-free root value (leaf values + death edges only, in the same return_scale units
+as Q).
 
 Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
 attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
@@ -94,11 +96,12 @@ class PlacementMCTS:
     def search(self, real_envs, return_scale, temperatures):
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
-        {dead: True} or {dead: False, pi, counts, descriptor, visits, value, board,
-        pieces, bcg, cand_placements, cand_mask}. `descriptor` = (is_hold, rot, norm_col,
-        landing_row, spin); commit the real move via
+        {dead: True} or {dead: False, pi, counts, descriptor, visits, value, v_search,
+        board, pieces, bcg, cand_placements, cand_mask}. `descriptor` = (is_hold, rot,
+        norm_col, landing_row, spin); commit the real move via
         `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
-        counts alongside the normalized `pi`."""
+        counts alongside the normalized `pi`; `v_search` is the post-search shaping-free
+        root value."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -169,7 +172,7 @@ class PlacementMCTS:
                 logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
                 engine.apply_leaves(logits, values)
 
-            pi, counts, desc, dead = engine.result()
+            pi, counts, desc, dead, root_value = engine.result()
         finally:
             engine.destroy()
 
@@ -186,6 +189,7 @@ class PlacementMCTS:
                 "counts": counts[i].copy(),
                 "descriptor": tuple(int(x) for x in desc[i, slot]),
                 "visits": int(counts[i].sum()),
+                "v_search": float(root_value[i]),
                 **obs[i],
             }
             results.append(row)

@@ -85,7 +85,7 @@ def _root_counts(q_norm, seed, leaf_values):
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
                 np.full(nv2, leaf_values, np.float32),
             )
-        _pi, counts, _desc, dead = engine.result()
+        _pi, counts, _desc, dead, _rv = engine.result()
         assert not dead[0]
         return np.array(counts[0], dtype=np.float64)
     finally:

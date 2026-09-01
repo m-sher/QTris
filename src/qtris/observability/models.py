@@ -66,7 +66,8 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero trainer hyperparams.
 
-    TD(lambda) value target built from the outcome z in {-1,0,+1}; w_death=1, gamma=1,
+    n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end, the
+    shaping-free post-search root value n_step later elsewhere; w_death=1, gamma=1,
     return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
     players' trajectories train the value head, the learner's also the policy."""
 
@@ -92,7 +93,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     pool_wr_gate: float = 0.55
     eval_interval: int = 10
     eval_games: int = 32
-    td_lambda: float = 0.9
+    n_step: int = 14
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
@@ -174,8 +175,13 @@ class OneVsOneAZLog(LogPayloadModel):
     # Opponent-pool Elo: pre-formatted "elo/..." tags spliced in by to_payload.
     elo: dict[str, float] = {}
 
-    # corr/Brier of the root value against the realized outcome, per steps-to-end bucket.
+    # corr/Brier of the root value against the realized outcome, per steps-to-end bucket;
+    # grounding uses the net's pre-search value, grounding_search the post-search readout.
     grounding: dict[str, float | None] = {}
+    grounding_search: dict[str, float | None] = {}
+
+    # Fraction of the generation's rows whose value target was raw z (steps_to_end < n_step).
+    raw_z_frac: float = 0.0
 
     # Visualization (wrapped at log time)
     board: np.ndarray
@@ -184,6 +190,12 @@ class OneVsOneAZLog(LogPayloadModel):
         d = super().to_payload()
         d.update(d.pop("elo", {}))
         d.update({f"grounding/{k}": v for k, v in d.pop("grounding", {}).items()})
+        d.update(
+            {
+                f"grounding_search/{k}": v
+                for k, v in d.pop("grounding_search", {}).items()
+            }
+        )
         return d
 
     _image_fields: tuple[str, ...] = ("board",)
@@ -207,6 +219,7 @@ class OneVsOneAZLog(LogPayloadModel):
             "app",
             "app_learner",
             "value_calibration",
+            "raw_z_frac",
         ),
         "gameplay": (
             "avg_b2b",

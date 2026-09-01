@@ -2537,7 +2537,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
 // w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)) minus the child's
 // board-quality penalty, with an unclipped -w_death on terminal edges; the leaf bootstrap is
-// the net value directly. Dirichlet noise + final sampling stay in Python.
+// the net value directly. A parallel shaping-free channel (leaf values + death edges
+// only) feeds the per-tree root value readout. Dirichlet noise + final sampling stay in
+// Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -2592,6 +2594,9 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
+    // Shaping-free value channel: edge_value carries only the death term, Wv accumulates
+    // it with the leaf values, so the root readout is a Q that skips the shaping.
+    float edge_value[MCAP], Wv[MCAP];
     struct MNode* child[MCAP];
 } MNode;
 
@@ -2815,11 +2820,14 @@ static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float 
 static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
+    float gv = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
+        gv = node->edge_value[slot] + cfg->gamma * gv;
         node->N[slot] += 1.0f;
         node->W[slot] += g;
+        node->Wv[slot] += gv;
         node->Q[slot] = node->W[slot] / node->N[slot];
         if (node->Q[slot] < t->qmin) t->qmin = node->Q[slot];
         if (node->Q[slot] > t->qmax) t->qmax = node->Q[slot];
@@ -2922,6 +2930,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
+                    node->edge_value[slot] = -cfg->w_death / (cfg->return_scale + 1e-8f);
                     // Phi(terminal) = 0, so the shaping term is -w_b2b*Phi(parent).
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * attack)
@@ -2932,6 +2941,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     done++;
                     break;
                 }
+                node->edge_value[slot] = 0.0f;
                 // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)), and
                 // the board-quality penalty, both in return_scale units and unclipped.
                 node->edge_reward[slot] =
@@ -3141,18 +3151,25 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
 }
 
 // Read per-tree root visit counts + descriptors. pi/counts are [num_trees*MCAP];
-// root_desc is [num_trees*MCAP*5]; dead[num_trees] (1 if no move).
-void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead) {
+// root_desc is [num_trees*MCAP*5]; dead[num_trees] (1 if no move); root_value[num_trees]
+// is the visit-weighted shaping-free root value (return_scale units).
+void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead,
+                 float* root_value) {
     MEngine* e = (MEngine*)h;
     for (int i = 0; i < e->num_trees; i++) {
         MTree* t = &e->trees[i];
         for (int j = 0; j < MCAP; j++) { pi[(size_t)i * MCAP + j] = 0.0f; counts[(size_t)i * MCAP + j] = 0.0f; }
         for (int j = 0; j < MCAP * 5; j++) root_desc[(size_t)i * MCAP * 5 + j] = -1;
+        root_value[i] = 0.0f;
         if (!t->alive || t->root == NULL) { dead[i] = 1; continue; }
         dead[i] = 0;
         MNode* root = t->root;
-        float total = 0.0f;
-        for (int k = 0; k < root->n_legal; k++) total += root->N[root->legal[k]];
+        float total = 0.0f, wv = 0.0f;
+        for (int k = 0; k < root->n_legal; k++) {
+            total += root->N[root->legal[k]];
+            wv += root->Wv[root->legal[k]];
+        }
+        if (total > 0.0f) root_value[i] = wv / total;
         for (int k = 0; k < root->n_legal; k++) {
             int slot = root->legal[k];
             counts[(size_t)i * MCAP + slot] = root->N[slot];
@@ -3176,6 +3193,7 @@ int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
 int mcts_create_arity(void) { return 20; }
+int mcts_result_arity(void) { return 6; }
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.

@@ -86,7 +86,7 @@ def _run(env, sims, w_height, w_bumpiness):
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
                 np.zeros(nv2, np.float32),
             )
-        _pi, counts, desc, dead = engine.result()
+        _pi, counts, desc, dead, _rv = engine.result()
         assert not dead[0]
         return np.array(counts[0], np.float64), np.array(desc[0], np.int64)
     finally:

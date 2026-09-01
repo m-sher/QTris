@@ -61,11 +61,11 @@ def main() -> None:
         help="1v1 only: games per win_rate_vs_ref eval.",
     )
     parser.add_argument(
-        "--td-lambda",
-        type=float,
-        default=0.9,
-        help="1v1 only: TD(lambda) for the value target (1=raw outcome z on "
-        "every position; lower bootstraps toward near-term root value).",
+        "--n-step",
+        type=int,
+        default=14,
+        help="1v1 only: n-step value target horizon (raw outcome z within n of the "
+        "game end, the post-search root value n steps later elsewhere).",
     )
     parser.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
@@ -252,8 +252,8 @@ def main() -> None:
         if args.gamma is not None:
             parser.error(
                 "1v1 does not accept --gamma: its reward is terminal-only "
-                "(z in {-1,0,1}) and the TD(lambda) target is undiscounted. Use "
-                "--td-lambda to trade outcome grounding against bootstrap."
+                "(z in {-1,0,1}) and the n-step target is undiscounted. Use "
+                "--n-step to trade outcome grounding against bootstrap."
             )
         from qtris.training._1v1_placement_az import main as run
     else:
