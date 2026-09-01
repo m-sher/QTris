@@ -5,7 +5,8 @@ frozen past snapshots, via decoupled per-player MCTS: each player searches its o
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
 `PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
-its game's end gets the realized outcome z in {-1, 0, +1}, every earlier position gets the
+its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
+value when the move cap ended the game unresolved; every earlier position gets the
 shaping-free post-search root value of the position n_step later. The search runs at
 w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
 only in-search terminal.
@@ -132,12 +133,13 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _n_step(values, z, n):
-    """n-step value targets for one trajectory (terminal-only reward, gamma=1): a position
-    within n of the end gets the outcome z, every earlier position bootstraps on the value
-    of the position n steps later."""
+def _n_step(values, z, n, truncated):
+    """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
+    position bootstraps on the value n steps later, and the last n positions take the
+    outcome z, or the final position's value when the game was cut off unresolved."""
     length = len(values)
-    return [values[t + n] if t + n <= length - 1 else z for t in range(length)]
+    tail = values[length - 1] if truncated else z
+    return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
 
 
 def _mean_or_none(xs):
@@ -170,7 +172,9 @@ def _episode(pend, p1_died, p2_died, n_step):
     """Stamp each player's value targets on its pending positions and return both players'
     rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
     p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
-    collected. z and steps_to_end are carried for diagnostics and are not training inputs."""
+    collected. A game with no death is a draw for rating and diagnostics but a truncation
+    for the value target. z and steps_to_end are carried for diagnostics and are not
+    training inputs."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -180,13 +184,14 @@ def _episode(pend, p1_died, p2_died, n_step):
         z1, z2 = 1.0, -1.0
     else:
         z1, z2 = 0.0, 0.0
+    truncated = not (p1_died or p2_died)
     # policy_mask 1.0: learner rows, train policy and value. 0.0: opponent rows, value only.
     rows = []
     for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
         n = len(positions)
         if n == 0:
             continue
-        targets = _n_step([p["v_search"] for p in positions], z, n_step)
+        targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
         rows += [
             (p, t, mask, z, n - 1 - i)
             for i, (p, t) in enumerate(zip(positions, targets))

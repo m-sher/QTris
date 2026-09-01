@@ -66,8 +66,9 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero trainer hyperparams.
 
-    n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end, the
-    shaping-free post-search root value n_step later elsewhere; w_death=1, gamma=1,
+    n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end (the
+    final search value instead when the move cap ended it), the shaping-free post-search
+    root value n_step later elsewhere; w_death=1, gamma=1,
     return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
     players' trajectories train the value head, the learner's also the policy."""
 
