@@ -219,9 +219,7 @@ def main():
         dirichlet_eps=0.0,
         leaves_per_round=args.leaves,
         gamma=1.0,
-        w_attack=0.00,
         w_death=1.0,
-        w_b2b=0.00,
     )
     mcts = PlacementMCTS(net, cfg)
     searcher = CB2BSearch()

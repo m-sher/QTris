@@ -80,6 +80,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     temp_moves: int
     w_attack: float = 0.0
     w_b2b: float = 0.0
+    w_height: float = 0.0
+    w_bumpiness: float = 0.0
     mini_batch_size: int
     num_epochs: int
     value_coef: float

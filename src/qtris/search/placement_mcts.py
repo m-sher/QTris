@@ -8,9 +8,11 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 
 Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
 attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
-with `Phi = min(max(0, b2b), 12)`; terminal edges add an unclipped `-w_death` and carry
-`Phi(terminal) = 0`. The leaf bootstrap is the net value directly. PUCT uses Q in raw
-return_scale units. Dirichlet noise + sampling stay in Python.
+with `Phi = min(max(0, b2b), 12)`, minus the child board's quality penalty
+`w_height * min(1, max_height/24) + w_bumpiness * min(1, bumpiness/48)`; terminal edges add an
+unclipped `-w_death`, carry `Phi(terminal) = 0` and pay no board penalty. The leaf bootstrap
+is the net value directly. PUCT uses Q in raw return_scale units. Dirichlet noise + sampling
+stay in Python.
 """
 
 from dataclasses import dataclass
@@ -30,11 +32,13 @@ class MCTSConfig:
     dirichlet_eps: float = 0.25
     gamma: float = 0.99
     temp_moves: int = 12  # moves played at temperature 1 before switching to greedy
-    w_attack: float = 1.0  # per-edge reward weight on attack
+    w_attack: float = 0.05  # per-edge reward weight on attack
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
-    w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
+    w_b2b: float = 0.05  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
+    w_height: float = 0.05  # per-edge penalty on min(1, max_height/24), 0=off
+    w_bumpiness: float = 0.05  # per-edge penalty on min(1, bumpiness/48), 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
@@ -123,6 +127,8 @@ class PlacementMCTS:
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
+            w_height=self.cfg.w_height,
+            w_bumpiness=self.cfg.w_bumpiness,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -214,6 +220,8 @@ class PlacementMCTS:
             vloss=self.cfg.vloss,
             w_b2b=self.cfg.w_b2b,
             q_norm=self.cfg.q_norm,
+            w_height=self.cfg.w_height,
+            w_bumpiness=self.cfg.w_bumpiness,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

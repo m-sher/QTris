@@ -131,24 +131,10 @@ def main() -> None:
         "--learning-rate", type=float, default=3e-4, help="Adam learning rate."
     )
     parser.add_argument(
-        "--w-attack",
-        type=float,
-        default=None,
-        help="per-edge search reward weight on attack (also scales the realized return). "
-        "Default 1.0 for single-player, 0.0 for 1v1.",
-    )
-    parser.add_argument(
         "--w-death",
         type=float,
         default=100.0,
         help="terminal-edge death penalty (raw attack units; also the realized death reward).",
-    )
-    parser.add_argument(
-        "--w-b2b",
-        type=float,
-        default=0.0,
-        help="1v1 only: potential-based b2b-build search shaping "
-        "(Phi=min(max(0,b2b),12); 0=off).",
     )
     parser.add_argument(
         "--q-norm",

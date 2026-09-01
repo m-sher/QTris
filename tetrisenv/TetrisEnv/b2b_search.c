@@ -2535,9 +2535,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)), with an unclipped
-// -w_death on terminal edges; the leaf bootstrap is the net value directly. Dirichlet noise
-// + final sampling stay in Python.
+// w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)) minus the child's
+// board-quality penalty, with an unclipped -w_death on terminal edges; the leaf bootstrap is
+// the net value directly. Dirichlet noise + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -2577,6 +2577,7 @@ typedef struct {
     int board_height, queue_size, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
     float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
+    float w_height, w_bumpiness;  // per-edge board-quality penalty on the child board
     int q_norm;                  // rank on per-tree min-max normalised Q instead of raw units
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
@@ -2851,6 +2852,24 @@ static inline float b2b_phi(int b2b) {
     return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
 }
 
+// Per-edge board-quality penalty: max column height and bumpiness of the child board, each
+// as a fraction of its maximum and capped at 1.
+#define MCTS_HEIGHT_MAX 24.0f
+#define MCTS_BUMPINESS_MAX 48.0f
+static float mcts_board_penalty(const MConfig* cfg, const uint16_t* board) {
+    if (cfg->w_height == 0.0f && cfg->w_bumpiness == 0.0f) return 0.0f;
+    int8_t h[BOARD_COLS];
+    compute_col_heights_full(board, cfg->board_height, h);
+    int max_h = 0, bump = 0;
+    for (int c = 0; c < BOARD_COLS; c++) {
+        if (h[c] > max_h) max_h = h[c];
+        if (c > 0) bump += abs(h[c] - h[c - 1]);
+    }
+    float hr = (float)max_h / MCTS_HEIGHT_MAX; if (hr > 1.0f) hr = 1.0f;
+    float br = (float)bump / MCTS_BUMPINESS_MAX; if (br > 1.0f) br = 1.0f;
+    return cfg->w_height * hr + cfg->w_bumpiness * br;
+}
+
 static float mcts_scale_reward(const MConfig* cfg, float reward) {
     float r = reward / (cfg->return_scale + 1e-8f);
     if (r > MCLIP) r = MCLIP; else if (r < -MCLIP) r = -MCLIP;
@@ -2913,11 +2932,13 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     done++;
                     break;
                 }
-                // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)).
+                // Potential-based b2b shaping: w_b2b*(gamma*Phi(child) - Phi(parent)), and
+                // the board-quality penalty, both in return_scale units and unclipped.
                 node->edge_reward[slot] =
                     mcts_scale_reward(cfg, cfg->w_attack * attack)
-                    + cfg->w_b2b
-                          * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                    + (cfg->w_b2b
+                           * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                       - mcts_board_penalty(cfg, leaf->st.board))
                           / (cfg->return_scale + 1e-8f);
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
@@ -2948,7 +2969,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   int max_holes, int garbage_push_delay, int auto_push_garbage, int auto_fill_queue,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
-                  int leaves_per_round, float vloss, float w_b2b, int q_norm) {
+                  int leaves_per_round, float vloss, float w_b2b, int q_norm,
+                  float w_height, float w_bumpiness) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -2976,6 +2998,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
     e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
     e->cfg.q_norm = q_norm;
+    e->cfg.w_height = w_height; e->cfg.w_bumpiness = w_bumpiness;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -3152,7 +3175,7 @@ void mcts_destroy(void* h) {
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 18; }
+int mcts_create_arity(void) { return 20; }
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.

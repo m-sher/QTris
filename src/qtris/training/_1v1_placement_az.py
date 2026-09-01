@@ -8,7 +8,8 @@ search horizon), the chosen placements are committed, and garbage is exchanged a
 game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recovers raw z
 on every position).
 rate), while the terminal row stays exactly z. The search runs at w_death=1, gamma=1,
-return_scale=1, w_attack=0, w_b2b=0; own-death = -1 is the only in-search terminal.
+return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the only in-search
+terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z; only the
 learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
@@ -40,12 +41,6 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
-
-
-def _resolve(args, name, default):
-    """This trainer's default for a shared CLI flag whose argparse default is None."""
-    v = getattr(args, name, None)
-    return default if v is None else v
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -379,9 +374,7 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=1.0,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
-        w_b2b=_resolve(args, "w_b2b", 0.0),
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
@@ -463,6 +456,8 @@ def main(args):
         temp_moves=cfg.temp_moves,
         w_attack=cfg.w_attack,
         w_b2b=cfg.w_b2b,
+        w_height=cfg.w_height,
+        w_bumpiness=cfg.w_bumpiness,
         q_norm=cfg.q_norm,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
