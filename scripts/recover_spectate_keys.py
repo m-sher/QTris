@@ -5,8 +5,11 @@ Uses the same C pathfinder MCTS / b2b_search enumerate with (`find_unique_placem
 combo, and piece queue. Garbage that landed after the lock is allowed as extra
 bottom rows (same geometry as `_push_garbage_to_board`).
 
-Writes a sibling `*.recovered.json` (same `{"frames": [...]}` schema, recovered
-`key_sequence` / `converted_keys` on every matched frame). Does not overwrite
+A spectate replay is one session of many rounds, so transitions that cross a round
+boundary are skipped.
+
+Writes a sibling `*.recovered.json` (same `{"mode": ..., "frames": [...]}` schema,
+recovered `key_sequence` / `converted_keys` on every matched frame). Does not overwrite
 the input.
 
     uv run python scripts/recover_spectate_keys.py [PATH]
@@ -253,6 +256,10 @@ def replay_keys_ok(env, frame, keys, nxt):
     return True, ""
 
 
+def _same_round(a, b):
+    return (a.get("game"), a.get("round")) == (b.get("game"), b.get("round"))
+
+
 def recover_replay(frames, env=None, searcher=None):
     if env is None:
         env = _make_env()
@@ -261,6 +268,19 @@ def recover_replay(frames, env=None, searcher=None):
     finder = env._key_sequence_finder
     rows = []
     for i in range(len(frames) - 1):
+        if not _same_round(frames[i], frames[i + 1]):
+            rows.append(
+                {
+                    "i": i,
+                    "n_hits": 0,
+                    "hits": [],
+                    "chosen": None,
+                    "exec_ok": None,
+                    "exec_err": "",
+                    "boundary": True,
+                }
+            )
+            continue
         hits = recover_frame(env, finder, searcher, frames[i], frames[i + 1])
         # Dedup by placement identity.
         uniq = {}
@@ -298,7 +318,7 @@ def default_out_path(src):
     return f"{root}.recovered{ext or '.json'}"
 
 
-def write_recovered_json(src_frames, rows, dest):
+def write_recovered_json(src_frames, rows, dest, mode=None):
     """Copy frames, replace keys on recovered transitions, write a new JSON."""
     out = []
     by_i = {r["i"]: r for r in rows}
@@ -312,13 +332,16 @@ def write_recovered_json(src_frames, rows, dest):
         out.append(frame)
     os.makedirs(os.path.dirname(os.path.abspath(dest)) or ".", exist_ok=True)
     with open(dest, "w") as f:
-        json.dump({"frames": out}, f)
+        json.dump({"mode": mode, "frames": out}, f)
     return dest
 
 
 def _print_row(row, verbose):
     i = row["i"]
     n = row["n_hits"]
+    if row.get("boundary"):
+        print(f"  [{i:3d}] ROUND BOUNDARY")
+        return
     if n == 0:
         print(f"  [{i:3d}] MISS")
         return
@@ -363,7 +386,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     with open(args.path) as f:
-        frames = json.load(f)["frames"]
+        data = json.load(f)
+    mode, frames = data.get("mode"), data["frames"]
     if args.limit is not None:
         frames = frames[: args.limit + 1]
     print(f"{os.path.basename(args.path)}: {len(frames)} frames")
@@ -373,8 +397,10 @@ def main(argv=None):
         _print_row(row, args.verbose)
 
     dest = args.out or default_out_path(args.path)
-    write_recovered_json(frames, rows, dest)
+    write_recovered_json(frames, rows, dest, mode)
 
+    bounds = sum(1 for r in rows if r.get("boundary"))
+    rows = [r for r in rows if not r.get("boundary")]
     n = len(rows)
     miss = sum(1 for r in rows if r["n_hits"] == 0)
     uniq = sum(1 for r in rows if r["n_hits"] == 1)
@@ -388,7 +414,7 @@ def main(argv=None):
     print()
     print(
         f"transitions={n} unique={uniq} ambiguous={amb} miss={miss} "
-        f"exec_ok={exec_ok} exec_fail={exec_fail}"
+        f"exec_ok={exec_ok} exec_fail={exec_fail} round_boundaries={bounds}"
     )
     if pieces:
         print(

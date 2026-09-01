@@ -1,11 +1,12 @@
 """Scrubbable pygame viewer for the TETR.IO bot replays in tetrio/replays/.
 
-Each replay is `{"frames": [...]}` where a frame holds the 24x10 occupancy board
+Each replay is `{"mode": ..., "frames": [...]}` where a frame holds the 24x10 board
 (before the move), the piece stream `[active, hold, *queue]`, the b2b/combo/garbage
 stats, the incoming garbage snapshot, and the move's converted keys. Attack is
 reconstructed by replaying each lock through the env scorer; the panel shows
-this-piece attack and running APP (attack per used piece). Boards are
-occupancy-only, so the stack renders monochrome.
+this-piece attack and running APP (attack per used piece). A spectate replay is one
+session of many rounds, tagged per frame, so every running stat restarts at each round
+boundary. Boards are occupancy-only, so the stack renders monochrome.
 
 Run: `uv run python scripts/view_replay.py [PATH] [--all] [--fps N]`
 PATH defaults to the most recent replay; --all also shows discarded (unused) frames.
@@ -59,17 +60,18 @@ def latest_replay():
     return files[-1]
 
 
-def load_frames(path, show_all=False):
-    """Load a replay's frames, dropping discarded (used==False) frames unless show_all."""
+def load_replay(path, show_all=False):
+    """Load a replay's mode and frames, dropping discarded frames unless show_all."""
     with open(path) as f:
-        frames = json.load(f)["frames"]
+        data = json.load(f)
+    frames = data["frames"]
     if not show_all:
         kept = [fr for fr in frames if fr.get("used") is not False]
         if kept:
             frames = kept
     if not frames:
         raise SystemExit(f"{path} has no frames to show")
-    return frames
+    return data.get("mode"), frames
 
 
 def _replay_env():
@@ -128,11 +130,27 @@ def reconstruct_attack(env, frame):
     return float(attack)
 
 
-def apply_running_app(frames, attacks):
-    """Write per-frame attack plus running APP. Only used=True placements count."""
+def apply_running_stats(frames, attacks):
+    """Write per-frame attack plus the running stats. Only used=True placements count.
+
+    Every running stat restarts at a round boundary; untagged replays are one round.
+    """
+    sizes = {}
+    for frame in frames:
+        key = (frame.get("game"), frame.get("round"))
+        sizes[key] = sizes.get(key, 0) + 1
     total = 0.0
     n = 0
+    pos = 0
+    cur_round = None
     for frame, attack in zip(frames, attacks):
+        key = (frame.get("game"), frame.get("round"))
+        if key != cur_round:
+            cur_round = key
+            total, n, pos = 0.0, 0, 0
+        pos += 1
+        frame["round_pos"] = pos
+        frame["round_frames"] = sizes[key]
         attack = float(attack)
         frame["attack"] = attack
         if frame.get("used", True) is True:
@@ -147,7 +165,7 @@ def annotate_attacks(frames, env=None):
     """Attach reconstructed attack / running APP onto each frame."""
     if env is None:
         env = _replay_env()
-    apply_running_app(frames, [reconstruct_attack(env, frame) for frame in frames])
+    apply_running_stats(frames, [reconstruct_attack(env, frame) for frame in frames])
     return frames
 
 
@@ -202,7 +220,14 @@ def draw_panel(screen, font, small, frame, ind, total):
     incoming = len(frame.get("garbage_queue", []))
 
     screen.blit(font.render(f"Frame {ind + 1}/{total}", True, WHITE), (x, y))
-    y += 34
+    y += 26
+    if frame.get("round") is not None:
+        label = (
+            f"Game {frame['game']}  Round {frame['round']}  "
+            f"{frame['round_pos']}/{frame['round_frames']}"
+        )
+        screen.blit(small.render(label, True, (180, 200, 220)), (x, y))
+    y += 26
 
     screen.blit(small.render("Active", True, WHITE), (x, y))
     draw_piece(screen, small, x + 70, y - 4, 28, active)
@@ -249,12 +274,18 @@ def main(cli_args=None):
     args = ap.parse_args() if cli_args is None else cli_args
 
     path = args.path or latest_replay()
-    frames = annotate_attacks(load_frames(path, show_all=args.all))
+    mode, frames = load_replay(path, show_all=args.all)
+    if mode == "spectate" and all(
+        len(f.get("key_sequence") or []) <= 1 for f in frames
+    ):
+        print("only hardDrop recorded; run scripts/recover_spectate_keys.py for attack")
+    frames = annotate_attacks(frames)
     total = len(frames)
 
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
-    pygame.display.set_caption(f"Replay: {os.path.basename(path)}")
+    title = os.path.basename(path)
+    pygame.display.set_caption(f"Replay: {title}" + (f" [{mode}]" if mode else ""))
     font = pygame.font.Font(None, 30)
     small = pygame.font.Font(None, 24)
 
