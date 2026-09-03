@@ -13,5 +13,5 @@ build/
 *.so
 tetrio/
 garbage_traces/
-notes.md
 data/
+/docs/
