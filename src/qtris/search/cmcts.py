@@ -45,6 +45,9 @@ def _load_lib():
         + [ctypes.c_int, ctypes.c_float]  # leaves_per_round, vloss
         + [ctypes.c_float]  # w_b2b
         + [ctypes.c_int]  # q_norm
+        + [ctypes.c_float] * 2  # w_height, w_bumpiness
+        + [ctypes.c_float]  # fpu
+        + [ctypes.c_float] * 2  # w_holes, w_plain
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
@@ -62,6 +65,18 @@ def _load_lib():
         raise RuntimeError(
             f"mcts_create arity mismatch: .so has {arity}, wrapper passes "
             f"{len(lib.mcts_create.argtypes)}. Rebuild tetrisenv."
+        )
+    try:
+        lib.mcts_result_arity.argtypes = []
+        lib.mcts_result_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_result_arity); rebuild tetrisenv"
+        ) from None
+    if int(lib.mcts_result_arity()) != 6:
+        raise RuntimeError(
+            f"mcts_result arity mismatch: .so has {int(lib.mcts_result_arity())}, "
+            "wrapper passes 6. Rebuild tetrisenv."
         )
     lib.mcts_set_root.argtypes = [
         ctypes.c_void_p,
@@ -90,7 +105,7 @@ def _load_lib():
     lib.mcts_apply_roots.restype = None
     lib.mcts_apply_leaves.argtypes = [ctypes.c_void_p, _F32, _F32]
     lib.mcts_apply_leaves.restype = None
-    lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32]
+    lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32, _F32]
     lib.mcts_result.restype = None
     lib.mcts_destroy.argtypes = [ctypes.c_void_p]
     lib.mcts_destroy.restype = None
@@ -122,6 +137,11 @@ class CMCTS:
         vloss=1.0,
         w_b2b=0.0,
         q_norm=True,
+        w_height=0.0,
+        w_bumpiness=0.0,
+        fpu=-1.0,
+        w_holes=0.0,
+        w_plain=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -161,6 +181,11 @@ class CMCTS:
             vloss,
             w_b2b,
             int(bool(q_norm)),
+            w_height,
+            w_bumpiness,
+            fpu,
+            w_holes,
+            w_plain,
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
@@ -175,6 +200,7 @@ class CMCTS:
         self._counts = np.zeros(num_trees * self.cap, np.float32)
         self._desc = np.zeros(num_trees * self.cap * 5, np.int32)
         self._dead = np.zeros(num_trees, np.int32)
+        self._root_value = np.zeros(num_trees, np.float32)
 
     def set_root(self, tree, env):
         occ = (env._board != 0).astype(np.uint16)
@@ -253,12 +279,15 @@ class CMCTS:
         )
 
     def result(self):
-        self.lib.mcts_result(self.h, self._pi, self._counts, self._desc, self._dead)
+        self.lib.mcts_result(
+            self.h, self._pi, self._counts, self._desc, self._dead, self._root_value
+        )
         pi = self._pi.reshape(self.n, self.cap).copy()
         counts = self._counts.reshape(self.n, self.cap).copy()
         desc = self._desc.reshape(self.n, self.cap, 5).copy()
         dead = self._dead.astype(bool).copy()
-        return pi, counts, desc, dead
+        root_value = self._root_value.copy()
+        return pi, counts, desc, dead, root_value
 
     def destroy(self):
         if self.h:

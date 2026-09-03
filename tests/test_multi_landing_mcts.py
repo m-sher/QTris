@@ -101,7 +101,7 @@ def test_mcts_packs_multiple_landings_and_handshake():
         assert nv == 1
         n_legal = int(req[4][0].sum())
         assert n_legal > 68
-        pi, counts, desc, dead = engine.result()
+        pi, counts, desc, dead, _rv = engine.result()
         landings = {int(desc[0, j, 3]) for j in range(MCTS_CAP) if desc[0, j, 0] >= 0}
         assert len(landings) > 1
         # resolve sequence for a no-hold mid-height landing when present
