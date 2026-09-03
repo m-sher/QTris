@@ -84,6 +84,9 @@ class OneVsOnePlacementAZConfig(BaseModel):
     w_b2b: float = 0.0
     w_height: float = 0.0
     w_bumpiness: float = 0.0
+    fpu: float = 0.0
+    w_holes: float = 0.0
+    w_plain: float = 0.0
     mini_batch_size: int
     num_epochs: int
     value_coef: float

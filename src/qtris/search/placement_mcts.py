@@ -8,13 +8,17 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 shaping-free root value (leaf values + death edges only, in the same return_scale units
 as Q).
 
-Reward is per-edge `w_attack * attack` (surge + combo already fold into `compute_attack`'s
-attack), clipped, plus the b2b potential difference `w_b2b * (gamma*Phi(child) - Phi(parent))`
-with `Phi = min(max(0, b2b), 12)`, minus the child board's quality penalty
-`w_height * min(1, max_height/24) + w_bumpiness * min(1, bumpiness/48)`; terminal edges add an
-unclipped `-w_death`, carry `Phi(terminal) = 0` and pay no board penalty. The leaf bootstrap
-is the net value directly. PUCT uses Q in raw return_scale units. Dirichlet noise + sampling
-stay in Python.
+Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole attack
+and only the rows a non-difficult clear cancels from the own garbage queue (combo and the
+b2b-break surge are already inside `compute_attack`'s attack), minus `w_plain` for a
+non-difficult clear made with nothing queued, plus two potential differences:
+`w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`, and
+`pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +
+w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`; terminal edges add
+`-w_death` and read both potentials as 0. The leaf bootstrap is the net value directly.
+PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw return_scale units
+otherwise; an unvisited child scores its parent's net value minus `fpu`, floored at the
+tree minimum under `q_norm`. Dirichlet noise + sampling stay in Python.
 """
 
 from dataclasses import dataclass
@@ -34,14 +38,17 @@ class MCTSConfig:
     dirichlet_eps: float = 0.25
     gamma: float = 0.99
     temp_moves: int = 12  # moves played at temperature 1 before switching to greedy
-    w_attack: float = 0.05  # per-edge reward weight on attack
+    w_attack: float = 0.006  # per-edge reward weight on credited attack
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
-    w_b2b: float = 0.05  # b2b-build potential shaping; Phi=min(max(0,b2b),12), 0=off
-    w_height: float = 0.05  # per-edge penalty on min(1, max_height/24), 0=off
-    w_bumpiness: float = 0.05  # per-edge penalty on min(1, bumpiness/48), 0=off
+    w_b2b: float = 0.0054  # b2b-build potential shaping; Phi=min(max(0,b2b),45), 0=off
+    w_height: float = 0.06  # board potential on min(1, max_height/24), 0=off
+    w_bumpiness: float = 0.03  # board potential on min(1, bumpiness/48), 0=off
+    w_holes: float = 0.16  # board potential on min(1, holes/16), 0=off
+    w_plain: float = 0.03  # cost of a non-difficult clear with nothing queued, 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
+    fpu: float = 0.4  # unvisited child scores parent value minus this; <0 scores 0
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -132,6 +139,9 @@ class PlacementMCTS:
             q_norm=self.cfg.q_norm,
             w_height=self.cfg.w_height,
             w_bumpiness=self.cfg.w_bumpiness,
+            fpu=self.cfg.fpu,
+            w_holes=self.cfg.w_holes,
+            w_plain=self.cfg.w_plain,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -226,6 +236,9 @@ class PlacementMCTS:
             q_norm=self.cfg.q_norm,
             w_height=self.cfg.w_height,
             w_bumpiness=self.cfg.w_bumpiness,
+            fpu=self.cfg.fpu,
+            w_holes=self.cfg.w_holes,
+            w_plain=self.cfg.w_plain,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

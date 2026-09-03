@@ -22,6 +22,7 @@ import glob
 import os
 import random
 from collections import deque
+from dataclasses import replace as dc_replace
 
 import numpy as np
 import tensorflow as tf
@@ -455,6 +456,9 @@ def main(args):
         w_height=cfg.w_height,
         w_bumpiness=cfg.w_bumpiness,
         q_norm=cfg.q_norm,
+        fpu=cfg.fpu,
+        w_holes=cfg.w_holes,
+        w_plain=cfg.w_plain,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -486,7 +490,9 @@ def main(args):
     pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
     mcts = PlacementMCTS(net, cfg)
     opp_mcts = PlacementMCTS(opp_net, cfg)
-    ref_mcts = PlacementMCTS(ref_net, cfg)
+    eval_cfg = dc_replace(cfg, dirichlet_eps=0.0)
+    eval_mcts = PlacementMCTS(net, eval_cfg)
+    ref_mcts = PlacementMCTS(ref_net, eval_cfg)
     searcher = (
         CB2BSearch()
     )  # lock-score core for committing the chosen move by descriptor
@@ -635,7 +641,7 @@ def main(args):
             whr.record(gen, opp_tag, wins, decisive - wins, n_draw, ctx="pool")
         if gen % eval_interval == 0:
             ref_wins, ref_losses, ref_draws = _eval_vs_ref(
-                mcts,
+                eval_mcts,
                 ref_mcts,
                 eval_games,
                 queue_size,

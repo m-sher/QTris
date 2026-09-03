@@ -1,4 +1,5 @@
-"""The per-edge board-quality penalty reaches the search with the documented normalisers."""
+"""The board-quality potential (height, bumpiness, holes) reaches the search with the
+documented normalisers."""
 
 import numpy as np
 import pytest
@@ -130,13 +131,15 @@ def _extra_visit_slot(counts, slots):
     return top[0]
 
 
-# The last case is the one whose cheapest child depends on the ratio of the two normalisers.
+# On an empty root board every root edge is minus its child's cost, so each child is
+# visited once before the extra simulation goes to the cheapest. The last two cases are
+# the ones whose cheapest child depends on the ratio of the two normalisers.
 @pytest.mark.parametrize(
-    "seed,moves,w_height,w_bumpiness",
-    [(7, 10, 1.0, 0.0), (7, 10, 0.0, 1.0), (5, 40, 2.0, 1.0)],
+    "seed,w_height,w_bumpiness",
+    [(7, 1.0, 0.0), (7, 0.0, 1.0), (5, 2.0, 1.0), (11, 2.0, 1.0)],
 )
-def test_penalty_picks_the_cheapest_child(seed, moves, w_height, w_bumpiness):
-    env = _env(seed, moves)
+def test_penalty_picks_the_cheapest_child(seed, w_height, w_bumpiness):
+    env = _env(seed, moves=0)
     counts, desc = _run(env, sims=1, w_height=0.0, w_bumpiness=0.0)
     slots = [s for s in range(CANDIDATE_CAPACITY) if desc[s, 0] >= 0]
     counts, desc = _run(
@@ -157,6 +160,37 @@ def test_penalty_picks_the_cheapest_child(seed, moves, w_height, w_bumpiness):
     )
 
 
+def _board_cost(board, w_height, w_bumpiness):
+    occ = board != 0
+    heights = np.where(occ.any(axis=0), occ.shape[0] - occ.argmax(axis=0), 0)
+    return w_height * min(1.0, heights.max() / HEIGHT_MAX) + w_bumpiness * min(
+        1.0, np.abs(np.diff(heights)).sum() / BUMPINESS_MAX
+    )
+
+
+@pytest.mark.parametrize("seed,moves", [(7, 10), (5, 40)])
+def test_penalty_is_a_potential(seed, moves):
+    """On a played board the edge is the root's cost minus the child's, so within the
+    first n_legal + 1 simulations only a child that improves on the root board earns a
+    second visit, and at least one such child exists."""
+    env = _env(seed, moves)
+    counts, desc = _run(env, sims=1, w_height=0.0, w_bumpiness=0.0)
+    slots = [s for s in range(CANDIDATE_CAPACITY) if desc[s, 0] >= 0]
+    counts, desc = _run(env, sims=len(slots) + 1, w_height=2.0, w_bumpiness=1.0)
+    stats = _child_stats(env, desc, slots)
+    cost = {
+        s: 2.0 * min(1.0, h / HEIGHT_MAX) + 1.0 * min(1.0, b / BUMPINESS_MAX)
+        for s, (h, b) in stats.items()
+    }
+    root_cost = _board_cost(env._board, 2.0, 1.0)
+    revisited = [s for s in slots if counts[s] > 1]
+    assert revisited, counts[slots]
+    assert all(cost[s] < root_cost for s in revisited), (
+        root_cost,
+        {s: cost[s] for s in revisited},
+    )
+
+
 def test_penalty_changes_the_visit_distribution():
     env = _env(11)
     off, _ = _run(env, sims=64, w_height=0.0, w_bumpiness=0.0)
@@ -168,9 +202,93 @@ def test_penalty_changes_the_visit_distribution():
 def test_shaping_weights_are_on_by_default():
     """Every pipeline builds its search from these defaults and overrides none of them."""
     cfg = MCTSConfig()
-    assert (cfg.w_attack, cfg.w_b2b, cfg.w_height, cfg.w_bumpiness) == (
-        0.05,
-        0.05,
-        0.05,
-        0.05,
+    assert (
+        cfg.w_attack,
+        cfg.w_b2b,
+        cfg.w_height,
+        cfg.w_bumpiness,
+        cfg.w_holes,
+        cfg.w_plain,
+    ) == (0.006, 0.0054, 0.06, 0.03, 0.16, 0.03)
+
+
+def _run_holes(env, sims, w_holes):
+    engine = CMCTS(
+        1,
+        board_height=40,
+        queue_size=5,
+        max_holes=50,
+        garbage_push_delay=1,
+        auto_push_garbage=0,
+        auto_fill_queue=1,
+        c_puct=1.5,
+        gamma=1.0,
+        w_attack=0.0,
+        w_death=10.0,
+        return_scale=1.0,
+        max_len=15,
+        num_simulations=sims,
+        leaves_per_round=1,
+        vloss=1.0,
+        w_b2b=0.0,
+        q_norm=False,
+        w_holes=w_holes,
     )
+    try:
+        engine.set_root(0, env)
+        nv, _ = engine.collect_roots()
+        assert nv == 1
+        zeros = np.zeros(nv * CANDIDATE_CAPACITY, np.float32)
+        engine.apply_roots(zeros, np.zeros(nv, np.float32), zeros.copy(), 0.0)
+        for _ in range(sims):
+            nv2, _ = engine.collect_leaves()
+            if nv2 == 0:
+                break
+            engine.apply_leaves(
+                np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
+                np.zeros(nv2, np.float32),
+            )
+        _pi, counts, desc, dead, _rv = engine.result()
+        assert not dead[0]
+        return np.array(counts[0], np.float64), np.array(desc[0], np.int64)
+    finally:
+        engine.destroy()
+
+
+def _child_holes(env, desc, slots):
+    searcher = CB2BSearch()
+    out = {}
+    for slot in slots:
+        is_hold, rot, norm_col, landing_row, spin = (int(x) for x in desc[slot])
+        if is_hold:
+            placed = (
+                env._queue[0] if env._hold_piece == PieceType.N else env._hold_piece
+            )
+        else:
+            placed = env._active_piece.piece_type
+        board, *_ = searcher.lock_score(
+            env._board,
+            placed.value,
+            rot,
+            norm_col,
+            landing_row,
+            spin,
+            env._scorer._b2b,
+            env._scorer._combo,
+        )
+        out[slot] = int(env._get_holes(board))
+    return out
+
+
+@pytest.mark.parametrize("seed", [7, 11])
+def test_hole_potential_picks_a_hole_free_child(seed):
+    """On an empty root board every root edge is minus its child's hole cost, so the
+    extra simulation goes to a child with the fewest holes, and some child makes one."""
+    env = _env(seed, moves=0)
+    counts, desc = _run_holes(env, sims=1, w_holes=0.0)
+    slots = [s for s in range(CANDIDATE_CAPACITY) if desc[s, 0] >= 0]
+    counts, desc = _run_holes(env, sims=len(slots) + 1, w_holes=1.0)
+    holes = _child_holes(env, desc, slots)
+    assert max(holes.values()) > 0, holes
+    picked = _extra_visit_slot(counts, slots)
+    assert holes[picked] == min(holes.values()), (picked, holes[picked])
