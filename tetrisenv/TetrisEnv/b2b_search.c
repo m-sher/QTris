@@ -7,6 +7,8 @@
 #include <math.h>
 #include <omp.h>
 
+#include "residuals.h"
+
 
 // ============================================================
 // Constants
@@ -27,6 +29,11 @@
 #define HEIGHT_REF 22
 #define NET_ROWS 24
 #define SPIN_STATES 2
+
+// 4-wide: columns 0-2 and 7-9 held filled to the tallest height that never tops out.
+// PyTetrisEnv mirrors both constants as FOUR_WIDE_WALL_COLS / FOUR_WIDE_WALL_HEIGHT.
+#define FOUR_WIDE_WALL_MASK 0x0387u
+#define FOUR_WIDE_WALL_HEIGHT (DEATH_HEIGHT_CAP - 1)
 
 // Keys (same as pathfinder.c / Moves.py)
 #define KEY_START 0
@@ -2584,6 +2591,9 @@ typedef struct {
     float w_height, w_bumpiness, w_holes;  // board-quality potential weights
     float w_plain;               // cost of a non-difficult clear with nothing queued
     int q_norm;                  // rank on per-tree min-max normalised Q instead of raw units
+    int four_wide;               // hold cols 0-2 / 7-9 at FOUR_WIDE_WALL_HEIGHT every step
+    float w_residual;            // four_wide: bonus per clearing edge that leaves the middle
+                                 // stack top matching a residual template; 0 = off
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -2687,6 +2697,35 @@ static int mcts_count_holes(const uint16_t* board, int bh) {
     return holes;
 }
 
+// --- 4-wide walls: filled up to FOUR_WIDE_WALL_HEIGHT, empty above ---
+static inline void four_wide_normalize(uint16_t* board, int bh) {
+    int top = bh - FOUR_WIDE_WALL_HEIGHT;
+    if (top < 0) top = 0;
+    for (int r = 0; r < top; r++) board[r] &= (uint16_t)~FOUR_WIDE_WALL_MASK;
+    for (int r = top; r < bh; r++) board[r] |= (uint16_t)FOUR_WIDE_WALL_MASK;
+}
+
+// --- 4-wide residuals: does the top of the middle stack (cols 3-6) match a template? ---
+// A RESIDUAL_ROWS-tall window opens at the topmost occupied middle row; rows at or below
+// the floor read as full, so the floor satisfies a template's support row and a template
+// that cannot fit is rejected. An empty middle matches nothing.
+static int residual_match(const uint16_t* board, int bh) {
+    int t = 0;
+    while (t < bh && ((board[t] >> 3) & 0xF) == 0) t++;
+    if (t == bh) return 0;
+    uint32_t win = 0;
+    for (int k = 0; k < RESIDUAL_ROWS; k++) {
+        int r = t + k;
+        uint32_t mid = r < bh ? (uint32_t)((board[r] >> 3) & 0xF) : 0xFu;
+        win |= mid << (4 * k);
+    }
+    for (int i = 0; i < NUM_RESIDUALS; i++) {
+        if ((win & RESIDUAL_FILLED[i]) == RESIDUAL_FILLED[i] &&
+            (win & RESIDUAL_EMPTY[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 // --- one placement step (mirror placement_step / the b2b game-loop body); returns raw
 //     attack, writes the credited attack (all of it for a difficult clear, only the rows
 //     it cancels from the own queue otherwise) and the plain-clear flag ---
@@ -2723,6 +2762,10 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     // _add_to_garbage_queue is a no-op in sims (garbage_chance=0).
     if (cfg->auto_push_garbage && cfg->garbage_push_delay == 0)
         garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt);
+
+    // Same position as the env's re-level: after garbage, before the garbage top-out
+    // check, and before the board is stored and enumerated.
+    if (cfg->four_wide) four_wide_normalize(s->board, cfg->board_height);
 
     bool garbage_top_out = board_topped_out(s->board, cfg->board_height);
     bool exceeded_holes = false;
@@ -2973,14 +3016,23 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     break;
                 }
                 node->edge_value[slot] = 0.0f;
-                // Potential-based shaping on the bank and on board quality.
+                // Potential-based shaping on the bank and on board quality, plus the
+                // four_wide residual bonus on a clearing edge that leaves a matching child
+                // (combo >= 0 iff the placement cleared).
+                float res_bonus =
+                    (cfg->four_wide && cfg->w_residual != 0.0f
+                     && leaf->st.combo >= 0
+                     && residual_match(leaf->st.board, cfg->board_height))
+                        ? cfg->w_residual / (cfg->return_scale + 1e-8f)
+                        : 0.0f;
                 node->edge_reward[slot] =
                     mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
                     + (cfg->w_b2b
                            * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
                        + mcts_board_penalty(cfg, node->st.board)
                        - cfg->gamma * mcts_board_penalty(cfg, leaf->st.board))
-                          / (cfg->return_scale + 1e-8f);
+                          / (cfg->return_scale + 1e-8f)
+                    + res_bonus;
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3012,7 +3064,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   float return_scale, int max_len, int max_nodes,
                   int leaves_per_round, float vloss, float w_b2b, int q_norm,
                   float w_height, float w_bumpiness, float fpu, float w_holes,
-                  float w_plain) {
+                  float w_plain, int four_wide, float w_residual) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3043,6 +3095,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.w_height = w_height; e->cfg.w_bumpiness = w_bumpiness;
     e->cfg.fpu = fpu;
     e->cfg.w_holes = w_holes; e->cfg.w_plain = w_plain;
+    e->cfg.four_wide = four_wide;
+    e->cfg.w_residual = w_residual;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -3225,9 +3279,15 @@ void mcts_destroy(void* h) {
 // Capacity handshake for Python CMCTS (must match MCTS_CANDIDATE_CAPACITY).
 int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
+// Height handshake: the walls the search levels must be the ones the env builds.
+int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 23; }
+int mcts_create_arity(void) { return 25; }
 int mcts_result_arity(void) { return 6; }
+// Test hook for the residual matcher.
+int mcts_residual_match(const uint16_t* board, int board_height) {
+    return residual_match(board, board_height);
+}
 
 // --- parity hooks: single-state enumerate / step against the deterministic core. ---
 // Enumerate one state; out_desc[MCAP*5] (-1 empty), returns n_legal.

@@ -15,10 +15,12 @@ non-difficult clear made with nothing queued, plus two potential differences:
 `w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`, and
 `pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +
 w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`; terminal edges add
-`-w_death` and read both potentials as 0. The leaf bootstrap is the net value directly.
-PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw return_scale units
-otherwise; an unvisited child scores its parent's net value minus `fpu`, floored at the
-tree minimum under `q_norm`. Dirichlet noise + sampling stay in Python.
+`-w_death` and read both potentials as 0. In four_wide mode a clearing edge that leaves
+the middle stack matching a residual template adds `w_residual`. The leaf bootstrap is
+the net value directly. PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw
+return_scale units otherwise; an unvisited child scores its parent's net value minus
+`fpu`, floored at the tree minimum under `q_norm`. Dirichlet noise + sampling stay in
+Python.
 """
 
 from dataclasses import dataclass
@@ -49,6 +51,10 @@ class MCTSConfig:
     w_plain: float = 0.03  # cost of a non-difficult clear with nothing queued, 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
     fpu: float = 0.4  # unvisited child scores parent value minus this; <0 scores 0
+    four_wide: bool = False  # hold the 4-wide side walls level on every in-tree board
+    w_residual: float = (
+        0.0  # four_wide: bonus per clearing edge into a residual-matched stack
+    )
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -142,6 +148,8 @@ class PlacementMCTS:
             fpu=self.cfg.fpu,
             w_holes=self.cfg.w_holes,
             w_plain=self.cfg.w_plain,
+            four_wide=self.cfg.four_wide,
+            w_residual=self.cfg.w_residual,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -239,6 +247,8 @@ class PlacementMCTS:
             fpu=self.cfg.fpu,
             w_holes=self.cfg.w_holes,
             w_plain=self.cfg.w_plain,
+            four_wide=self.cfg.four_wide,
+            w_residual=self.cfg.w_residual,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

@@ -18,28 +18,12 @@ def main() -> None:
         help="Required for `--mode 1v1`. Opponent's checkpoint directory.",
     )
     parser.add_argument(
-        "--search",
-        action="store_true",
-        help="pick moves with the neural-guided beam search (policy prior + value "
-        "leaf) instead of greedy top-1.",
-    )
-    parser.add_argument(
-        "--depth", type=int, default=1, help="--search: lookahead plies."
-    )
-    parser.add_argument("--beam", type=int, default=8, help="--search: beam width.")
-    parser.add_argument(
-        "--gate",
-        type=int,
-        default=8,
-        help="--search: top-K candidates expanded per node.",
-    )
-    parser.add_argument(
         "--num-simulations",
         type=int,
         default=0,
         help="play with PUCT MCTS (net policy priors + value leaves) "
         "at this simulation budget, greedy by visit count - the AlphaZero way to play "
-        "an AZ checkpoint. 0 = off (use greedy top-1 or --search).",
+        "an AZ checkpoint. 0 = off (greedy top-1).",
     )
     parser.add_argument(
         "--c-puct", type=float, default=1.5, help="PUCT exploration constant."
@@ -51,6 +35,13 @@ def main() -> None:
         help="intra-tree leaf batching: leaves collected per tree per net call (virtual "
         "loss). Higher = fewer net calls (~L x faster) but more search distortion; 1 = "
         "sequential. Default 4.",
+    )
+    parser.add_argument(
+        "--four-wide",
+        action="store_true",
+        help="--mode single: play a 4-wide board. Columns 0-2 and 7-9 are held filled just "
+        "below the death line, so only columns 3-6 are playable and the board stays 10 wide "
+        "for the model.",
     )
     parser.add_argument(
         "--garbage-chance",
@@ -87,8 +78,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if getattr(args, "search", False) and getattr(args, "num_simulations", 0) > 0:
-        parser.error("use either --search or --num-simulations, not both.")
+    if args.four_wide and args.mode != "single":
+        parser.error("--four-wide is only implemented for `demo --mode single`.")
 
     if args.mode == "1v1":
         if args.checkpoint is None or args.opponent is None:

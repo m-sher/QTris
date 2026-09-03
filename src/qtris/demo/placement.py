@@ -2,11 +2,7 @@ import tensorflow as tf
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.data.placement_features import build_placement_inference
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
-from qtris.search.placement_search import (
-    SearchConfig,
-    descriptor_key_sequence,
-    search_best_move,
-)
+from qtris.search.placement_search import descriptor_key_sequence
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from TetrisEnv.Moves import Keys
@@ -104,6 +100,7 @@ def main(args):
         garbage_traces = pools[tier]
         print(f"Trace garbage: tier {tier} ({len(garbage_traces)} traces)", flush=True)
 
+    four_wide = getattr(args, "four_wide", False)
     py_env = PyTetrisEnv(
         queue_size=queue_size,
         max_holes=max_holes,
@@ -117,14 +114,10 @@ def main(args):
         idx=0,
         num_row_tiers=num_row_tiers,
         garbage_traces=garbage_traces,
+        four_wide=four_wide,
     )
     env = TFPyEnvironment(py_env)
     searcher = CB2BSearch()
-    search_cfg = (
-        SearchConfig(depth=args.depth, beam_width=args.beam, gate_k=args.gate)
-        if getattr(args, "search", False)
-        else None
-    )
     # --num-simulations plays the AlphaZero way: PUCT MCTS over the net's policy+value
     # picks the move (greedy by visit count). No Dirichlet noise (eval, not self-play).
     mcts = (
@@ -138,6 +131,8 @@ def main(args):
                 gamma=1.0,
                 w_death=1.0,
                 q_norm=True,
+                four_wide=four_wide,
+                w_residual=0.15 if four_wide else 0.0,
             ),
         )
         if getattr(args, "num_simulations", 0) > 0
@@ -235,7 +230,9 @@ def main(args):
                 queue=queue,
                 b2b=int(py_env._scorer._b2b),
                 combo=int(py_env._scorer._combo),
-                total_garbage=int(py_env._get_total_garbage()),
+                # The beam death-prunes on tallest column plus pending rows, and the 4-wide
+                # walls sit one row under that line, so any pending count prunes everything.
+                total_garbage=0 if four_wide else int(py_env._get_total_garbage()),
                 garbage_push_delay=py_env._garbage_push_delay,
                 search_depth=search_depth,
                 beam_width=beam_width,
@@ -285,13 +282,6 @@ def main(args):
                     descriptor_key_sequence(py_env, res["descriptor"], max_len)[None],
                     dtype=tf.int64,
                 )
-        elif search_cfg is not None:
-            # Neural-guided search picks the move (the predict above is only for the
-            # attention panel + piece_scores). The search handles dead states itself.
-            key_sequence = tf.constant(
-                search_best_move(py_env, p_model, searcher, search_cfg)[None],
-                dtype=tf.int64,
-            )
         elif not np.any(key_sequence.numpy()[0] == Keys.HARD_DROP):
             # No surviving placement (near-death): the env locks + scores only on a
             # HARD_DROP (else its `is_spin` is unbound), so commit a hard drop to top

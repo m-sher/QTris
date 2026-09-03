@@ -48,10 +48,16 @@ def _load_lib():
         + [ctypes.c_float] * 2  # w_height, w_bumpiness
         + [ctypes.c_float]  # fpu
         + [ctypes.c_float] * 2  # w_holes, w_plain
+        + [ctypes.c_int]  # four_wide
+        + [ctypes.c_float]  # w_residual
     )
     lib.mcts_create.restype = ctypes.c_void_p
     lib.mcts_candidate_capacity.argtypes = []
     lib.mcts_candidate_capacity.restype = ctypes.c_int
+    lib.mcts_four_wide_wall_height.argtypes = []
+    lib.mcts_four_wide_wall_height.restype = ctypes.c_int
+    lib.mcts_residual_match.argtypes = [_U16, ctypes.c_int]
+    lib.mcts_residual_match.restype = ctypes.c_int
     # Arity handshake: the .so's mcts_create must take exactly the args passed below.
     try:
         lib.mcts_create_arity.argtypes = []
@@ -115,6 +121,29 @@ def _load_lib():
 _LIB = None
 
 
+def four_wide_wall_height():
+    """The wall height the C search levels to; must equal `FOUR_WIDE_WALL_HEIGHT`."""
+    global _LIB
+    if _LIB is None:
+        _LIB = _load_lib()
+    return int(_LIB.mcts_four_wide_wall_height())
+
+
+def residual_match(board):
+    """1 if the top of the board's middle stack matches a 4-wide residual template.
+
+    `board` is (board_height,) uint16 bitmask rows, or a (board_height, 10) occupancy
+    grid, which is packed the way `set_root` packs the env board."""
+    global _LIB
+    if _LIB is None:
+        _LIB = _load_lib()
+    arr = np.asarray(board)
+    if arr.ndim == 2:
+        arr = ((arr != 0).astype(np.uint16) * _COL_BITS).sum(axis=1, dtype=np.uint16)
+    rows = np.ascontiguousarray(arr.astype(np.uint16))
+    return int(_LIB.mcts_residual_match(rows, rows.shape[0]))
+
+
 class CMCTS:
     def __init__(
         self,
@@ -142,6 +171,8 @@ class CMCTS:
         fpu=-1.0,
         w_holes=0.0,
         w_plain=0.0,
+        four_wide=False,
+        w_residual=0.0,
     ):
         global _LIB
         if _LIB is None:
@@ -186,6 +217,8 @@ class CMCTS:
             fpu,
             w_holes,
             w_plain,
+            int(bool(four_wide)),
+            float(w_residual),
         )
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
