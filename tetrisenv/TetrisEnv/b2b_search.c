@@ -2542,9 +2542,14 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*attack (clipped) plus w_b2b*(gamma*Phi(child) - Phi(parent)), with an unclipped
-// -w_death on terminal edges; the leaf bootstrap is the net value directly. Dirichlet noise
-// + final sampling stay in Python.
+// w_attack*credit, where credit is all of a difficult clear's attack and only the rows
+// a non-difficult clear cancels from the own queue, minus w_plain for a non-difficult
+// clear made with nothing queued, plus two potential differences,
+// w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank and penalty(parent) -
+// gamma*penalty(child) on board quality (height, bumpiness, holes), with -w_death on
+// terminal edges, where both potentials read 0; the leaf bootstrap is the net value
+// directly. A parallel shaping-free channel (leaf values + death edges only) feeds the
+// per-tree root value readout. Dirichlet noise + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -2566,7 +2571,6 @@ int find_unique_placements_c(const uint16_t* board_rows, int board_height,
 #define MENUM_MAX 512     // enum scratch capacity per branch
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
-#define MCLIP 10.0f       // reward clip
 #define MAX_PATH 1024
 #define MAX_LPR 16        // max leaves collected per tree per round (intra-tree batching)
 
@@ -2584,6 +2588,8 @@ typedef struct {
     int board_height, queue_size, max_holes, garbage_push_delay;
     int auto_push_garbage, auto_fill_queue;
     float c_puct, gamma, w_attack, w_death, return_scale, w_b2b;
+    float w_height, w_bumpiness, w_holes;  // board-quality potential weights
+    float w_plain;               // cost of a non-difficult clear with nothing queued
     int q_norm;                  // rank on per-tree min-max normalised Q instead of raw units
     int four_wide;               // hold cols 0-2 / 7-9 at FOUR_WIDE_WALL_HEIGHT every step
     float w_residual;            // four_wide: bonus per clearing edge that leaves the middle
@@ -2591,6 +2597,7 @@ typedef struct {
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
+    float fpu;                   // unvisited q = node value - fpu; <0 scores 0
 } MConfig;
 
 typedef struct MNode {
@@ -2601,6 +2608,9 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
+    // Shaping-free value channel: edge_value carries only the death term, Wv accumulates
+    // it with the leaf values, so the root readout is a Q that skips the shaping.
+    float edge_value[MCAP], Wv[MCAP];
     struct MNode* child[MCAP];
 } MNode;
 
@@ -2716,8 +2726,11 @@ static int residual_match(const uint16_t* board, int bh) {
     return 0;
 }
 
-// --- one placement step (mirror placement_step / the b2b game-loop body); returns raw attack ---
-static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal) {
+// --- one placement step (mirror placement_step / the b2b game-loop body); returns raw
+//     attack, writes the credited attack (all of it for a difficult clear, only the rows
+//     it cancels from the own queue otherwise) and the plain-clear flag ---
+static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal,
+                             float* out_credit, bool* out_plain) {
     int is_hold = d[0], rot = d[1], norm_col = d[2], landing_row = d[3], spin = d[4];
     int played;
     if (is_hold) {
@@ -2734,6 +2747,9 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     AttackResult ar = compute_attack(clears, spin, s->b2b, s->combo, pc);
     s->b2b = ar.new_b2b; s->combo = ar.new_combo;
     float attack = ar.attack;
+    int pending = garb_total(s->gq, s->gcnt);
+    *out_credit = ar.b2b_maintaining ? attack : fminf(attack, (float)pending);
+    *out_plain = clears > 0 && !ar.b2b_maintaining && pending == 0;
     s->active = mstate_pop(s);
 
     bool top_out = board_topped_out(s->board, cfg->board_height);
@@ -2771,6 +2787,7 @@ static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
                                         SPAWN_ROW, 3, 0, ml, 0, MENUM_MAX,
                                         erot, encol, elr, espin, NULL);
     int holdpiece = node->st.hold != PIECE_N ? node->st.hold : node->st.queue[0];
+    bool dup_hold = node->st.hold != PIECE_N && node->st.hold == node->st.active;
     // Second call reuses the same TLS buffers after packing no-hold.
     node->n_legal = 0;
     int pack_nh = n_nh < MBRANCH ? n_nh : MBRANCH;
@@ -2783,9 +2800,10 @@ static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
         node->desc[slot][3] = elr[i];
         node->desc[slot][4] = espin[i];
     }
-    int n_h = find_unique_placements_c(board, cfg->board_height, holdpiece,
-                                       SPAWN_ROW, 3, 0, ml, 1, MENUM_MAX,
-                                       erot, encol, elr, espin, NULL);
+    int n_h = dup_hold ? 0
+                       : find_unique_placements_c(board, cfg->board_height, holdpiece,
+                                                  SPAWN_ROW, 3, 0, ml, 1, MENUM_MAX,
+                                                  erot, encol, elr, espin, NULL);
     int pack_h = n_h < MBRANCH ? n_h : MBRANCH;
     for (int i = 0; i < pack_h; i++) {
         int slot = MBRANCH + i;
@@ -2835,19 +2853,27 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
 }
 
 // --- PUCT ---
-// Q enters PUCT in raw return_scale units, unnormalized, so w_death's magnitude carries
-// straight into selection.
+// Q is min-max normalised over the tree when q_norm is set, raw return_scale units
+// otherwise. An unvisited child scores the node's own net value minus cfg->fpu, floored
+// at the tree minimum under q_norm; with fpu < 0 it scores 0.
 static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float qmax) {
     float total = 0.0f;
     for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
     float best = -1e30f; int best_slot = node->legal[0];
     float sq = sqrtf(total + 1e-8f);
     bool norm = cfg->q_norm && qmax > qmin;
+    float q_new = 0.0f;
+    if (cfg->fpu >= 0.0f) {
+        float par = node->value;
+        if (norm) par = (par - qmin) / (qmax - qmin);
+        q_new = par - cfg->fpu;
+        if (norm && q_new < 0.0f) q_new = 0.0f;
+    }
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         float n = node->N[slot];
-        float q = n > 0 ? node->Q[slot] : 0.0f;
-        if (norm && n > 0) q = (q - qmin) / (qmax - qmin);
+        float q = q_new;
+        if (n > 0) { q = node->Q[slot]; if (norm) q = (q - qmin) / (qmax - qmin); }
         float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
@@ -2857,11 +2883,14 @@ static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float 
 static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
                          float leaf_value) {
     float g = leaf_value;
+    float gv = leaf_value;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
+        gv = node->edge_value[slot] + cfg->gamma * gv;
         node->N[slot] += 1.0f;
         node->W[slot] += g;
+        node->Wv[slot] += gv;
         node->Q[slot] = node->W[slot] / node->N[slot];
         if (node->Q[slot] < t->qmin) t->qmin = node->Q[slot];
         if (node->Q[slot] > t->qmax) t->qmax = node->Q[slot];
@@ -2888,16 +2917,42 @@ static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
 }
 
 // b2b potential for the w_b2b shaping: Phi = min(max(0, b2b), CAP).
-#define B2B_POTENTIAL_CAP 12
+#define B2B_POTENTIAL_CAP 45
 static inline float b2b_phi(int b2b) {
     int p = b2b > 0 ? b2b : 0;
     return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
 }
 
+// Board-quality potential: max column height, bumpiness and holes of a board, each as a
+// fraction of its maximum and capped at 1. An edge pays penalty(parent) -
+// gamma*penalty(child).
+#define MCTS_HEIGHT_MAX 24.0f
+#define MCTS_BUMPINESS_MAX 48.0f
+#define MCTS_HOLES_MAX 16.0f
+static float mcts_board_penalty(const MConfig* cfg, const uint16_t* board) {
+    float pen = 0.0f;
+    if (cfg->w_height != 0.0f || cfg->w_bumpiness != 0.0f) {
+        int8_t h[BOARD_COLS];
+        compute_col_heights_full(board, cfg->board_height, h);
+        int max_h = 0, bump = 0;
+        for (int c = 0; c < BOARD_COLS; c++) {
+            if (h[c] > max_h) max_h = h[c];
+            if (c > 0) bump += abs(h[c] - h[c - 1]);
+        }
+        float hr = (float)max_h / MCTS_HEIGHT_MAX; if (hr > 1.0f) hr = 1.0f;
+        float br = (float)bump / MCTS_BUMPINESS_MAX; if (br > 1.0f) br = 1.0f;
+        pen += cfg->w_height * hr + cfg->w_bumpiness * br;
+    }
+    if (cfg->w_holes != 0.0f) {
+        float ho = (float)mcts_count_holes(board, cfg->board_height) / MCTS_HOLES_MAX;
+        if (ho > 1.0f) ho = 1.0f;
+        pen += cfg->w_holes * ho;
+    }
+    return pen;
+}
+
 static float mcts_scale_reward(const MConfig* cfg, float reward) {
-    float r = reward / (cfg->return_scale + 1e-8f);
-    if (r > MCLIP) r = MCLIP; else if (r < -MCLIP) r = -MCLIP;
-    return r;
+    return reward / (cfg->return_scale + 1e-8f);
 }
 
 // --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
@@ -2938,27 +2993,32 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); done++; break; }  // arena full
                 leaf->st = node->st;
                 bool terminal = false;
-                float attack = mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal);
+                float credit = 0.0f;
+                bool plain = false;
+                mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal, &credit, &plain);
+                float plain_cost = plain ? cfg->w_plain : 0.0f;
                 node->child[slot] = leaf;
                 // Death (top-out/holes, or a resulting no-legal position) is the loss signal.
-                // The attack part goes through the reward clip; the w_death penalty is applied
-                // UNCLIPPED (return_scale units only).
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
-                    // Phi(terminal) = 0, so the shaping term is -w_b2b*Phi(parent).
+                    node->edge_value[slot] = -cfg->w_death / (cfg->return_scale + 1e-8f);
+                    // Both potentials read 0 at a terminal: the edge returns
+                    // -w_b2b*Phi(parent) and refunds the parent's board penalty.
                     node->edge_reward[slot] =
-                        mcts_scale_reward(cfg, cfg->w_attack * attack)
-                        - cfg->w_death / (cfg->return_scale + 1e-8f)
-                        - cfg->w_b2b * b2b_phi(node->st.b2b)
+                        mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
+                        + (mcts_board_penalty(cfg, node->st.board)
+                           - cfg->w_death
+                           - cfg->w_b2b * b2b_phi(node->st.b2b))
                               / (cfg->return_scale + 1e-8f);
                     mtree_backup(t, cfg, path, plen, 0.0f);
                     done++;
                     break;
                 }
-                // Potential-based b2b shaping w_b2b*(gamma*Phi(child) - Phi(parent)), plus
-                // the four_wide residual bonus on a clearing edge that leaves a matching
-                // child (combo >= 0 iff the placement cleared).
+                node->edge_value[slot] = 0.0f;
+                // Potential-based shaping on the bank and on board quality, plus the
+                // four_wide residual bonus on a clearing edge that leaves a matching child
+                // (combo >= 0 iff the placement cleared).
                 float res_bonus =
                     (cfg->four_wide && cfg->w_residual != 0.0f
                      && leaf->st.combo >= 0
@@ -2966,9 +3026,11 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                         ? cfg->w_residual / (cfg->return_scale + 1e-8f)
                         : 0.0f;
                 node->edge_reward[slot] =
-                    mcts_scale_reward(cfg, cfg->w_attack * attack)
-                    + cfg->w_b2b
-                          * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                    mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
+                    + (cfg->w_b2b
+                           * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
+                       + mcts_board_penalty(cfg, node->st.board)
+                       - cfg->gamma * mcts_board_penalty(cfg, leaf->st.board))
                           / (cfg->return_scale + 1e-8f)
                     + res_bonus;
                 leaf->awaiting_eval = true;
@@ -3001,7 +3063,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   float c_puct, float gamma, float w_attack, float w_death,
                   float return_scale, int max_len, int max_nodes,
                   int leaves_per_round, float vloss, float w_b2b, int q_norm,
-                  int four_wide, float w_residual) {
+                  float w_height, float w_bumpiness, float fpu, float w_holes,
+                  float w_plain, int four_wide, float w_residual) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3029,6 +3092,9 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.w_attack = w_attack; e->cfg.w_death = w_death;
     e->cfg.return_scale = return_scale; e->cfg.w_b2b = w_b2b;
     e->cfg.q_norm = q_norm;
+    e->cfg.w_height = w_height; e->cfg.w_bumpiness = w_bumpiness;
+    e->cfg.fpu = fpu;
+    e->cfg.w_holes = w_holes; e->cfg.w_plain = w_plain;
     e->cfg.four_wide = four_wide;
     e->cfg.w_residual = w_residual;
     e->cfg.max_len = max_len;
@@ -3173,18 +3239,25 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
 }
 
 // Read per-tree root visit counts + descriptors. pi/counts are [num_trees*MCAP];
-// root_desc is [num_trees*MCAP*5]; dead[num_trees] (1 if no move).
-void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead) {
+// root_desc is [num_trees*MCAP*5]; dead[num_trees] (1 if no move); root_value[num_trees]
+// is the visit-weighted shaping-free root value (return_scale units).
+void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead,
+                 float* root_value) {
     MEngine* e = (MEngine*)h;
     for (int i = 0; i < e->num_trees; i++) {
         MTree* t = &e->trees[i];
         for (int j = 0; j < MCAP; j++) { pi[(size_t)i * MCAP + j] = 0.0f; counts[(size_t)i * MCAP + j] = 0.0f; }
         for (int j = 0; j < MCAP * 5; j++) root_desc[(size_t)i * MCAP * 5 + j] = -1;
+        root_value[i] = 0.0f;
         if (!t->alive || t->root == NULL) { dead[i] = 1; continue; }
         dead[i] = 0;
         MNode* root = t->root;
-        float total = 0.0f;
-        for (int k = 0; k < root->n_legal; k++) total += root->N[root->legal[k]];
+        float total = 0.0f, wv = 0.0f;
+        for (int k = 0; k < root->n_legal; k++) {
+            total += root->N[root->legal[k]];
+            wv += root->Wv[root->legal[k]];
+        }
+        if (total > 0.0f) root_value[i] = wv / total;
         for (int k = 0; k < root->n_legal; k++) {
             int slot = root->legal[k];
             counts[(size_t)i * MCAP + slot] = root->N[slot];
@@ -3209,7 +3282,8 @@ int mcts_branch_capacity(void) { return MBRANCH; }
 // Height handshake: the walls the search levels must be the ones the env builds.
 int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 20; }
+int mcts_create_arity(void) { return 25; }
+int mcts_result_arity(void) { return 6; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {
     return residual_match(board, board_height);
@@ -3256,7 +3330,9 @@ float mcts_debug_step(uint16_t* board, int board_height, int max_holes,
     for (int i = 0; i < *gcnt; i++) { s.gq[i].rows = garb_rows[i]; s.gq[i].col = garb_col[i]; s.gq[i].timer = garb_timer[i]; }
     s.b2b = *b2b; s.combo = *combo;
     bool term = false;
-    float attack = mcts_apply_step(&s, &cfg, desc, &term);
+    float credit = 0.0f;
+    bool plain = false;
+    float attack = mcts_apply_step(&s, &cfg, desc, &term, &credit, &plain);
     for (int r = 0; r < board_height; r++) board[r] = s.board[r];
     *active = s.active; *hold = s.hold; *qlen = s.qlen;
     for (int i = 0; i < s.qlen; i++) queue[i] = s.queue[i];
