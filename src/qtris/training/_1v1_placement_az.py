@@ -4,11 +4,12 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses TD(lambda) targets built from the realized
-game outcome z in {-1, 0, +1} and each position's net root value (lambda=1 recovers raw z
-on every position).
-rate), while the terminal row stays exactly z. The search runs at w_death=1, gamma=1,
-return_scale=1, w_attack=0, w_b2b=0; own-death = -1 is the only in-search terminal.
+`PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
+its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
+value when the move cap ended the game unresolved; every earlier position gets the
+shaping-free post-search root value of the position n_step later. The search runs at
+w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
+only in-search terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z; only the
 learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
@@ -21,6 +22,7 @@ import glob
 import os
 import random
 from collections import deque
+from dataclasses import replace as dc_replace
 
 import numpy as np
 import tensorflow as tf
@@ -40,12 +42,6 @@ from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
 from qtris.training.placement_az import _gen_log_probs, train_step
-
-
-def _resolve(args, name, default):
-    """This trainer's default for a shared CLI flag whose argparse default is None."""
-    v = getattr(args, name, None)
-    return default if v is None else v
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -84,6 +80,7 @@ def _pos(r):
         "cand_mask": r["cand_mask"],
         "pi": r["pi"],
         "v_root": r["value"],
+        "v_search": r["v_search"],
     }
 
 
@@ -137,19 +134,13 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _td_lambda(values, z, lam):
-    """TD(lambda) value targets for one trajectory (gamma=1, no intermediate reward): the
-    terminal position gets the outcome z, each earlier position mixes the next position's
-    root value with the lambda-weighted future return. lam=1 recovers the raw outcome z on
-    every position (the Monte-Carlo target); lower lam bootstraps toward near-term value."""
-    n = len(values)
-    targets = [0.0] * n
-    g = z
-    targets[n - 1] = g
-    for t in range(n - 2, -1, -1):
-        g = (1.0 - lam) * values[t + 1] + lam * g
-        targets[t] = g
-    return targets
+def _n_step(values, z, n, truncated):
+    """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
+    position bootstraps on the value n steps later, and the last n positions take the
+    outcome z, or the final position's value when the game was cut off unresolved."""
+    length = len(values)
+    tail = values[length - 1] if truncated else z
+    return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
 
 
 def _mean_or_none(xs):
@@ -160,14 +151,12 @@ def _mean_or_none(xs):
 GROUNDING_BUCKETS = ((0, 10), (10, 30), (30, 60), (60, 1 << 30))
 
 
-# Ahat channel weights and half-saturation levels. Both channels are saturating ratios
-# x/(x+half), bounded in [0,1); half is the level scoring 0.5.
-def _grounding(v_root, z, steps_to_end):
-    """corr(v_root, z) and Brier(v_root, z) per steps-to-end bucket, keyed
+def _grounding(values, z, steps_to_end):
+    """corr(values, z) and Brier(values, z) per steps-to-end bucket, keyed
     `corr_n0_10` / `brier_n0_10` and so on, with None for empty or degenerate buckets.
 
     Draws (z=0) map to a Brier target of 0.5."""
-    p = (np.asarray(v_root, dtype=np.float64) + 1.0) * 0.5  # tanh value -> P(win)
+    p = (np.asarray(values, dtype=np.float64) + 1.0) * 0.5  # tanh value -> P(win)
     o = (np.asarray(z, dtype=np.float64) + 1.0) * 0.5
     out = {}
     for lo, hi in GROUNDING_BUCKETS:
@@ -180,11 +169,13 @@ def _grounding(v_root, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, lam):
+def _episode(pend, p1_died, p2_died, n_step):
     """Stamp each player's value targets on its pending positions and return both players'
     rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
     p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
-    collected. z and steps_to_end are carried for diagnostics and are not training inputs."""
+    collected. A game with no death is a draw for rating and diagnostics but a truncation
+    for the value target. z and steps_to_end are carried for diagnostics and are not
+    training inputs."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -194,13 +185,14 @@ def _episode(pend, p1_died, p2_died, lam):
         z1, z2 = 1.0, -1.0
     else:
         z1, z2 = 0.0, 0.0
+    truncated = not (p1_died or p2_died)
     # policy_mask 1.0: learner rows, train policy and value. 0.0: opponent rows, value only.
     rows = []
     for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
         n = len(positions)
         if n == 0:
             continue
-        targets = _td_lambda([p["v_root"] for p in positions], z, lam)
+        targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
         rows += [
             (p, t, mask, z, n - 1 - i)
             for i, (p, t) in enumerate(zip(positions, targets))
@@ -353,7 +345,7 @@ def main(args):
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 10)
     eval_games = getattr(args, "eval_games", 32)
-    td_lambda = getattr(args, "td_lambda", 0.9)
+    n_step = max(1, int(getattr(args, "n_step", 14)))
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -371,7 +363,7 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # Outcome-z value target; own-death = -1, undiscounted, scale 1.
+    # n-step value target in z units; own-death = -1, undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -379,9 +371,7 @@ def main(args):
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=1.0,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_attack=_resolve(args, "w_attack", 0.0),
         w_death=1.0,
-        w_b2b=_resolve(args, "w_b2b", 0.0),
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
@@ -463,7 +453,12 @@ def main(args):
         temp_moves=cfg.temp_moves,
         w_attack=cfg.w_attack,
         w_b2b=cfg.w_b2b,
+        w_height=cfg.w_height,
+        w_bumpiness=cfg.w_bumpiness,
         q_norm=cfg.q_norm,
+        fpu=cfg.fpu,
+        w_holes=cfg.w_holes,
+        w_plain=cfg.w_plain,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -474,7 +469,7 @@ def main(args):
         pool_wr_gate=pool_wr_gate,
         eval_interval=eval_interval,
         eval_games=eval_games,
-        td_lambda=td_lambda,
+        n_step=n_step,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -495,7 +490,9 @@ def main(args):
     pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
     mcts = PlacementMCTS(net, cfg)
     opp_mcts = PlacementMCTS(opp_net, cfg)
-    ref_mcts = PlacementMCTS(ref_net, cfg)
+    eval_cfg = dc_replace(cfg, dirichlet_eps=0.0)
+    eval_mcts = PlacementMCTS(net, eval_cfg)
+    ref_mcts = PlacementMCTS(ref_net, eval_cfg)
     searcher = (
         CB2BSearch()
     )  # lock-score core for committing the chosen move by descriptor
@@ -553,7 +550,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], td_lambda)
+                    ep = _episode(pending[g], a["dead"], b["dead"], n_step)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -603,7 +600,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, td_lambda)
+                    ep = _episode(pending[g], p1_died, p2_died, n_step)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
@@ -644,7 +641,7 @@ def main(args):
             whr.record(gen, opp_tag, wins, decisive - wins, n_draw, ctx="pool")
         if gen % eval_interval == 0:
             ref_wins, ref_losses, ref_draws = _eval_vs_ref(
-                mcts,
+                eval_mcts,
                 ref_mcts,
                 eval_games,
                 queue_size,
@@ -683,6 +680,7 @@ def main(args):
         outcome_z = np.array([r[3] for r in gen_pos], dtype=np.float32)
         steps_to_end = np.array([r[4] for r in gen_pos], dtype=np.int64)
         v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
+        v_search = np.array([p["v_search"] for p, *_ in gen_pos], dtype=np.float32)
         # gen_pos interleaves both players; policy_mask==1 is the learner.
         lrn = policy_mask == 1.0
         # Search exploration: how the root visit mass spreads over legal candidates.
@@ -779,6 +777,8 @@ def main(args):
         else:
             value_calibration = 0.0
         grounding = _grounding(v_root[lrn], outcome_z[lrn], steps_to_end[lrn])
+        grounding_search = _grounding(v_search[lrn], outcome_z[lrn], steps_to_end[lrn])
+        raw_z_frac = float((steps_to_end < n_step).mean())
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -864,6 +864,8 @@ def main(args):
                 pool_size=len(present),
                 elo=elo_tags,
                 grounding=grounding,
+                grounding_search=grounding_search,
+                raw_z_frac=raw_z_frac,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )
