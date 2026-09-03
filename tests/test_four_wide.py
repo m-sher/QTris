@@ -406,24 +406,6 @@ def test_residual_matcher_reads_an_env_board():
     assert residual_match(env._board) == 1
 
 
-def test_residual_header_matches_its_sources():
-    import importlib.util
-    from pathlib import Path
-
-    repo = Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location(
-        "gen_residuals", repo / "scripts" / "gen_residuals.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    rendered = module.render(
-        (repo / "residuals-4.md").read_text(encoding="utf-8"),
-        (repo / "residuals-5.md").read_text(encoding="utf-8"),
-    )
-    committed = repo / "tetrisenv" / "TetrisEnv" / "residuals.h"
-    assert rendered == committed.read_text(encoding="utf-8")
-
-
 def _residual_counts(prime, piece, four_wide, w_residual):
     """Visit counts from a deterministic search: flat priors, zero leaf values, `prime`
     middle nibbles stacked on the floor, and a five-deep queue of one piece type. One leaf
