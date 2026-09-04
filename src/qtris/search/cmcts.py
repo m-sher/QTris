@@ -19,7 +19,7 @@ import TetrisEnv
 
 from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 
-CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY  # MCTS slot width, not the BC one
+CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY
 FEATURE_DIM = 18
 _NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)

@@ -95,7 +95,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     max_pool_size: int = 30
     pool_interval: int = 10
     pool_wr_gate: float = 0.55
-    eval_interval: int = 10
+    eval_interval: int = 20
     eval_games: int = 32
     n_step: int = 14
     resumed: bool = False

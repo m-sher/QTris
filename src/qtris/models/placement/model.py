@@ -200,8 +200,6 @@ class PlacementPolicyValueNet(QtrisModelBase):
     )
     def policy_value(self, inputs):
         """Jit inference forward: (logits, value) from one encoder pass, training=False.
-        The candidate axis is pinned to MCTS_CANDIDATE_CAPACITY; narrower packings
-        (dense-path CANDIDATE_CAPACITY) are mask-padded up to it by callers.
         Same compute as call() at eval, minus the training flag - so XLA never sees dropout."""
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
         piece_dec, board_dec, _ = self.process_obs(

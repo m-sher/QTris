@@ -343,7 +343,7 @@ def main(args):
     max_pool_size = getattr(args, "max_pool_size", 30)
     pool_interval = getattr(args, "pool_interval", 10)
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
-    eval_interval = getattr(args, "eval_interval", 10)
+    eval_interval = getattr(args, "eval_interval", 20)
     eval_games = getattr(args, "eval_games", 32)
     n_step = max(1, int(getattr(args, "n_step", 14)))
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")

@@ -2566,8 +2566,8 @@ int find_unique_placements_c(const uint16_t* board_rows, int board_height,
                              int64_t* out_sequences);
 
 // Keep in sync with MCTS_CANDIDATE_CAPACITY / MCTS_BRANCH_CAPACITY (Python).
-#define MCAP 256          // candidate capacity (slots)
-#define MBRANCH 128       // per-branch cap (no-hold 0..127, hold 128..255)
+#define MCAP 128          // candidate capacity (slots)
+#define MBRANCH 64        // per-branch cap (no-hold 0..63, hold 64..127)
 #define MENUM_MAX 512     // enum scratch capacity per branch
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage

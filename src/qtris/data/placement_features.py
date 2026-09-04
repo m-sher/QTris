@@ -17,8 +17,8 @@ BRANCH_CAPACITY = 64
 CANDIDATE_CAPACITY = 2 * BRANCH_CAPACITY  # 128
 # Placement MCTS slot capacity; keep in sync with C MCAP in b2b_search.c (handshake in cmcts).
 # The multi-landing enum packs up to MCTS_BRANCH_CAPACITY placements per hold/no-hold branch.
-MCTS_BRANCH_CAPACITY = 128
-MCTS_CANDIDATE_CAPACITY = 2 * MCTS_BRANCH_CAPACITY  # 256
+MCTS_BRANCH_CAPACITY = 64
+MCTS_CANDIDATE_CAPACITY = 2 * MCTS_BRANCH_CAPACITY  # 128
 SENTINEL = np.float32(-1e30)  # score for empty/masked slots
 PAD = 11  # key-sequence padding token
 

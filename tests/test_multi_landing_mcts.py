@@ -21,7 +21,7 @@ def _overhang_board(env):
 
 def test_bc_capacity_unchanged():
     assert BC_CAPACITY == 128
-    assert MCTS_CANDIDATE_CAPACITY == 256
+    assert MCTS_CANDIDATE_CAPACITY == 128
     assert MCTS_CAP == MCTS_CANDIDATE_CAPACITY
 
 

@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument(
         "--eval-interval",
         type=int,
-        default=10,
+        default=20,
         help="1v1 only: generations between win_rate_vs_ref evals (vs frozen gen_0).",
     )
     parser.add_argument(

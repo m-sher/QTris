@@ -16,7 +16,7 @@ pidfile="logs/1v1_az_${ts}.pid"
 
 setsid uv run train --mode 1v1 \
   --num-games 16 --horizon 64 --num-simulations 256 --leaves-per-round 8 \
-  --batch-size 512 --max-game-steps 512 --eval-interval 10 \
+  --batch-size 512 --max-game-steps 512 --eval-interval 20 \
   --n-step 14 --q-norm --num-epochs 4 --wandb \
   >"$log" 2>&1 </dev/null &
 
