@@ -68,12 +68,14 @@ class OneVsOnePlacementAZConfig(BaseModel):
 
     n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end (the
     final search value instead when the move cap ended it), the shaping-free post-search
-    root value n_step later elsewhere; w_death=1, gamma=1,
-    return_scale=1. The attack head regresses credited attack over attack_window
-    placements as a fraction of attack_window * attack_app_cap, masked on truncated
-    tails; it enters the search's selection value only, never the value target. The
-    learner duels frozen snapshots sampled from a disk pool; both players' trajectories
-    train the value and attack heads, the learner's also the policy."""
+    root value n_step later elsewhere, then mixed outcome_blend of the way toward z on
+    every position of a resolved game; w_death=1, gamma=1, return_scale=1. The attack
+    head regresses credited attack (a difficult clear's whole attack, zero for any other
+    clear) over attack_window placements as a fraction of attack_window *
+    attack_app_cap, masked on truncated tails; it enters the search's selection value
+    only, never the value target. The learner duels frozen snapshots sampled from a disk
+    pool; both players' trajectories train the value and attack heads, the learner's
+    also the policy."""
 
     num_games: int
     horizon: int
@@ -94,6 +96,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     num_epochs: int
     value_coef: float
     attack_coef: float = 1.0
+    outcome_blend: float = 0.5
     learning_rate: float
     replay_capacity: int
     max_pool_size: int = 30

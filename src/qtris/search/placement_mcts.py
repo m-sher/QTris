@@ -8,9 +8,8 @@ call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one
 shaping-free root value (leaf values + death edges only, in the same return_scale units
 as Q).
 
-Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole attack
-and only the rows a non-difficult clear cancels from the own garbage queue (combo and the
-b2b-break surge are already inside `compute_attack`'s attack), minus `w_plain` for a
+Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole
+attack, combo multiplier included, and zero for any other clear, minus `w_plain` for a
 non-difficult clear made with nothing queued, plus two potential differences:
 `w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`, and
 `pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +

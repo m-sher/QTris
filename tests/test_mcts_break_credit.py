@@ -1,4 +1,4 @@
-"""A chain-breaking clear earns attack credit only for the garbage rows it cancels."""
+"""A chain-breaking clear earns no attack credit at any pending-garbage depth."""
 
 import numpy as np
 from TetrisEnv.CB2BSearch import CB2BSearch
@@ -113,21 +113,21 @@ def _position_with_break_and_maintain():
     )
 
 
-def test_break_credit_follows_the_pending_queue():
+def test_break_earns_no_credit_at_any_queue_depth():
     env, brk, keep, cands = _position_with_break_and_maintain()
     assert cands[brk][1] >= BANK + 1  # surge released: base + bonus + bank
-    # deep enough that the break cancels more than the maintaining clear sends
     pending = int(cands[keep][1]) + 3
-    counts, _ = _search(env, 0, (brk, keep))
-    assert counts[keep] > counts[brk], (counts[keep], counts[brk])
-    counts, _ = _search(env, pending, (brk, keep))
-    assert counts[brk] > counts[keep], (counts[keep], counts[brk])
+    for queued in (0, pending):
+        counts, _ = _search(env, queued, (brk, keep))
+        assert counts[keep] > counts[brk], (queued, counts[keep], counts[brk])
 
 
 def test_plain_cost_applies_only_with_nothing_queued():
     env, brk, keep, cands = _position_with_break_and_maintain()
-    counts, _ = _search(env, 0, (brk, keep), w_attack=0.0, w_plain=1.0)
-    assert counts[keep] > counts[brk], (counts[keep], counts[brk])
     pending = int(cands[keep][1]) + 3
-    counts, _ = _search(env, pending, (brk, keep), w_attack=1.0, w_plain=1.0)
-    assert counts[brk] > counts[keep], (counts[keep], counts[brk])
+    # w_attack 0 isolates the plain cost: the break is charged at queue depth 0 and free
+    # with garbage queued, so it takes more of the fixed visit budget when queued.
+    empty, _ = _search(env, 0, (brk, keep), w_attack=0.0, w_plain=1.0)
+    queued, _ = _search(env, pending, (brk, keep), w_attack=0.0, w_plain=1.0)
+    assert empty[keep] > empty[brk], (empty[keep], empty[brk])
+    assert queued[brk] > empty[brk], (queued[brk], empty[brk])

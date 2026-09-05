@@ -2542,9 +2542,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // only the TF policy/value net stays in Python. The engine keeps a persistent tree
 // per game across all sims of a move and ping-pongs to Python once per round for the
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*credit, where credit is all of a difficult clear's attack and only the rows
-// a non-difficult clear cancels from the own queue, minus w_plain for a non-difficult
-// clear made with nothing queued, plus two potential differences,
+// w_attack*credit, where credit is all of a difficult clear's attack and zero for any
+// other clear, minus w_plain for a non-difficult clear made with nothing queued, plus
+// two potential differences,
 // w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank and penalty(parent) -
 // gamma*penalty(child) on board quality (height, bumpiness, holes), with -w_death on
 // terminal edges, where both potentials read 0; the shaped channel's leaf bootstrap is
@@ -2729,8 +2729,8 @@ static int residual_match(const uint16_t* board, int bh) {
 }
 
 // --- one placement step (mirror placement_step / the b2b game-loop body); returns raw
-//     attack, writes the credited attack (all of it for a difficult clear, only the rows
-//     it cancels from the own queue otherwise) and the plain-clear flag ---
+//     attack, writes the credited attack (a difficult clear's whole attack, zero for
+//     every other clear) and the plain-clear flag ---
 static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal,
                              float* out_credit, bool* out_plain) {
     int is_hold = d[0], rot = d[1], norm_col = d[2], landing_row = d[3], spin = d[4];
@@ -2750,7 +2750,7 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     s->b2b = ar.new_b2b; s->combo = ar.new_combo;
     float attack = ar.attack;
     int pending = garb_total(s->gq, s->gcnt);
-    *out_credit = ar.b2b_maintaining ? attack : fminf(attack, (float)pending);
+    *out_credit = ar.b2b_maintaining ? attack : 0.0f;
     *out_plain = clears > 0 && !ar.b2b_maintaining && pending == 0;
     s->active = mstate_pop(s);
 

@@ -128,6 +128,13 @@ def main() -> None:
         help="value-loss weight in the AZ loss.",
     )
     parser.add_argument(
+        "--outcome-blend",
+        type=float,
+        default=0.5,
+        help="1v1 only: fraction of each value target taken from the game's outcome "
+        "instead of the n-step bootstrap (0 = pure n-step; resolved games only).",
+    )
+    parser.add_argument(
         "--attack-coef",
         type=float,
         default=1.0,

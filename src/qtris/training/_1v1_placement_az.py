@@ -7,7 +7,8 @@ search horizon), the chosen placements are committed, and garbage is exchanged a
 `PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
 its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
 value when the move cap ended the game unresolved; every earlier position gets the
-shaping-free post-search root value of the position n_step later. The search runs at
+shaping-free post-search root value of the position n_step later. Every target of a
+resolved game is then mixed `outcome_blend` of the way toward z. The search runs at
 w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
 only in-search terminal.
 
@@ -89,7 +90,7 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     """Commit both pre-chosen placements, then replicate PyTetris1v1Env._step's garbage
     exchange / push timing / death logic on the raw sub-envs.
     Returns (p1_died, p2_died, attack1, attack2, credit1, credit2); credit is the tree's
-    rule: a difficult clear's whole attack, otherwise at most the own queue it cancels."""
+    rule: a difficult clear's whole attack, zero for any other clear."""
     # placement_step already cancels each player's own pending garbage and (auto_push_garbage
     # =False) does NOT push to the board, so net = attack - cancelled is the queue delta.
     info = []
@@ -107,7 +108,7 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
             {
                 "died": died,
                 "attack": attack,
-                "credit": attack if difficult else min(attack, float(pending_before)),
+                "credit": attack if difficult else 0.0,
                 "clears": clears,
                 "net": net,
                 "surge": is_surge,
@@ -146,13 +147,17 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     )
 
 
-def _n_step(values, z, n, truncated):
+def _n_step(values, z, n, truncated, blend=0.0):
     """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
     position bootstraps on the value n steps later, and the last n positions take the
-    outcome z, or the final position's value when the game was cut off unresolved."""
+    outcome z, or the final position's value when the game was cut off unresolved.
+    `blend` mixes every target of a resolved game toward z."""
     length = len(values)
     tail = values[length - 1] if truncated else z
-    return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
+    targets = [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
+    if truncated or blend <= 0.0:
+        return targets
+    return [(1.0 - blend) * t + blend * z for t in targets]
 
 
 def _attack_window(credits, n, norm, truncated):
@@ -195,7 +200,7 @@ def _grounding(values, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, n_step, attack_norm):
+def _episode(pend, p1_died, p2_died, n_step, attack_norm, outcome_blend=0.0):
     """Stamp each player's value and attack targets on its pending positions and return
     both players' rows for training. Returns (rows[(pos, target, policy_mask, z,
     steps_to_end, attack_target, attack_mask)], game_len, p1_won, is_draw) keyed on the
@@ -218,7 +223,9 @@ def _episode(pend, p1_died, p2_died, n_step, attack_norm):
         n = len(positions)
         if n == 0:
             continue
-        targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
+        targets = _n_step(
+            [p["v_search"] for p in positions], z, n_step, truncated, outcome_blend
+        )
         a_tgt, a_mask = _attack_window(
             [p["credit"] for p in positions], n_step, attack_norm, truncated
         )
@@ -366,6 +373,7 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
+    outcome_blend = float(getattr(args, "outcome_blend", 0.5))
     attack_coef = getattr(args, "attack_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 8_000)
@@ -494,6 +502,7 @@ def main(args):
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
+        outcome_blend=outcome_blend,
         attack_coef=attack_coef,
         learning_rate=learning_rate,
         replay_capacity=replay_capacity,
@@ -585,7 +594,14 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], n_step, attack_norm)
+                    ep = _episode(
+                        pending[g],
+                        a["dead"],
+                        b["dead"],
+                        n_step,
+                        attack_norm,
+                        outcome_blend,
+                    )
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -637,7 +653,14 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, n_step, attack_norm)
+                    ep = _episode(
+                        pending[g],
+                        p1_died,
+                        p2_died,
+                        n_step,
+                        attack_norm,
+                        outcome_blend,
+                    )
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep

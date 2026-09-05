@@ -145,3 +145,33 @@ def test_grounding_draws_map_to_one_half():
     n = np.array([0, 1])
     g = _grounding(np.array([0.0, 0.0]), np.array([0.0, 0.0]), n)
     assert g["brier_n0_10"] == pytest.approx(0.0)
+
+
+def test_outcome_blend_grounds_every_row_of_a_resolved_game():
+    """Each target moves `blend` of the way from its n-step value toward the outcome."""
+    values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    pure = _n_step(values, -1.0, 2, False)
+    half = _n_step(values, -1.0, 2, False, 0.5)
+    assert half == pytest.approx([0.5 * t + 0.5 * -1.0 for t in pure])
+    assert _n_step(values, -1.0, 2, False, 0.0) == pytest.approx(pure)
+    assert _n_step(values, -1.0, 2, False, 1.0) == pytest.approx([-1.0] * 6)
+
+
+def test_outcome_blend_leaves_a_truncated_game_alone():
+    values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+    assert _n_step(values, 0.0, 2, True, 0.5) == pytest.approx(
+        _n_step(values, 0.0, 2, True)
+    )
+
+
+def test_episode_applies_the_outcome_blend():
+    """The blend reaches both players' rows, each toward its own outcome."""
+    pend = _pend(5, 5, v=0.25)
+    rows, *_ = _episode(pend, True, False, 2, NORM, 0.25)
+    exp1 = _n_step([p["v_search"] for p in pend["p1"]], -1.0, 2, False, 0.25)
+    exp2 = _n_step([p["v_search"] for p in pend["p2"]], 1.0, 2, False, 0.25)
+    assert [r[1] for r in rows if r[2] == 1.0] == pytest.approx(exp1)
+    assert [r[1] for r in rows if r[2] == 0.0] == pytest.approx(exp2)
+    assert [r[1] for r in rows if r[2] == 1.0] != pytest.approx(
+        _n_step([p["v_search"] for p in pend["p1"]], -1.0, 2, False)
+    )
