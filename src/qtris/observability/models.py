@@ -69,8 +69,11 @@ class OneVsOnePlacementAZConfig(BaseModel):
     n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end (the
     final search value instead when the move cap ended it), the shaping-free post-search
     root value n_step later elsewhere; w_death=1, gamma=1,
-    return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
-    players' trajectories train the value head, the learner's also the policy."""
+    return_scale=1. The attack head regresses credited attack over attack_window
+    placements as a fraction of attack_window * attack_app_cap, masked on truncated
+    tails; it enters the search's selection value only, never the value target. The
+    learner duels frozen snapshots sampled from a disk pool; both players' trajectories
+    train the value and attack heads, the learner's also the policy."""
 
     num_games: int
     horizon: int
@@ -90,6 +93,7 @@ class OneVsOnePlacementAZConfig(BaseModel):
     mini_batch_size: int
     num_epochs: int
     value_coef: float
+    attack_coef: float = 1.0
     learning_rate: float
     replay_capacity: int
     max_pool_size: int = 30
@@ -98,6 +102,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     eval_interval: int = 20
     eval_games: int = 32
     n_step: int = 14
+    attack_window: int = 14
+    attack_app_cap: float = 2.0
     resumed: bool = False
     checkpoint_dir: str = "checkpoints/1v1_placement_az"
     run_name: Optional[str] = None
@@ -123,6 +129,8 @@ class OneVsOneAZLog(LogPayloadModel):
     value_mean: float
     value_target_var: float  # spread of the value target itself; read EV against this
     grad_norm: float  # global grad norm before the optimizer's clipnorm
+    attack_loss: float
+    attack_explained_var: float
 
     # Outcomes / gameplay.
     avg_game_len: float
@@ -187,6 +195,12 @@ class OneVsOneAZLog(LogPayloadModel):
     # Fraction of the generation's rows whose value target was raw z (steps_to_end < n_step).
     raw_z_frac: float = 0.0
 
+    # Attack head on learner rows: target mean and target/prediction correlation over
+    # unmasked rows, root prediction over all of them.
+    attack_target_mean: float = 0.0
+    attack_pred_root: float = 0.0
+    attack_calibration: float = 0.0
+
     # Visualization (wrapped at log time)
     board: np.ndarray
 
@@ -214,7 +228,10 @@ class OneVsOneAZLog(LogPayloadModel):
             "value_mean",
             "value_target_var",
             "grad_norm",
+            "attack_loss",
+            "attack_explained_var",
         ),
+        "attack": ("attack_target_mean", "attack_pred_root", "attack_calibration"),
         "outcomes": (
             "avg_game_len",
             "win_rate",

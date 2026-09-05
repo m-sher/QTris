@@ -111,6 +111,21 @@ class PlacementPolicyValueNet(QtrisModelBase):
         # AZ pass "tanh": their labels are bounded to [-1, 1] and read 0 as neutral, so
         # the head transfers between those two.
         self.value_top = layers.Dense(1, activation=value_activation, name="value")
+        # Attack head: credited attack over the next attack_window placements as a
+        # fraction of attack_window * attack_app_cap; linear, zero at start, clipped to
+        # [0, 1] by the search.
+        self.attack_trunk = keras.Sequential(
+            [
+                layers.Flatten(),
+                layers.Dropout(dropout_rate),
+                layers.Dense(depth, activation="relu"),
+                layers.Dense(depth // 2, activation="relu"),
+            ],
+            name="attack_trunk",
+        )
+        self.attack_top = layers.Dense(
+            1, kernel_initializer="zeros", bias_initializer="zeros", name="attack"
+        )
 
     def process_obs(self, inputs, training=False):
         """Encoder pass returning the piece latent AND the board patch latent.
@@ -164,6 +179,11 @@ class PlacementPolicyValueNet(QtrisModelBase):
             self.value_trunk(piece_dec, training=training), training=training
         )  # (B, 1)
 
+    def score_attack(self, piece_dec, training=False):
+        return self.attack_top(
+            self.attack_trunk(piece_dec, training=training), training=training
+        )  # (B, 1)
+
     @tf.function
     def call(self, inputs, training=False, return_scores=False):
         # Non-jit training forward (used by pretraining/AZ train_step at training=True). Graph mode,
@@ -178,10 +198,11 @@ class PlacementPolicyValueNet(QtrisModelBase):
             context, cand_placements, cand_mask, training=training
         )
         value = self.score_value(piece_dec, training=training)
+        attack = self.score_attack(piece_dec, training=training)
 
         if return_scores:
-            return logits, value, piece_scores
-        return logits, value
+            return logits, value, attack, piece_scores
+        return logits, value, attack
 
     @tf.function(
         jit_compile=True,
@@ -199,7 +220,8 @@ class PlacementPolicyValueNet(QtrisModelBase):
         ],
     )
     def policy_value(self, inputs):
-        """Jit inference forward: (logits, value) from one encoder pass, training=False.
+        """Jit inference forward: (logits, value, attack) from one encoder pass,
+        training=False.
         Same compute as call() at eval, minus the training flag - so XLA never sees dropout."""
         board, piece, b2b_combo_garbage, cand_placements, cand_mask = inputs
         piece_dec, board_dec, _ = self.process_obs(
@@ -210,7 +232,8 @@ class PlacementPolicyValueNet(QtrisModelBase):
             context, cand_placements, cand_mask, training=False
         )
         value = self.score_value(piece_dec, training=False)
-        return logits, value
+        attack = self.score_attack(piece_dec, training=False)
+        return logits, value, attack
 
     @tf.function(
         jit_compile=True,

@@ -58,13 +58,13 @@ def warm_start_policy_only(net, warm):
 
 
 @tf.function
-def train_step(net, batch, value_coef):
+def train_step(net, batch, value_coef, attack_coef):
     cand_mask = batch["cand_mask"]
     # Optional per-position policy weight: 1 trains policy and value on the row, 0 value
     # only. Absent for solo AZ, where the policy terms reduce to plain means.
     pm = batch.get("policy_mask")
     with tf.GradientTape() as tape:
-        logits, values = net(
+        logits, values, attack = net(
             (
                 batch["boards"],
                 batch["pieces"],
@@ -83,7 +83,15 @@ def train_step(net, batch, value_coef):
         else:
             policy_loss = tf.reduce_mean(ce)
         value_loss = tf.reduce_mean((values[:, 0] - batch["value_target"]) ** 2)
-        loss = policy_loss + value_coef * value_loss
+        # Optional attack-head regression; masked rows and solo AZ carry no target.
+        at = batch.get("attack_target")
+        am = batch.get("attack_mask")
+        if at is None:
+            at = tf.zeros_like(values[:, 0])
+            am = tf.zeros_like(values[:, 0])
+        anorm = tf.reduce_sum(am) + 1e-8
+        attack_loss = tf.reduce_sum(am * (attack[:, 0] - at) ** 2) / anorm
+        loss = policy_loss + value_coef * value_loss + attack_coef * attack_loss
 
     grads = tape.gradient(loss, net.trainable_variables)
     grad_norm = tf.linalg.global_norm(grads)  # pre-clip; the optimizer clips at 0.5
@@ -103,6 +111,13 @@ def train_step(net, batch, value_coef):
     ret_var = tf.math.reduce_variance(batch["value_target"])
     res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
+    a_mean = tf.math.divide_no_nan(tf.reduce_sum(am * at), anorm)
+    a_var = tf.math.divide_no_nan(tf.reduce_sum(am * (at - a_mean) ** 2), anorm)
+    a_res = at - attack[:, 0]
+    a_res_mean = tf.math.divide_no_nan(tf.reduce_sum(am * a_res), anorm)
+    a_res_var = tf.math.divide_no_nan(
+        tf.reduce_sum(am * (a_res - a_res_mean) ** 2), anorm
+    )
     return {
         "policy_loss": policy_loss,
         "value_loss": value_loss,
@@ -112,6 +127,8 @@ def train_step(net, batch, value_coef):
         "value_mean": tf.reduce_mean(values[:, 0]),
         "value_target_var": ret_var,
         "grad_norm": grad_norm,
+        "attack_loss": attack_loss,
+        "attack_explained_var": 1.0 - tf.math.divide_no_nan(a_res_var, a_var),
     }
 
 
@@ -120,7 +137,7 @@ def _gen_log_probs(net, boards, pieces, bcg, cand_pl, cand_mk):
     """Masked policy log-probs over one generation's states (fixed horizon*num_games
     shape, so this traces once). Used to measure update_kl: how far the policy moved
     over the generation's update steps."""
-    logits, _ = net((boards, pieces, bcg, cand_pl, cand_mk), training=False)
+    logits, _v, _a = net((boards, pieces, bcg, cand_pl, cand_mk), training=False)
     masked = tf.where(cand_mk, logits, tf.constant(-1e9, tf.float32))
     return tf.nn.log_softmax(masked, axis=-1)
 
@@ -297,6 +314,7 @@ def main(args):
         dirichlet_alpha=getattr(args, "dirichlet_alpha", 0.3),
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
         gamma=GAMMA if gamma is None else gamma,
+        attack_window=0,
         temp_moves=getattr(args, "temp_moves", 12),
         w_death=getattr(args, "w_death", 100.0),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
@@ -602,7 +620,12 @@ def main(args):
         updates = 0
         step_out = None
         for batch in ds:
-            step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
+            step_out = train_step(
+                net,
+                batch,
+                tf.constant(value_coef, tf.float32),
+                tf.constant(0.0, tf.float32),
+            )
             updates += 1
         if step_out is None:
             print(f"Gen {gen}: no batch produced; skipping update.", flush=True)

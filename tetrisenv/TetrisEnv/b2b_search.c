@@ -2547,9 +2547,10 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // clear made with nothing queued, plus two potential differences,
 // w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank and penalty(parent) -
 // gamma*penalty(child) on board quality (height, bumpiness, holes), with -w_death on
-// terminal edges, where both potentials read 0; the leaf bootstrap is the net value
-// directly. A parallel shaping-free channel (leaf values + death edges only) feeds the
-// per-tree root value readout. Dirichlet noise + final sampling stay in Python.
+// terminal edges, where both potentials read 0; the shaped channel's leaf bootstrap is
+// the net value plus the attack head. A parallel shaping-free channel (net values +
+// death edges only) feeds the per-tree root value readout. Dirichlet noise + final
+// sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -2609,7 +2610,8 @@ typedef struct MNode {
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
     // Shaping-free value channel: edge_value carries only the death term, Wv accumulates
-    // it with the leaf values, so the root readout is a Q that skips the shaping.
+    // it with the leaves' output values (W takes their selection values), so the root
+    // readout is a Q that skips the shaping and the attack head.
     float edge_value[MCAP], Wv[MCAP];
     struct MNode* child[MCAP];
 } MNode;
@@ -2881,9 +2883,9 @@ static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float 
     return best_slot;
 }
 static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, int len,
-                         float leaf_value) {
-    float g = leaf_value;
-    float gv = leaf_value;
+                         float leaf_sel, float leaf_out) {
+    float g = leaf_sel;
+    float gv = leaf_out;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
@@ -2972,7 +2974,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
         MNode* node = t->root;
         while (1) {
             if (node->terminal || node->n_legal == 0) {  // dead end: real backup of 0 in-place
-                mtree_backup(t, cfg, path, plen, 0.0f);
+                mtree_backup(t, cfg, path, plen, 0.0f, 0.0f);
                 done++;
                 break;
             }
@@ -2990,7 +2992,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
             MNode* child = node->child[slot];
             if (child == NULL) {
                 MNode* leaf = mtree_alloc(t);
-                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); done++; break; }  // arena full
+                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f, 0.0f); done++; break; }  // arena full
                 leaf->st = node->st;
                 bool terminal = false;
                 float credit = 0.0f;
@@ -3011,7 +3013,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                            - cfg->w_death
                            - cfg->w_b2b * b2b_phi(node->st.b2b))
                               / (cfg->return_scale + 1e-8f);
-                    mtree_backup(t, cfg, path, plen, 0.0f);
+                    mtree_backup(t, cfg, path, plen, 0.0f, 0.0f);
                     done++;
                     break;
                 }
@@ -3163,8 +3165,9 @@ int mcts_collect_roots(void* h, float* boards, int64_t* pieces, float* bcg,
 }
 
 // Apply root net eval + injected Dirichlet noise (Python-generated, one row per live tree
-// in the same order as collect_roots emitted). dir_noise is [nv * MCAP] (only legal slots used).
-void mcts_apply_roots(void* h, const float* logits, const float* values,
+// in the same order as collect_roots emitted). values_sel is the selection value, read only
+// as the FPU baseline; dir_noise is [nv * MCAP] (only legal slots used).
+void mcts_apply_roots(void* h, const float* logits, const float* values_sel,
                       const float* dir_noise, float dir_eps) {
     MEngine* e = (MEngine*)h;
     int row = 0;
@@ -3172,7 +3175,7 @@ void mcts_apply_roots(void* h, const float* logits, const float* values,
         MTree* t = &e->trees[i];
         if (!t->alive) continue;
         MNode* root = t->root;
-        root->value = values[row];
+        root->value = values_sel[row];
         root->expanded = true;
         msoftmax_into_prior(root, &logits[(size_t)row * MCAP]);
         const float* noise = &dir_noise[(size_t)row * MCAP];
@@ -3212,8 +3215,10 @@ int mcts_collect_leaves(void* h, float* boards, int64_t* pieces, float* bcg,
 }
 
 // Apply leaf net eval + backup (rows match collect_leaves' emitted order). For each pending leaf:
-// set priors+value, revert its virtual loss, then back up the real bootstrap along its path.
-void mcts_apply_leaves(void* h, const float* logits, const float* values) {
+// set priors + the selection value, revert its virtual loss, then back up values_sel through
+// the shaped channel and values_out through the shaping-free channel along its path.
+void mcts_apply_leaves(void* h, const float* logits, const float* values_sel,
+                       const float* values_out) {
     MEngine* e = (MEngine*)h;
     const MConfig* cfg = &e->cfg;
     int row = 0;
@@ -3222,14 +3227,12 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
         if (!t->alive) continue;
         for (int p = 0; p < t->n_pending; p++) {
             MNode* leaf = t->pending[p];
-            leaf->value = values[row];
+            leaf->value = values_sel[row];
             leaf->expanded = true;
             leaf->awaiting_eval = false;
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
-            // Bootstrap is the net value directly; the bank is priced per-edge by Phi.
-            float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
-            mtree_backup(t, cfg, t->path[p], t->path_len[p], boot);
+            mtree_backup(t, cfg, t->path[p], t->path_len[p], leaf->value, values_out[row]);
             row++;
         }
         for (int c = 0; c < t->n_collided; c++)
@@ -3284,6 +3287,7 @@ int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
 int mcts_create_arity(void) { return 25; }
 int mcts_result_arity(void) { return 6; }
+int mcts_apply_leaves_arity(void) { return 4; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {
     return residual_match(board, board_height);

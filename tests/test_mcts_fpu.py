@@ -49,6 +49,7 @@ def _root_counts(fpu, seed):
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
                 np.zeros(nv2, np.float32),
+                np.zeros(nv2, np.float32),
             )
         _pi, counts, _desc, dead, _rv = engine.result()
         assert not dead[0]

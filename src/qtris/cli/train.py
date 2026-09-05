@@ -128,6 +128,12 @@ def main() -> None:
         help="value-loss weight in the AZ loss.",
     )
     parser.add_argument(
+        "--attack-coef",
+        type=float,
+        default=1.0,
+        help="1v1 only: attack-head regression weight in the AZ loss.",
+    )
+    parser.add_argument(
         "--learning-rate", type=float, default=3e-4, help="Adam learning rate."
     )
     parser.add_argument(

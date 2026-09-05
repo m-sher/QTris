@@ -103,7 +103,7 @@ class _FlatNet:
     def policy_value(self, inputs):
         n = int(inputs[0].shape[0])
         logits = tf.zeros((n, CANDIDATE_CAPACITY), tf.float32)
-        return logits, tf.zeros((n, 1), tf.float32)
+        return logits, tf.zeros((n, 1), tf.float32), tf.zeros((n, 1), tf.float32)
 
 
 def test_the_walls_stand_before_the_first_reset():

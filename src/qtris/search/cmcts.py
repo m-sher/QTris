@@ -4,7 +4,8 @@ The engine holds one PUCT tree per game in C and runs the whole sim loop (descen
 enumerate / backup) GIL-free, OpenMP-threaded across games. Only the TF policy/value net stays
 in Python: per round the driver calls `collect_leaves` (C emits up to `leaves_per_round` leaves
 per live tree, diverged by virtual loss), runs the net once on the batch, then `apply_leaves`
-(C sets priors + bootstrap, reverts the virtual loss, and backs up). Intra-tree batching cuts the
+(C sets priors, reverts the virtual loss, and backs up the selection value through the shaped
+channel and the output value through the shaping-free one). Intra-tree batching cuts the
 sequential net calls per move from `num_simulations` to `ceil(num_simulations / leaves_per_round)`.
 Dirichlet root noise and final action sampling are generated in Python and passed in.
 """
@@ -84,6 +85,18 @@ def _load_lib():
             f"mcts_result arity mismatch: .so has {int(lib.mcts_result_arity())}, "
             "wrapper passes 6. Rebuild tetrisenv."
         )
+    try:
+        lib.mcts_apply_leaves_arity.argtypes = []
+        lib.mcts_apply_leaves_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_apply_leaves_arity); rebuild tetrisenv"
+        ) from None
+    if int(lib.mcts_apply_leaves_arity()) != 4:
+        raise RuntimeError(
+            "mcts_apply_leaves arity mismatch: .so has "
+            f"{int(lib.mcts_apply_leaves_arity())}, wrapper passes 4. Rebuild tetrisenv."
+        )
     lib.mcts_set_root.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -109,7 +122,7 @@ def _load_lib():
         fn.restype = ctypes.c_int
     lib.mcts_apply_roots.argtypes = [ctypes.c_void_p, _F32, _F32, _F32, ctypes.c_float]
     lib.mcts_apply_roots.restype = None
-    lib.mcts_apply_leaves.argtypes = [ctypes.c_void_p, _F32, _F32]
+    lib.mcts_apply_leaves.argtypes = [ctypes.c_void_p, _F32, _F32, _F32]
     lib.mcts_apply_leaves.restype = None
     lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32, _F32]
     lib.mcts_result.restype = None
@@ -304,11 +317,12 @@ class CMCTS:
             float(dir_eps),
         )
 
-    def apply_leaves(self, logits, values):
+    def apply_leaves(self, logits, values_sel, values_out):
         self.lib.mcts_apply_leaves(
             self.h,
             np.ascontiguousarray(logits, np.float32).ravel(),
-            np.ascontiguousarray(values, np.float32).ravel(),
+            np.ascontiguousarray(values_sel, np.float32).ravel(),
+            np.ascontiguousarray(values_out, np.float32).ravel(),
         )
 
     def result(self):

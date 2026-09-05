@@ -81,13 +81,15 @@ def _pos(r):
         "pi": r["pi"],
         "v_root": r["value"],
         "v_search": r["v_search"],
+        "a_root": r["a_root"],
     }
 
 
 def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     """Commit both pre-chosen placements, then replicate PyTetris1v1Env._step's garbage
     exchange / push timing / death logic on the raw sub-envs.
-    Returns (p1_died, p2_died, attack1, attack2)."""
+    Returns (p1_died, p2_died, attack1, attack2, credit1, credit2); credit is the tree's
+    rule: a difficult clear's whole attack, otherwise at most the own queue it cancels."""
     # placement_step already cancels each player's own pending garbage and (auto_push_garbage
     # =False) does NOT push to the board, so net = attack - cancelled is the queue delta.
     info = []
@@ -96,13 +98,16 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
         pending_before = env._get_total_garbage()
         _total, attack, clears, died = placement_step(env, searcher, desc)
         pending_after = env._get_total_garbage()
+        post_b2b = env._scorer._b2b
         net = attack - (pending_before - pending_after)
         # Actual surge = a b2b chain (>=4) broken by this clear (releases banked b2b).
-        is_surge = clears > 0 and pre_b2b >= 4 and env._scorer._b2b == -1
+        is_surge = clears > 0 and pre_b2b >= 4 and post_b2b == -1
+        difficult = post_b2b == pre_b2b + 1
         info.append(
             {
                 "died": died,
                 "attack": attack,
+                "credit": attack if difficult else min(attack, float(pending_before)),
                 "clears": clears,
                 "net": net,
                 "surge": is_surge,
@@ -131,7 +136,14 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     # Refill queues (sub-envs are auto_fill_queue=False; placement_step skipped this).
     env1._queue = env1._fill_queue(env1._queue)
     env2._queue = env2._fill_queue(env2._queue)
-    return died[0], died[1], info[0]["attack"], info[1]["attack"]
+    return (
+        died[0],
+        died[1],
+        info[0]["attack"],
+        info[1]["attack"],
+        info[0]["credit"],
+        info[1]["credit"],
+    )
 
 
 def _n_step(values, z, n, truncated):
@@ -141,6 +153,20 @@ def _n_step(values, z, n, truncated):
     length = len(values)
     tail = values[length - 1] if truncated else z
     return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
+
+
+def _attack_window(credits, n, norm, truncated):
+    """Per-position (target, mask): credited attack over the next n placements as a
+    fraction of `norm`, capped at 1. `truncated` masks the windows running past the end,
+    so a death-ended trajectory passes False and a move-capped one True."""
+    length = len(credits)
+    csum = np.concatenate([[0.0], np.cumsum(np.asarray(credits, dtype=np.float64))])
+    targets = [
+        min(1.0, float(csum[min(t + n, length)] - csum[t]) / norm)
+        for t in range(length)
+    ]
+    masks = [0.0 if truncated and t + n > length else 1.0 for t in range(length)]
+    return targets, masks
 
 
 def _mean_or_none(xs):
@@ -169,13 +195,13 @@ def _grounding(values, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, n_step):
-    """Stamp each player's value targets on its pending positions and return both players'
-    rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
-    p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
-    collected. A game with no death is a draw for rating and diagnostics but a truncation
-    for the value target. z and steps_to_end are carried for diagnostics and are not
-    training inputs."""
+def _episode(pend, p1_died, p2_died, n_step, attack_norm):
+    """Stamp each player's value and attack targets on its pending positions and return
+    both players' rows for training. Returns (rows[(pos, target, policy_mask, z,
+    steps_to_end, attack_target, attack_mask)], game_len, p1_won, is_draw) keyed on the
+    learner's (player-1) outcome, or None if nothing was collected. A game with no death
+    is a draw for rating and diagnostics but a truncation for both targets. z and
+    steps_to_end are carried for diagnostics and are not training inputs."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -193,9 +219,12 @@ def _episode(pend, p1_died, p2_died, n_step):
         if n == 0:
             continue
         targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
+        a_tgt, a_mask = _attack_window(
+            [p["credit"] for p in positions], n_step, attack_norm, truncated
+        )
         rows += [
-            (p, t, mask, z, n - 1 - i)
-            for i, (p, t) in enumerate(zip(positions, targets))
+            (p, t, mask, z, n - 1 - i, at, am)
+            for i, (p, t, at, am) in enumerate(zip(positions, targets, a_tgt, a_mask))
         ]
     return rows, glen, z1 > 0.0, z1 == 0.0
 
@@ -309,7 +338,7 @@ def _eval_vs_ref(
                 losses += int(a["dead"] and not b["dead"])
                 alive[g] = False
                 continue
-            p1_died, p2_died, _a1, _a2 = _commit_and_exchange(
+            p1_died, p2_died, _a1, _a2, _c1, _c2 = _commit_and_exchange(
                 pairs[g][0],
                 pairs[g][1],
                 searcher,
@@ -337,6 +366,7 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
+    attack_coef = getattr(args, "attack_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 8_000)
     # Opponent-pool knobs.
@@ -375,7 +405,9 @@ def main(args):
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
+        attack_window=n_step,
     )
+    attack_norm = cfg.attack_window * cfg.attack_app_cap
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
     net = _build_net(num_games, piece_dim, depth, num_heads, num_layers, queue_size)
@@ -462,6 +494,7 @@ def main(args):
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
+        attack_coef=attack_coef,
         learning_rate=learning_rate,
         replay_capacity=replay_capacity,
         max_pool_size=max_pool_size,
@@ -470,6 +503,8 @@ def main(args):
         eval_interval=eval_interval,
         eval_games=eval_games,
         n_step=n_step,
+        attack_window=cfg.attack_window,
+        attack_app_cap=cfg.attack_app_cap,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -489,10 +524,10 @@ def main(args):
 
     pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
     mcts = PlacementMCTS(net, cfg)
-    opp_mcts = PlacementMCTS(opp_net, cfg)
+    opp_mcts = PlacementMCTS(opp_net, dc_replace(cfg, attack_window=0))
     eval_cfg = dc_replace(cfg, dirichlet_eps=0.0)
     eval_mcts = PlacementMCTS(net, eval_cfg)
-    ref_mcts = PlacementMCTS(ref_net, eval_cfg)
+    ref_mcts = PlacementMCTS(ref_net, dc_replace(eval_cfg, attack_window=0))
     searcher = (
         CB2BSearch()
     )  # lock-score core for committing the chosen move by descriptor
@@ -550,7 +585,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], n_step)
+                    ep = _episode(pending[g], a["dead"], b["dead"], n_step, attack_norm)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -558,9 +593,11 @@ def main(args):
                         state_recs.append(_state_record(e1))
                         state_recs.append(_state_record(e2))
                     pre_b2b = e1._scorer._b2b
-                    p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
+                    p1_died, p2_died, atk1, atk2, cred1, cred2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    pending[g]["p1"][-1]["credit"] = cred1
+                    pending[g]["p2"][-1]["credit"] = cred2
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
@@ -600,7 +637,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, n_step)
+                    ep = _episode(pending[g], p1_died, p2_died, n_step, attack_norm)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep
@@ -679,6 +716,9 @@ def main(args):
         policy_mask = np.array([r[2] for r in gen_pos], dtype=np.float32)
         outcome_z = np.array([r[3] for r in gen_pos], dtype=np.float32)
         steps_to_end = np.array([r[4] for r in gen_pos], dtype=np.int64)
+        attack_tgt = np.array([r[5] for r in gen_pos], dtype=np.float32)
+        attack_mask = np.array([r[6] for r in gen_pos], dtype=np.float32)
+        a_root = np.array([p["a_root"] for p, *_ in gen_pos], dtype=np.float32)
         v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
         v_search = np.array([p["v_search"] for p, *_ in gen_pos], dtype=np.float32)
         # gen_pos interleaves both players; policy_mask==1 is the learner.
@@ -704,6 +744,8 @@ def main(args):
                 "pi_target": pi_tgt,
                 "value_target": value_tgt,
                 "policy_mask": policy_mask,
+                "attack_target": attack_tgt,
+                "attack_mask": attack_mask,
             }
         )
         replay_size += n_new
@@ -745,7 +787,12 @@ def main(args):
         updates = 0
         acc = {}
         for batch in ds:
-            step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
+            step_out = train_step(
+                net,
+                batch,
+                tf.constant(value_coef, tf.float32),
+                tf.constant(attack_coef, tf.float32),
+            )
             for k, v in step_out.items():
                 acc.setdefault(k, []).append(float(v))
             updates += 1
@@ -779,6 +826,19 @@ def main(args):
         grounding = _grounding(v_root[lrn], outcome_z[lrn], steps_to_end[lrn])
         grounding_search = _grounding(v_search[lrn], outcome_z[lrn], steps_to_end[lrn])
         raw_z_frac = float((steps_to_end < n_step).mean())
+        amsk = (attack_mask == 1.0) & lrn
+        attack_target_mean = float(attack_tgt[amsk].mean()) if amsk.any() else 0.0
+        attack_pred_root = float(a_root[lrn].mean()) if lrn.any() else 0.0
+        if (
+            amsk.sum() >= 2
+            and np.std(a_root[amsk]) > 1e-6
+            and np.std(attack_tgt[amsk]) > 1e-6
+        ):
+            attack_calibration = float(
+                np.corrcoef(a_root[amsk], attack_tgt[amsk])[0, 1]
+            )
+        else:
+            attack_calibration = 0.0
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -830,6 +890,8 @@ def main(args):
                 value_mean=opt["value_mean"],
                 value_target_var=opt["value_target_var"],
                 grad_norm=opt["grad_norm"],
+                attack_loss=opt["attack_loss"],
+                attack_explained_var=opt["attack_explained_var"],
                 avg_game_len=float(np.mean(game_lens)),
                 win_rate=win_rate,
                 win_rate_vs_ref=last_wr_ref,
@@ -866,6 +928,9 @@ def main(args):
                 grounding=grounding,
                 grounding_search=grounding_search,
                 raw_z_frac=raw_z_frac,
+                attack_target_mean=attack_target_mean,
+                attack_pred_root=attack_pred_root,
+                attack_calibration=attack_calibration,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )

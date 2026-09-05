@@ -11,10 +11,15 @@ LPR = 8
 LEAF = 0.3
 
 
-def _run(seed, **weights):
-    """Flat priors, no noise, every leaf valued LEAF. At this budget no descent reaches a
-    terminal or exhausts the arena, so every backup carries LEAF and the root readout must
-    equal it exactly."""
+def _leaf_values(n, v, ramp):
+    return np.arange(n, dtype=np.float32) * 0.25 if ramp else np.full(n, v, np.float32)
+
+
+def _run(seed, sel=LEAF, out=LEAF, ramp_sel=False, **weights):
+    """Flat priors, no noise, every leaf's output value `out` and selection value `sel`
+    (a per-row ramp when `ramp_sel`). At this budget no descent reaches a terminal or
+    exhausts the arena, so every backup carries `out` and the root readout must equal it
+    exactly."""
     env = _played_env(seed, 30)
     engine = CMCTS(
         1,
@@ -48,7 +53,8 @@ def _run(seed, **weights):
                 break
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
-                np.full(nv2, LEAF, np.float32),
+                _leaf_values(nv2, sel, ramp_sel),
+                np.full(nv2, out, np.float32),
             )
         _pi, counts, _desc, dead, root_value = engine.result()
         assert not dead[0]
@@ -68,5 +74,22 @@ def test_root_value_excludes_the_shaping_weights():
         7, w_attack=0.0, w_b2b=0.0, w_height=0.0, w_bumpiness=0.0
     )
     counts, rv = _run(7, w_attack=5.0, w_b2b=5.0, w_height=5.0, w_bumpiness=5.0)
+    assert not np.array_equal(base_counts, counts)
+    assert rv == pytest.approx(base_rv, abs=1e-4)
+
+
+NO_SHAPING = dict(w_attack=0.0, w_b2b=0.0, w_height=0.0, w_bumpiness=0.0)
+
+
+def test_root_value_follows_the_output_seed_only():
+    _counts, rv = _run(7, sel=0.0, out=LEAF, **NO_SHAPING)
+    assert rv == pytest.approx(LEAF, abs=1e-4)
+    _counts, rv = _run(7, sel=LEAF, out=0.0, **NO_SHAPING)
+    assert rv == pytest.approx(0.0, abs=1e-4)
+
+
+def test_counts_follow_the_selection_seed_and_the_readout_does_not():
+    base_counts, base_rv = _run(7, **NO_SHAPING)
+    counts, rv = _run(7, ramp_sel=True, **NO_SHAPING)
     assert not np.array_equal(base_counts, counts)
     assert rv == pytest.approx(base_rv, abs=1e-4)

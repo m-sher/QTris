@@ -86,6 +86,7 @@ def _run(env, sims, w_height, w_bumpiness):
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
                 np.zeros(nv2, np.float32),
+                np.zeros(nv2, np.float32),
             )
         _pi, counts, desc, dead, _rv = engine.result()
         assert not dead[0]
@@ -246,6 +247,7 @@ def _run_holes(env, sims, w_holes):
                 break
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
+                np.zeros(nv2, np.float32),
                 np.zeros(nv2, np.float32),
             )
         _pi, counts, desc, dead, _rv = engine.result()

@@ -74,6 +74,7 @@ def _search(env, pending, focus, w_attack=1.0, w_plain=0.0):
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
                 np.zeros(nv2, np.float32),
+                np.zeros(nv2, np.float32),
             )
         _pi, counts, desc, dead, _rv = engine.result()
         assert not dead[0]
