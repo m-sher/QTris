@@ -97,6 +97,20 @@ def _load_lib():
             "mcts_apply_leaves arity mismatch: .so has "
             f"{int(lib.mcts_apply_leaves_arity())}, wrapper passes 4. Rebuild tetrisenv."
         )
+    try:
+        lib.mcts_collect_root_children_arity.argtypes = []
+        lib.mcts_collect_root_children_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_collect_root_children_arity); "
+            "rebuild tetrisenv"
+        ) from None
+    if int(lib.mcts_collect_root_children_arity()) != 11:
+        raise RuntimeError(
+            "mcts_collect_root_children arity mismatch: .so has "
+            f"{int(lib.mcts_collect_root_children_arity())}, wrapper passes 11. "
+            "Rebuild tetrisenv."
+        )
     lib.mcts_set_root.argtypes = [
         ctypes.c_void_p,
         ctypes.c_int,
@@ -123,6 +137,20 @@ def _load_lib():
     lib.mcts_apply_roots.argtypes = [ctypes.c_void_p, _F32, _F32, _F32, ctypes.c_float]
     lib.mcts_apply_roots.restype = None
     lib.mcts_apply_leaves.argtypes = [ctypes.c_void_p, _F32, _F32, _F32]
+    lib.mcts_collect_root_children.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_float,
+        _F32,
+        _I64,
+        _F32,
+        _F32,
+        _U8,
+        _F32,
+        _F32,
+        _I32,
+    ]
+    lib.mcts_collect_root_children.restype = ctypes.c_int
     lib.mcts_apply_leaves.restype = None
     lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32, _F32]
     lib.mcts_result.restype = None
@@ -307,6 +335,45 @@ class CMCTS:
 
     def collect_leaves(self):
         return self._collect(self.lib.mcts_collect_leaves)
+
+    def collect_root_children(self, max_k, min_n):
+        """Value rows from the root children: the non-terminal expanded children with
+        at least `min_n` visits, most visited first, up to `max_k` per tree;
+        `values_out` is each child's shaping-free readout."""
+        cap = self.n * max(1, int(max_k))
+        boards = np.zeros(cap * _NET_ROWS * 10, np.float32)
+        pieces = np.zeros(cap * self.pw, np.int64)
+        bcg = np.zeros(cap * 3, np.float32)
+        pls = np.zeros(cap * self.cap * FEATURE_DIM, np.float32)
+        masks = np.zeros(cap * self.cap, np.uint8)
+        values_out = np.zeros(cap, np.float32)
+        counts = np.zeros(cap, np.float32)
+        tree_ids = np.zeros(cap, np.int32)
+        nv = self.lib.mcts_collect_root_children(
+            self.h,
+            int(max_k),
+            float(min_n),
+            boards,
+            pieces,
+            bcg,
+            pls,
+            masks,
+            values_out,
+            counts,
+            tree_ids,
+        )
+        if nv == 0:
+            return 0, None
+        return nv, (
+            boards[: nv * _NET_ROWS * 10].reshape(nv, _NET_ROWS, 10, 1),
+            pieces[: nv * self.pw].reshape(nv, self.pw),
+            bcg[: nv * 3].reshape(nv, 3),
+            pls[: nv * self.cap * FEATURE_DIM].reshape(nv, self.cap, FEATURE_DIM),
+            masks[: nv * self.cap].reshape(nv, self.cap).astype(bool),
+            values_out[:nv],
+            counts[:nv],
+            tree_ids[:nv],
+        )
 
     def apply_roots(self, logits, values, dir_noise, dir_eps):
         self.lib.mcts_apply_roots(

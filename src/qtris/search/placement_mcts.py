@@ -64,6 +64,8 @@ class MCTSConfig:
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
     vloss: float = 1.0  # virtual-loss magnitude (scaled-Q units)
+    sibling_max: int = 0  # max root children returned per game per search; 0 = none
+    sibling_min_visits: float = 2.0  # visits a root child needs to be returned
 
 
 class PlacementMCTS:
@@ -127,11 +129,13 @@ class PlacementMCTS:
         """Run MCTS for one move across all games. `temperatures` is a per-game play
         temperature (scalar broadcasts). Returns one result dict per game: either
         {dead: True} or {dead: False, pi, counts, descriptor, visits, value, a_root,
-        v_search, board, pieces, bcg, cand_placements, cand_mask}. `descriptor` =
-        (is_hold, rot, norm_col, landing_row, spin); commit the real move via
-        `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
+        v_search, board, pieces, bcg, cand_placements, cand_mask, siblings}.
+        `descriptor` = (is_hold, rot, norm_col, landing_row, spin); commit the real move
+        via `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
         counts alongside the normalized `pi`; `v_search` is the post-search shaping-free
-        root value and `a_root` the net's attack head at the root."""
+        root value and `a_root` the net's attack head at the root. `siblings` lists up
+        to `sibling_max` root children as {board, pieces, bcg, cand_placements,
+        cand_mask, v_out, n}, `v_out` being the child's shaping-free readout."""
         n = len(real_envs)
         self._fullb = n * max(
             1, self.cfg.leaves_per_round
@@ -216,6 +220,23 @@ class PlacementMCTS:
                 engine.apply_leaves(logits, values + a_coef * attacks, values)
 
             pi, counts, desc, dead, root_value = engine.result()
+            siblings = [[] for _ in range(n)]
+            if self.cfg.sibling_max > 0:
+                ns, sreq = engine.collect_root_children(
+                    self.cfg.sibling_max, self.cfg.sibling_min_visits
+                )
+                for j in range(ns):
+                    siblings[int(sreq[7][j])].append(
+                        {
+                            "board": sreq[0][j].copy(),
+                            "pieces": sreq[1][j].copy(),
+                            "bcg": sreq[2][j].copy(),
+                            "cand_placements": sreq[3][j].copy(),
+                            "cand_mask": sreq[4][j].copy(),
+                            "v_out": float(sreq[5][j]),
+                            "n": float(sreq[6][j]),
+                        }
+                    )
         finally:
             engine.destroy()
 
@@ -233,6 +254,7 @@ class PlacementMCTS:
                 "descriptor": tuple(int(x) for x in desc[i, slot]),
                 "visits": int(counts[i].sum()),
                 "v_search": float(root_value[i]),
+                "siblings": siblings[i],
                 **obs[i],
             }
             results.append(row)

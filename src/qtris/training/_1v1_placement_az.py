@@ -10,7 +10,10 @@ value when the move cap ended the game unresolved; every earlier position gets t
 shaping-free post-search root value of the position n_step later. Every target of a
 resolved game is then mixed `outcome_blend` of the way toward z. The search runs at
 w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
-only in-search terminal.
+only in-search terminal. The learner's search also returns up to sibling_max root
+children per position with their shaping-free readouts; they train the value head
+alone, from a separate replay buffer, sibling_frac of the batch size added to each
+minibatch, weighted by sibling_coef.
 
 Both players' trajectories are trained, each labeled with its own outcome z; only the
 learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
@@ -374,6 +377,11 @@ def main(args):
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
     outcome_blend = float(getattr(args, "outcome_blend", 0.5))
+    sibling_max = int(getattr(args, "sibling_max", 8))
+    sibling_min_visits = float(getattr(args, "sibling_min_visits", 2.0))
+    sibling_coef = float(getattr(args, "sibling_coef", 1.0))
+    sibling_frac = float(getattr(args, "sibling_frac", 0.5))
+    sibling_capacity = int(getattr(args, "sibling_capacity", 24_000))
     attack_coef = getattr(args, "attack_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 8_000)
@@ -414,6 +422,8 @@ def main(args):
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
         attack_window=n_step,
+        sibling_max=sibling_max,
+        sibling_min_visits=sibling_min_visits,
     )
     attack_norm = cfg.attack_window * cfg.attack_app_cap
 
@@ -503,6 +513,11 @@ def main(args):
         num_epochs=num_epochs,
         value_coef=value_coef,
         outcome_blend=outcome_blend,
+        sibling_max=sibling_max,
+        sibling_min_visits=sibling_min_visits,
+        sibling_coef=sibling_coef,
+        sibling_frac=sibling_frac,
+        sibling_capacity=sibling_capacity,
         attack_coef=attack_coef,
         learning_rate=learning_rate,
         replay_capacity=replay_capacity,
@@ -533,8 +548,8 @@ def main(args):
 
     pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
     mcts = PlacementMCTS(net, cfg)
-    opp_mcts = PlacementMCTS(opp_net, dc_replace(cfg, attack_window=0))
-    eval_cfg = dc_replace(cfg, dirichlet_eps=0.0)
+    opp_mcts = PlacementMCTS(opp_net, dc_replace(cfg, attack_window=0, sibling_max=0))
+    eval_cfg = dc_replace(cfg, dirichlet_eps=0.0, sibling_max=0)
     eval_mcts = PlacementMCTS(net, eval_cfg)
     ref_mcts = PlacementMCTS(ref_net, dc_replace(eval_cfg, attack_window=0))
     searcher = (
@@ -559,6 +574,9 @@ def main(args):
 
     replay = deque()
     replay_size = 0
+    sibling_replay = deque()
+    sibling_size = 0
+    sibling_batch = int(round(mini_batch_size * sibling_frac)) if sibling_max > 0 else 0
     N = num_games
     opp_temps = np.zeros(N, dtype=np.float32)  # greedy move selection for the opponent
     wr_ema = 0.5
@@ -569,6 +587,7 @@ def main(args):
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
         gen_pos = []  # (pos, target, policy_mask, z, steps_to_end)
+        gen_sib = []  # learner root children: value rows with no played outcome
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
@@ -584,6 +603,9 @@ def main(args):
                 np.float32
             )
             r1 = mcts.search([p[0] for p in pairs], 1.0, temps_p1)  # learner
+            for a in r1:
+                if not a["dead"]:
+                    gen_sib.extend(a["siblings"])
             r2 = opp_mcts.search([p[1] for p in pairs], 1.0, opp_temps)  # pool opponent
 
             for g in range(N):
@@ -769,11 +791,40 @@ def main(args):
                 "policy_mask": policy_mask,
                 "attack_target": attack_tgt,
                 "attack_mask": attack_mask,
+                "sibling_mask": np.zeros(n_new, np.float32),
             }
         )
         replay_size += n_new
         while replay_size > replay_capacity and len(replay) > 1:
             replay_size -= len(replay.popleft()["value_target"])
+        sib_v = np.array([s["v_out"] for s in gen_sib], dtype=np.float32)
+        sib_n = np.array([s["n"] for s in gen_sib], dtype=np.float32)
+        if gen_sib:
+            m = len(gen_sib)
+            sibling_replay.append(
+                {
+                    "boards": np.stack([s["board"] for s in gen_sib]).astype(
+                        np.float32
+                    ),
+                    "pieces": np.stack([s["pieces"] for s in gen_sib]).astype(np.int64),
+                    "bcg": np.stack([s["bcg"] for s in gen_sib]).astype(np.float32),
+                    "cand_placements": np.stack(
+                        [s["cand_placements"] for s in gen_sib]
+                    ).astype(np.float32),
+                    "cand_mask": np.stack([s["cand_mask"] for s in gen_sib]).astype(
+                        bool
+                    ),
+                    "pi_target": np.zeros((m, pi_tgt.shape[1]), np.float32),
+                    "value_target": sib_v,
+                    "policy_mask": np.zeros(m, np.float32),
+                    "attack_target": np.zeros(m, np.float32),
+                    "attack_mask": np.zeros(m, np.float32),
+                    "sibling_mask": np.ones(m, np.float32),
+                }
+            )
+            sibling_size += m
+            while sibling_size > sibling_capacity and len(sibling_replay) > 1:
+                sibling_size -= len(sibling_replay.popleft()["value_target"])
 
         if replay_size < mini_batch_size:
             print(
@@ -790,8 +841,24 @@ def main(args):
             .repeat()
             .batch(mini_batch_size, drop_remainder=True)
             .take(total_steps)
-            .prefetch(tf.data.AUTOTUNE)
         )
+        # Sibling rows ride along each minibatch from their own buffer.
+        if sibling_batch > 0 and sibling_size >= sibling_batch:
+            sfull = {
+                k: np.concatenate([e[k] for e in sibling_replay], axis=0)
+                for k in sibling_replay[0]
+            }
+            sds = (
+                tf.data.Dataset.from_tensor_slices(sfull)
+                .shuffle(sibling_size)
+                .repeat()
+                .batch(sibling_batch, drop_remainder=True)
+                .take(total_steps)
+            )
+            ds = tf.data.Dataset.zip((ds, sds)).map(
+                lambda a, b: {k: tf.concat([a[k], b[k]], axis=0) for k in a}
+            )
+        ds = ds.prefetch(tf.data.AUTOTUNE)
 
         # update_kl over a fixed-size slice of this gen's new LEARNER positions (one trace).
         learner_idx = np.flatnonzero(lrn)[:mini_batch_size]
@@ -815,6 +882,7 @@ def main(args):
                 batch,
                 tf.constant(value_coef, tf.float32),
                 tf.constant(attack_coef, tf.float32),
+                tf.constant(sibling_coef, tf.float32),
             )
             for k, v in step_out.items():
                 acc.setdefault(k, []).append(float(v))
@@ -915,6 +983,8 @@ def main(args):
                 grad_norm=opt["grad_norm"],
                 attack_loss=opt["attack_loss"],
                 attack_explained_var=opt["attack_explained_var"],
+                sibling_loss=opt["sibling_loss"],
+                sibling_explained_var=opt["sibling_explained_var"],
                 avg_game_len=float(np.mean(game_lens)),
                 win_rate=win_rate,
                 win_rate_vs_ref=last_wr_ref,
@@ -954,6 +1024,12 @@ def main(args):
                 attack_target_mean=attack_target_mean,
                 attack_pred_root=attack_pred_root,
                 attack_calibration=attack_calibration,
+                sibling_rows=len(gen_sib),
+                sibling_target_mean=float(sib_v.mean()) if len(sib_v) else 0.0,
+                sibling_death_share=float((sib_v <= -0.5).mean())
+                if len(sib_v)
+                else 0.0,
+                sibling_visits_mean=float(sib_n.mean()) if len(sib_n) else 0.0,
                 board=batch["boards"][0, ..., 0].numpy(),
             )
         )

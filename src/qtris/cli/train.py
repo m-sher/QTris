@@ -135,6 +135,37 @@ def main() -> None:
         "instead of the n-step bootstrap (0 = pure n-step; resolved games only).",
     )
     parser.add_argument(
+        "--sibling-max",
+        type=int,
+        default=8,
+        help="1v1 only: max root children kept as value rows per move (0 = none).",
+    )
+    parser.add_argument(
+        "--sibling-min-visits",
+        type=float,
+        default=2.0,
+        help="1v1 only: visits a root child needs to be kept as a value row.",
+    )
+    parser.add_argument(
+        "--sibling-coef",
+        type=float,
+        default=1.0,
+        help="1v1 only: weight of the sibling value loss in the AZ loss.",
+    )
+    parser.add_argument(
+        "--sibling-frac",
+        type=float,
+        default=0.5,
+        help="1v1 only: sibling rows added to each minibatch, as a fraction of "
+        "batch size.",
+    )
+    parser.add_argument(
+        "--sibling-capacity",
+        type=int,
+        default=24_000,
+        help="1v1 only: sibling replay buffer size in rows.",
+    )
+    parser.add_argument(
         "--attack-coef",
         type=float,
         default=1.0,

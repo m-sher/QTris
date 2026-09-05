@@ -3270,6 +3270,51 @@ void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead,
     }
 }
 
+// Root children as value rows: per live tree, every non-terminal expanded root child
+// with at least min_n visits, most visited first, at most max_k. Emits each child's net
+// inputs (same layout as collect_leaves), its shaping-free readout Wv/N, its visits and
+// its tree id; returns rows written. Buffers hold num_trees*max_k rows.
+int mcts_collect_root_children(void* h, int max_k, float min_n, float* boards,
+                               int64_t* pieces, float* bcg, float* pls, uint8_t* masks,
+                               float* values_out, float* counts, int* tree_ids) {
+    MEngine* e = (MEngine*)h;
+    const MConfig* cfg = &e->cfg;
+    int pw = 2 + cfg->queue_size;
+    int nv = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive || t->root == NULL) continue;
+        MNode* root = t->root;
+        int slots[MCAP]; int ns = 0;
+        for (int k = 0; k < root->n_legal; k++) {
+            int slot = root->legal[k];
+            MNode* c = root->child[slot];
+            if (c == NULL || c->terminal || !c->expanded) continue;
+            if (root->N[slot] < min_n) continue;
+            slots[ns++] = slot;
+        }
+        for (int a = 1; a < ns; a++) {
+            int s = slots[a]; int b = a - 1;
+            while (b >= 0 && root->N[slots[b]] < root->N[s]) {
+                slots[b + 1] = slots[b]; b--;
+            }
+            slots[b + 1] = s;
+        }
+        if (ns > max_k) ns = max_k;
+        for (int a = 0; a < ns; a++) {
+            int slot = slots[a];
+            mcts_fill_request(root->child[slot], cfg,
+                              &boards[(size_t)nv * NET_ROWS * BOARD_COLS],
+                              &pieces[(size_t)nv * pw], &bcg[(size_t)nv * 3],
+                              &pls[(size_t)nv * MCAP * 18], &masks[(size_t)nv * MCAP]);
+            values_out[nv] = root->Wv[slot] / root->N[slot];
+            counts[nv] = root->N[slot];
+            tree_ids[nv] = i; nv++;
+        }
+    }
+    return nv;
+}
+
 void mcts_destroy(void* h) {
     MEngine* e = (MEngine*)h;
     if (!e) return;
@@ -3284,10 +3329,11 @@ int mcts_candidate_capacity(void) { return MCAP; }
 int mcts_branch_capacity(void) { return MBRANCH; }
 // Height handshake: the walls the search levels must be the ones the env builds.
 int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
-// ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
+// ABI handshake: cmcts refuses a .so whose exported arity differs from its wrapper.
 int mcts_create_arity(void) { return 25; }
 int mcts_result_arity(void) { return 6; }
 int mcts_apply_leaves_arity(void) { return 4; }
+int mcts_collect_root_children_arity(void) { return 11; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {
     return residual_match(board, board_height);

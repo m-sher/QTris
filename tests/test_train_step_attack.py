@@ -42,7 +42,11 @@ def _attack_weights(net):
 def _step(net, batch, attack_coef):
     """One eager train_step: the tf.function's body run directly."""
     return train_step.python_function(
-        net, batch, tf.constant(1.0, tf.float32), tf.constant(attack_coef, tf.float32)
+        net,
+        batch,
+        tf.constant(1.0, tf.float32),
+        tf.constant(attack_coef, tf.float32),
+        tf.constant(0.0, tf.float32),
     )
 
 

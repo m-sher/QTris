@@ -58,11 +58,14 @@ def warm_start_policy_only(net, warm):
 
 
 @tf.function
-def train_step(net, batch, value_coef, attack_coef):
+def train_step(net, batch, value_coef, attack_coef, sibling_coef):
     cand_mask = batch["cand_mask"]
     # Optional per-position policy weight: 1 trains policy and value on the row, 0 value
     # only. Absent for solo AZ, where the policy terms reduce to plain means.
     pm = batch.get("policy_mask")
+    # Optional sibling flag: 1 marks a root-child row, whose value target enters its own
+    # loss term. Absent for solo AZ.
+    sm = batch.get("sibling_mask")
     with tf.GradientTape() as tape:
         logits, values, attack = net(
             (
@@ -82,7 +85,19 @@ def train_step(net, batch, value_coef, attack_coef):
             policy_loss = tf.reduce_sum(pm * ce) / pnorm
         else:
             policy_loss = tf.reduce_mean(ce)
-        value_loss = tf.reduce_mean((values[:, 0] - batch["value_target"]) ** 2)
+        sq = (values[:, 0] - batch["value_target"]) ** 2
+        if sm is not None:
+            pw = 1.0 - sm
+            vnorm = tf.reduce_sum(pw) + 1e-8
+            snorm = tf.reduce_sum(sm) + 1e-8
+            value_loss = tf.reduce_sum(pw * sq) / vnorm
+            sibling_loss = tf.reduce_sum(sm * sq) / snorm
+        else:
+            pw = tf.ones_like(sq)
+            vnorm = tf.cast(tf.shape(sq)[0], tf.float32)
+            snorm = tf.constant(1.0, tf.float32)
+            value_loss = tf.reduce_mean(sq)
+            sibling_loss = tf.constant(0.0, tf.float32)
         # Optional attack-head regression; masked rows and solo AZ carry no target.
         at = batch.get("attack_target")
         am = batch.get("attack_mask")
@@ -91,7 +106,12 @@ def train_step(net, batch, value_coef, attack_coef):
             am = tf.zeros_like(values[:, 0])
         anorm = tf.reduce_sum(am) + 1e-8
         attack_loss = tf.reduce_sum(am * (attack[:, 0] - at) ** 2) / anorm
-        loss = policy_loss + value_coef * value_loss + attack_coef * attack_loss
+        loss = (
+            policy_loss
+            + value_coef * value_loss
+            + attack_coef * attack_loss
+            + sibling_coef * sibling_loss
+        )
 
     grads = tape.gradient(loss, net.trainable_variables)
     grad_norm = tf.linalg.global_norm(grads)  # pre-clip; the optimizer clips at 0.5
@@ -108,9 +128,22 @@ def train_step(net, batch, value_coef, attack_coef):
     else:
         entropy = tf.reduce_mean(ent)
         tgt_entropy = tf.reduce_mean(tgt_ent)
-    ret_var = tf.math.reduce_variance(batch["value_target"])
-    res_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
+    # Value statistics split by the mask: pw for the played rows, sm for siblings.
+    vt = batch["value_target"]
+    res = vt - values[:, 0]
+    vt_mean = tf.reduce_sum(pw * vt) / vnorm
+    ret_var = tf.reduce_sum(pw * (vt - vt_mean) ** 2) / vnorm
+    res_mean = tf.reduce_sum(pw * res) / vnorm
+    res_var = tf.reduce_sum(pw * (res - res_mean) ** 2) / vnorm
     explained_var = 1.0 - tf.math.divide_no_nan(res_var, ret_var)
+    if sm is not None:
+        st_mean = tf.reduce_sum(sm * vt) / snorm
+        st_var = tf.reduce_sum(sm * (vt - st_mean) ** 2) / snorm
+        sr_mean = tf.reduce_sum(sm * res) / snorm
+        sr_var = tf.reduce_sum(sm * (res - sr_mean) ** 2) / snorm
+        sibling_explained_var = 1.0 - tf.math.divide_no_nan(sr_var, st_var)
+    else:
+        sibling_explained_var = tf.constant(0.0, tf.float32)
     a_mean = tf.math.divide_no_nan(tf.reduce_sum(am * at), anorm)
     a_var = tf.math.divide_no_nan(tf.reduce_sum(am * (at - a_mean) ** 2), anorm)
     a_res = at - attack[:, 0]
@@ -124,11 +157,13 @@ def train_step(net, batch, value_coef, attack_coef):
         "entropy": entropy,
         "policy_kl": policy_loss - tgt_entropy,
         "explained_var": explained_var,
-        "value_mean": tf.reduce_mean(values[:, 0]),
+        "value_mean": tf.reduce_sum(pw * values[:, 0]) / vnorm,
         "value_target_var": ret_var,
         "grad_norm": grad_norm,
         "attack_loss": attack_loss,
         "attack_explained_var": 1.0 - tf.math.divide_no_nan(a_res_var, a_var),
+        "sibling_loss": sibling_loss,
+        "sibling_explained_var": sibling_explained_var,
     }
 
 
@@ -624,6 +659,7 @@ def main(args):
                 net,
                 batch,
                 tf.constant(value_coef, tf.float32),
+                tf.constant(0.0, tf.float32),
                 tf.constant(0.0, tf.float32),
             )
             updates += 1

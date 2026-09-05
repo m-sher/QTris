@@ -73,9 +73,12 @@ class OneVsOnePlacementAZConfig(BaseModel):
     head regresses credited attack (a difficult clear's whole attack, zero for any other
     clear) over attack_window placements as a fraction of attack_window *
     attack_app_cap, masked on truncated tails; it enters the search's selection value
-    only, never the value target. The learner duels frozen snapshots sampled from a disk
-    pool; both players' trajectories train the value and attack heads, the learner's
-    also the policy."""
+    only, never the value target. The learner's search also returns up to sibling_max
+    root children with at least sibling_min_visits visits; their shaping-free readouts
+    train the value head alone, from a sibling_capacity buffer, sibling_frac of the
+    batch size added to each minibatch, weighted by sibling_coef. The learner duels
+    frozen snapshots sampled from a disk pool; both players' trajectories train the
+    value and attack heads, the learner's also the policy."""
 
     num_games: int
     horizon: int
@@ -97,6 +100,11 @@ class OneVsOnePlacementAZConfig(BaseModel):
     value_coef: float
     attack_coef: float = 1.0
     outcome_blend: float = 0.5
+    sibling_max: int = 8
+    sibling_min_visits: float = 2.0
+    sibling_coef: float = 1.0
+    sibling_frac: float = 0.5
+    sibling_capacity: int = 24_000
     learning_rate: float
     replay_capacity: int
     max_pool_size: int = 30
@@ -134,6 +142,8 @@ class OneVsOneAZLog(LogPayloadModel):
     grad_norm: float  # global grad norm before the optimizer's clipnorm
     attack_loss: float
     attack_explained_var: float
+    sibling_loss: float
+    sibling_explained_var: float
 
     # Outcomes / gameplay.
     avg_game_len: float
@@ -204,6 +214,12 @@ class OneVsOneAZLog(LogPayloadModel):
     attack_pred_root: float = 0.0
     attack_calibration: float = 0.0
 
+    # Root-children value rows this generation; death share is targets at or below -0.5.
+    sibling_rows: int = 0
+    sibling_target_mean: float = 0.0
+    sibling_death_share: float = 0.0
+    sibling_visits_mean: float = 0.0
+
     # Visualization (wrapped at log time)
     board: np.ndarray
 
@@ -233,8 +249,16 @@ class OneVsOneAZLog(LogPayloadModel):
             "grad_norm",
             "attack_loss",
             "attack_explained_var",
+            "sibling_loss",
+            "sibling_explained_var",
         ),
         "attack": ("attack_target_mean", "attack_pred_root", "attack_calibration"),
+        "siblings": (
+            "sibling_rows",
+            "sibling_target_mean",
+            "sibling_death_share",
+            "sibling_visits_mean",
+        ),
         "outcomes": (
             "avg_game_len",
             "win_rate",
