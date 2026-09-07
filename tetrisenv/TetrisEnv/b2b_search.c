@@ -2458,7 +2458,6 @@ static void rng_next_bag(TetrioRNG* rng, int* bag) {
 
 typedef struct {
     int rows;
-    int col;
     int timer;
 } GarbEntry;
 
@@ -2482,11 +2481,20 @@ static void garb_tick(GarbEntry* gq, int cnt) {
     }
 }
 
-static bool garb_push_one(uint16_t* board, int bh, GarbEntry* gq, int* cnt) {
+// Hole column for the next landing entry, drawn from the state's own stream and salted
+// with the placement, so the column a child lands varies with that child's placement.
+// Four-wide play draws inside columns 3-6.
+static int garb_col_draw(uint32_t* seed, uint32_t salt, int four_wide) {
+    uint32_t z = (*seed += 0x9E3779B9u) ^ salt;
+    z = (z ^ (z >> 16)) * 0x85EBCA6Bu;
+    z = (z ^ (z >> 13)) * 0xC2B2AE35u;
+    z ^= z >> 16;
+    return four_wide ? 3 + (int)(z % 4u) : (int)(z % 10u);
+}
+static bool garb_push_one(uint16_t* board, int bh, GarbEntry* gq, int* cnt, int col) {
     if (*cnt <= 0 || gq[0].timer > 0) return false;
     uint16_t full = (1 << BOARD_COLS) - 1;
     int rows = gq[0].rows;
-    int col = gq[0].col;
     for (int r = 0; r < bh - rows; r++) board[r] = board[r + rows];
     uint16_t garb_row = full & ~(1 << col);
     for (int r = bh - rows; r < bh; r++) board[r] = garb_row;
@@ -2495,8 +2503,9 @@ static bool garb_push_one(uint16_t* board, int bh, GarbEntry* gq, int* cnt) {
     return true;
 }
 
-static void garb_push_all(uint16_t* board, int bh, GarbEntry* gq, int* cnt) {
-    while (garb_push_one(board, bh, gq, cnt)) {}
+static void garb_push_all(uint16_t* board, int bh, GarbEntry* gq, int* cnt,
+                          uint32_t* seed, uint32_t salt, int four_wide) {
+    while (garb_push_one(board, bh, gq, cnt, garb_col_draw(seed, salt, four_wide))) {}
 }
 
 static int garb_total(const GarbEntry* gq, int cnt) {
@@ -2582,6 +2591,7 @@ typedef struct {
     TetrioRNG rng;                // queue-refill PRNG (mirrors env _tetrio_rng)
     int pending[7]; int pending_pos, pending_len;  // _next_bag remainder
     GarbEntry gq[MAX_GARB_ENTRIES]; int gcnt;
+    uint32_t gseed;               // hole-column stream for landing garbage
     int b2b, combo;
 } MState;
 
@@ -2757,13 +2767,18 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     bool top_out = board_topped_out(s->board, cfg->board_height);
 
     if (attack > 0) garb_cancel(s->gq, &s->gcnt, (int)attack);
+    uint32_t salt = (uint32_t)d[0] * 7919u + (uint32_t)d[1] * 104729u
+                  + (uint32_t)d[2] * 1299709u + (uint32_t)d[3] * 15485863u
+                  + (uint32_t)d[4] * 32452843u;
     if (cfg->auto_push_garbage && clears == 0) {
         garb_tick(s->gq, s->gcnt);
-        garb_push_one(s->board, cfg->board_height, s->gq, &s->gcnt);
+        garb_push_one(s->board, cfg->board_height, s->gq, &s->gcnt,
+                      garb_col_draw(&s->gseed, salt, cfg->four_wide));
     }
     // _add_to_garbage_queue is a no-op in sims (garbage_chance=0).
     if (cfg->auto_push_garbage && cfg->garbage_push_delay == 0)
-        garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt);
+        garb_push_all(s->board, cfg->board_height, s->gq, &s->gcnt, &s->gseed, salt,
+                      cfg->four_wide);
 
     // Same position as the env's re-level: after garbage, before the garbage top-out
     // check, and before the board is stored and enumerated.
@@ -3116,7 +3131,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
 void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hold,
                    const int* queue, int qlen, int b2b, int combo,
                    int64_t rng_t, const int* pending, int pending_len,
-                   const int* garb_rows, const int* garb_col, const int* garb_timer, int gcnt) {
+                   const int* garb_rows, const int* garb_timer, int gcnt) {
     MEngine* e = (MEngine*)h;
     MTree* t = &e->trees[tree];
     t->qmin = 1e30f; t->qmax = -1e30f; t->n_collided = 0;
@@ -3134,7 +3149,9 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
     s->pending_len = pending_len; s->pending_pos = 0;
     for (int i = 0; i < pending_len; i++) s->pending[i] = pending[i];
     s->gcnt = gcnt;
-    for (int i = 0; i < gcnt; i++) { s->gq[i].rows = garb_rows[i]; s->gq[i].col = garb_col[i]; s->gq[i].timer = garb_timer[i]; }
+    for (int i = 0; i < gcnt; i++) { s->gq[i].rows = garb_rows[i]; s->gq[i].timer = garb_timer[i]; }
+    s->gseed = (uint32_t)(((uint64_t)rng_t * 0x9E3779B97F4A7C15ULL) >> 32)
+             ^ ((uint32_t)tree * 0x85EBCA6Bu);
     t->root = root;
 }
 
@@ -3334,6 +3351,7 @@ int mcts_create_arity(void) { return 25; }
 int mcts_result_arity(void) { return 6; }
 int mcts_apply_leaves_arity(void) { return 4; }
 int mcts_collect_root_children_arity(void) { return 11; }
+int mcts_set_root_arity(void) { return 15; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {
     return residual_match(board, board_height);
@@ -3363,7 +3381,7 @@ float mcts_debug_step(uint16_t* board, int board_height, int max_holes,
                       int garbage_push_delay, int queue_size,
                       int* active, int* hold, int* queue, int* qlen,
                       int64_t* rng_t, int* pending, int* pending_len,
-                      int* garb_rows, int* garb_col, int* garb_timer, int* gcnt,
+                      int* garb_rows, int* garb_timer, int* gcnt,
                       int* b2b, int* combo, const int* desc, int* out_terminal) {
     MConfig cfg; memset(&cfg, 0, sizeof(cfg));
     cfg.board_height = board_height; cfg.max_holes = max_holes;
@@ -3377,7 +3395,7 @@ float mcts_debug_step(uint16_t* board, int board_height, int max_holes,
     s.rng.t = *rng_t; s.pending_len = *pending_len; s.pending_pos = 0;
     for (int i = 0; i < *pending_len; i++) s.pending[i] = pending[i];
     s.gcnt = *gcnt;
-    for (int i = 0; i < *gcnt; i++) { s.gq[i].rows = garb_rows[i]; s.gq[i].col = garb_col[i]; s.gq[i].timer = garb_timer[i]; }
+    for (int i = 0; i < *gcnt; i++) { s.gq[i].rows = garb_rows[i]; s.gq[i].timer = garb_timer[i]; }
     s.b2b = *b2b; s.combo = *combo;
     bool term = false;
     float credit = 0.0f;
@@ -3389,7 +3407,7 @@ float mcts_debug_step(uint16_t* board, int board_height, int max_holes,
     *rng_t = s.rng.t; *pending_len = s.pending_len;
     for (int i = 0; i < s.pending_len; i++) pending[i] = s.pending[s.pending_pos + i];
     *gcnt = s.gcnt;
-    for (int i = 0; i < s.gcnt; i++) { garb_rows[i] = s.gq[i].rows; garb_col[i] = s.gq[i].col; garb_timer[i] = s.gq[i].timer; }
+    for (int i = 0; i < s.gcnt; i++) { garb_rows[i] = s.gq[i].rows; garb_timer[i] = s.gq[i].timer; }
     *b2b = s.b2b; *combo = s.combo;
     *out_terminal = term ? 1 : 0;
     return attack;

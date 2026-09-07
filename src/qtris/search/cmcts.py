@@ -126,10 +126,21 @@ def _load_lib():
         ctypes.c_int,
         _I32,
         _I32,
-        _I32,
         ctypes.c_int,
     ]
     lib.mcts_set_root.restype = None
+    try:
+        lib.mcts_set_root_arity.argtypes = []
+        lib.mcts_set_root_arity.restype = ctypes.c_int
+    except AttributeError:
+        raise RuntimeError(
+            "stale b2b_search .so (no mcts_set_root_arity); rebuild tetrisenv"
+        ) from None
+    if int(lib.mcts_set_root_arity()) != len(lib.mcts_set_root.argtypes):
+        raise RuntimeError(
+            f"mcts_set_root arity mismatch: .so has {int(lib.mcts_set_root_arity())}, "
+            f"wrapper passes {len(lib.mcts_set_root.argtypes)}. Rebuild tetrisenv."
+        )
     for name in ("mcts_collect_roots", "mcts_collect_leaves"):
         fn = getattr(lib, name)
         fn.argtypes = [ctypes.c_void_p, _F32, _I64, _F32, _F32, _U8, _I32]
@@ -283,9 +294,9 @@ class CMCTS:
         pending = np.array([p.value for p in env._next_bag], np.int32)
         # Clamp to the C root's fixed capacity; the front entries are the imminent ones a
         # search can reach (surge segmentation can lengthen the queue past the cap).
+        # Rows and timers only: the tree draws its own hole column at landing.
         gq = env._garbage_queue[:_MAX_GARB_ENTRIES]
         gr = np.array([g[0] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
-        gc = np.array([g[1] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
         gt = np.array([g[2] for g in gq], np.int32) if gq else np.zeros(0, np.int32)
         # ndpointer rejects size-0 arrays; pad to length 1 (gcnt=0 means C ignores them)
         ensure = lambda a: a if a.size else np.zeros(1, np.int32)  # noqa: E731
@@ -303,7 +314,6 @@ class CMCTS:
             ensure(pending),
             len(pending),
             ensure(gr),
-            ensure(gc),
             ensure(gt),
             len(gq),
         )

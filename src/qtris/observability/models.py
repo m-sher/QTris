@@ -66,12 +66,12 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero trainer hyperparams.
 
-    n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end (the
-    final search value instead when the move cap ended it), the shaping-free post-search
-    root value n_step later elsewhere, then mixed outcome_blend of the way toward z on
-    every position of a resolved game; w_death=1, gamma=1, return_scale=1. The attack
-    head regresses credited attack (a difficult clear's whole attack, zero for any other
-    clear) over attack_window placements as a fraction of attack_window *
+    TD(td_lambda) value target on the net's own root values: the final position takes
+    the raw outcome z in {-1,0,+1} (its own root value instead when the move cap ended
+    the game), each earlier one mixes the next root value with the lambda-weighted
+    return; w_death=1, gamma=1, return_scale=1. The attack head regresses credited
+    attack (a difficult clear's whole attack, zero for any other clear) over
+    attack_window placements as a fraction of attack_window *
     attack_app_cap, masked on truncated tails; it enters the search's selection value
     only, never the value target. The learner's search also returns up to sibling_max
     root children with at least sibling_min_visits visits; their shaping-free readouts
@@ -99,8 +99,8 @@ class OneVsOnePlacementAZConfig(BaseModel):
     num_epochs: int
     value_coef: float
     attack_coef: float = 1.0
-    outcome_blend: float = 0.5
-    sibling_max: int = 8
+    td_lambda: float = 0.9
+    sibling_max: int = 0
     sibling_min_visits: float = 2.0
     sibling_coef: float = 1.0
     sibling_frac: float = 0.5
@@ -112,7 +112,6 @@ class OneVsOnePlacementAZConfig(BaseModel):
     pool_wr_gate: float = 0.55
     eval_interval: int = 20
     eval_games: int = 32
-    n_step: int = 14
     attack_window: int = 14
     attack_app_cap: float = 2.0
     resumed: bool = False
@@ -205,7 +204,8 @@ class OneVsOneAZLog(LogPayloadModel):
     grounding: dict[str, float | None] = {}
     grounding_search: dict[str, float | None] = {}
 
-    # Fraction of the generation's rows whose value target was raw z (steps_to_end < n_step).
+    # Mean lambda ** steps_to_end: the weight each target puts on its trajectory's tail
+    # (z, or the final root value when the move cap ended the game).
     raw_z_frac: float = 0.0
 
     # Attack head on learner rows: target mean and target/prediction correlation over

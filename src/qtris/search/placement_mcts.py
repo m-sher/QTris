@@ -261,7 +261,7 @@ class PlacementMCTS:
         return results
 
     def root_values(self, real_envs):
-        """Net value of each env's current root state (no simulation), for the n-step return
+        """Net value of each env's current root state (no simulation), for the return
         bootstrap at the collection horizon. Returns a (num_games,) array; 0 where the root has
         no legal move (dead). Costs one batched root eval - the first half of `search()`."""
         n = len(real_envs)

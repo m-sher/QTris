@@ -37,9 +37,9 @@ def _concat(a, b):
     }
 
 
-def _compiled():
+def _compiled(learning_rate=1e-2):
     net = _net()
-    net.compile(optimizer=keras.optimizers.Adam(1e-2))
+    net.compile(optimizer=keras.optimizers.Adam(learning_rate))
     return net
 
 
@@ -85,14 +85,18 @@ def test_no_sibling_mask_means_no_sibling_term():
 
 
 def test_sibling_coef_gates_how_far_the_head_follows_sibling_targets():
-    drops = []
+    """Twenty steps from the same weights land the sibling rows markedly closer to
+    their targets at sibling_coef 1 than at 0."""
+    net = _compiled(1e-3)
+    played = _rows(6, 1, 0.3, sibling=False)
+    sib = _rows(6, 2, -1.0, sibling=True)
+    start = [w.numpy().copy() for w in net.weights]
+    mse = {}
     for coef in (0.0, 1.0):
+        for w, w0 in zip(net.weights, start):
+            w.assign(w0)
         tf.random.set_seed(0)
-        net = _compiled()
-        played = _rows(6, 1, 0.3, sibling=False)
-        sib = _rows(6, 2, -1.0, sibling=True)
-        before = _values(net, sib).mean()
-        for _ in range(8):
+        for _ in range(20):
             _step(net, _concat(played, sib), coef)
-        drops.append(before - _values(net, sib).mean())
-    assert drops[1] > drops[0] + 0.05
+        mse[coef] = float(np.mean((_values(net, sib) + 1.0) ** 2))
+    assert mse[1.0] < 0.8 * mse[0.0], mse

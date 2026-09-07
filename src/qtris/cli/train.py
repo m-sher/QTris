@@ -61,11 +61,10 @@ def main() -> None:
         help="1v1 only: games per win_rate_vs_ref eval.",
     )
     parser.add_argument(
-        "--n-step",
+        "--attack-window",
         type=int,
         default=14,
-        help="1v1 only: n-step value target horizon (raw outcome z within n of the "
-        "game end, the post-search root value n steps later elsewhere).",
+        help="1v1 only: placements the attack head's target spans (0 = head off).",
     )
     parser.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
@@ -128,16 +127,16 @@ def main() -> None:
         help="value-loss weight in the AZ loss.",
     )
     parser.add_argument(
-        "--outcome-blend",
+        "--td-lambda",
         type=float,
-        default=0.5,
-        help="1v1 only: fraction of each value target taken from the game's outcome "
-        "instead of the n-step bootstrap (0 = pure n-step; resolved games only).",
+        default=0.9,
+        help="1v1 only: TD(lambda) for the value target (1 = raw outcome z on every "
+        "position; lower bootstraps toward the net's near-term root value).",
     )
     parser.add_argument(
         "--sibling-max",
         type=int,
-        default=8,
+        default=0,
         help="1v1 only: max root children kept as value rows per move (0 = none).",
     )
     parser.add_argument(
@@ -296,8 +295,8 @@ def main() -> None:
         if args.gamma is not None:
             parser.error(
                 "1v1 does not accept --gamma: its reward is terminal-only "
-                "(z in {-1,0,1}) and the n-step target is undiscounted. Use "
-                "--n-step to trade outcome grounding against bootstrap."
+                "(z in {-1,0,1}) and the value target is undiscounted. Use "
+                "--td-lambda to trade outcome grounding against bootstrap."
             )
         from qtris.training._1v1_placement_az import main as run
     else:

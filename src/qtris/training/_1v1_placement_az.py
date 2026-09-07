@@ -2,13 +2,13 @@
 
 The learner (player 1) duels an opponent (player 2) sampled each generation from a pool of
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
-(the opponent's already-sent garbage is seen at the root; none is modeled landing within the
-search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
-its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
-value when the move cap ended the game unresolved; every earlier position gets the
-shaping-free post-search root value of the position n_step later. Every target of a
-resolved game is then mixed `outcome_blend` of the way toward z. The search runs at
+(the opponent's already-sent garbage is seen at the root and lands inside the tree on
+non-clearing placements, at hole columns the tree draws itself), the chosen placements
+are committed, and garbage is exchanged as `PyTetris1v1Env` does. The value head
+regresses TD(td_lambda) targets on the net's own root values: the final position takes
+the realized outcome z in {-1, 0, +1}, or its own root value when the move cap ended the
+game unresolved, and each earlier position mixes the next position's root value with the
+lambda-weighted return. The search runs at
 w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
 only in-search terminal. The learner's search also returns up to sibling_max root
 children per position with their shaping-free readouts; they train the value head
@@ -150,24 +150,29 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     )
 
 
-def _n_step(values, z, n, truncated, blend=0.0):
-    """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
-    position bootstraps on the value n steps later, and the last n positions take the
-    outcome z, or the final position's value when the game was cut off unresolved.
-    `blend` mixes every target of a resolved game toward z."""
+def _td_lambda(values, z, lam, truncated):
+    """TD(lambda) value targets for one trajectory (terminal-only reward, gamma=1): the
+    final position takes the outcome z, or its own value when the game was cut off
+    unresolved, and each earlier position mixes the next position's value with the
+    lambda-weighted return."""
     length = len(values)
-    tail = values[length - 1] if truncated else z
-    targets = [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
-    if truncated or blend <= 0.0:
-        return targets
-    return [(1.0 - blend) * t + blend * z for t in targets]
+    g = values[length - 1] if truncated else z
+    targets = [0.0] * length
+    targets[length - 1] = g
+    for t in range(length - 2, -1, -1):
+        g = (1.0 - lam) * values[t + 1] + lam * g
+        targets[t] = g
+    return targets
 
 
 def _attack_window(credits, n, norm, truncated):
     """Per-position (target, mask): credited attack over the next n placements as a
     fraction of `norm`, capped at 1. `truncated` masks the windows running past the end,
-    so a death-ended trajectory passes False and a move-capped one True."""
+    so a death-ended trajectory passes False and a move-capped one True. At n <= 0 every
+    row is masked out and the head trains on nothing."""
     length = len(credits)
+    if n <= 0:
+        return [0.0] * length, [0.0] * length
     csum = np.concatenate([[0.0], np.cumsum(np.asarray(credits, dtype=np.float64))])
     targets = [
         min(1.0, float(csum[min(t + n, length)] - csum[t]) / norm)
@@ -203,7 +208,7 @@ def _grounding(values, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, n_step, attack_norm, outcome_blend=0.0):
+def _episode(pend, p1_died, p2_died, td_lambda, attack_window, attack_norm):
     """Stamp each player's value and attack targets on its pending positions and return
     both players' rows for training. Returns (rows[(pos, target, policy_mask, z,
     steps_to_end, attack_target, attack_mask)], game_len, p1_won, is_draw) keyed on the
@@ -226,11 +231,9 @@ def _episode(pend, p1_died, p2_died, n_step, attack_norm, outcome_blend=0.0):
         n = len(positions)
         if n == 0:
             continue
-        targets = _n_step(
-            [p["v_search"] for p in positions], z, n_step, truncated, outcome_blend
-        )
+        targets = _td_lambda([p["v_root"] for p in positions], z, td_lambda, truncated)
         a_tgt, a_mask = _attack_window(
-            [p["credit"] for p in positions], n_step, attack_norm, truncated
+            [p["credit"] for p in positions], attack_window, attack_norm, truncated
         )
         rows += [
             (p, t, mask, z, n - 1 - i, at, am)
@@ -376,8 +379,8 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
-    outcome_blend = float(getattr(args, "outcome_blend", 0.5))
-    sibling_max = int(getattr(args, "sibling_max", 8))
+    td_lambda = float(getattr(args, "td_lambda", 0.9))
+    sibling_max = int(getattr(args, "sibling_max", 0))
     sibling_min_visits = float(getattr(args, "sibling_min_visits", 2.0))
     sibling_coef = float(getattr(args, "sibling_coef", 1.0))
     sibling_frac = float(getattr(args, "sibling_frac", 0.5))
@@ -391,7 +394,7 @@ def main(args):
     pool_wr_gate = getattr(args, "pool_wr_gate", 0.55)
     eval_interval = getattr(args, "eval_interval", 20)
     eval_games = getattr(args, "eval_games", 32)
-    n_step = max(1, int(getattr(args, "n_step", 14)))
+    attack_window = int(getattr(args, "attack_window", 14))
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -409,7 +412,7 @@ def main(args):
         np.random.seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # n-step value target in z units; own-death = -1, undiscounted, scale 1.
+    # Value target in z units; own-death = -1, undiscounted, scale 1.
     cfg = MCTSConfig(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
@@ -421,7 +424,7 @@ def main(args):
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
-        attack_window=n_step,
+        attack_window=attack_window,
         sibling_max=sibling_max,
         sibling_min_visits=sibling_min_visits,
     )
@@ -512,7 +515,7 @@ def main(args):
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
-        outcome_blend=outcome_blend,
+        td_lambda=td_lambda,
         sibling_max=sibling_max,
         sibling_min_visits=sibling_min_visits,
         sibling_coef=sibling_coef,
@@ -526,7 +529,6 @@ def main(args):
         pool_wr_gate=pool_wr_gate,
         eval_interval=eval_interval,
         eval_games=eval_games,
-        n_step=n_step,
         attack_window=cfg.attack_window,
         attack_app_cap=cfg.attack_app_cap,
         resumed=resumed,
@@ -620,9 +622,9 @@ def main(args):
                         pending[g],
                         a["dead"],
                         b["dead"],
-                        n_step,
+                        td_lambda,
+                        attack_window,
                         attack_norm,
-                        outcome_blend,
                     )
                 else:
                     pending[g]["p1"].append(_pos(a))
@@ -679,9 +681,9 @@ def main(args):
                         pending[g],
                         p1_died,
                         p2_died,
-                        n_step,
+                        td_lambda,
+                        attack_window,
                         attack_norm,
-                        outcome_blend,
                     )
 
                 if ep is not None:
@@ -916,7 +918,7 @@ def main(args):
             value_calibration = 0.0
         grounding = _grounding(v_root[lrn], outcome_z[lrn], steps_to_end[lrn])
         grounding_search = _grounding(v_search[lrn], outcome_z[lrn], steps_to_end[lrn])
-        raw_z_frac = float((steps_to_end < n_step).mean())
+        raw_z_frac = float(np.mean(td_lambda**steps_to_end))
         amsk = (attack_mask == 1.0) & lrn
         attack_target_mean = float(attack_tgt[amsk].mean()) if amsk.any() else 0.0
         attack_pred_root = float(a_root[lrn].mean()) if lrn.any() else 0.0
