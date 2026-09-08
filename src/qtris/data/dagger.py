@@ -532,7 +532,7 @@ def main(cli_args):
         num_steps=cli_args.num_steps,
         seed=getattr(cli_args, "seed", 10_000_000),
         search_depth=g.search_depth,
-        beam_width=200,
+        beam_width=getattr(cli_args, "beam_width", None) or 200,
         queue_size=g.queue_size,
         model_pieces=m.queue_size + 2,
         max_len=m.max_len,

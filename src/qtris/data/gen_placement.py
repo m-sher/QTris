@@ -323,6 +323,7 @@ def main(args):
         except Exception:
             print("Existing dataset load failed, starting fresh", flush=True)
 
+    beam_width = getattr(args, "beam_width", None) or datagen_cfg.beam_width
     engine = getattr(args, "engine", "c")
     batch = int(getattr(args, "batch", 64))
     if engine == "gpu":
@@ -344,7 +345,7 @@ def main(args):
         seed=seed + existing_count,
         num_steps=num_steps,
         search_depth=datagen_cfg.search_depth,
-        beam_width=datagen_cfg.beam_width,
+        beam_width=beam_width,
         queue_size=queue_size,
         max_len=max_len,
         max_holes=max_holes,

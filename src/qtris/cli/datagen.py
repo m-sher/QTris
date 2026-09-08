@@ -34,6 +34,13 @@ def main() -> None:
         "batch to pay off; at 1 it is slower than the C.",
     )
     parser.add_argument(
+        "--beam-width",
+        type=int,
+        default=None,
+        help="beam width per search (default: DataGenConfig.beam_width, or 200 with "
+        "--dagger). For --engine gpu, device memory scales with --batch times this.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
