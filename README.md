@@ -50,6 +50,9 @@ uv run datagen --dagger --checkpoint checkpoints/placement_pretrained_policy
 
 # Watch a checkpoint play (pygame)
 uv run demo --checkpoint checkpoints/placement_az --num-simulations 256
+
+# Watch the beam oracle play on its own, no checkpoint (gpu = the CUDA port)
+uv run demo --oracle c --search-depth 7 --beam-width 128
 uv run demo --mode 1v1 --checkpoint checkpoints/placement_az --opponent checkpoints/placement_pretrained_policy
 ```
 

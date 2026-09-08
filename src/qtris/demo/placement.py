@@ -40,9 +40,9 @@ dropout_rate = 0.0
 max_len = 15
 num_row_tiers = 2
 
-# Candidate enumeration: a wide, shallow search returns every legal root
+# Candidate enumeration: a wide search returns every legal root
 # placement (with landing rows + key sequences); the model does the ranking.
-search_depth = 2
+search_depth = 10
 beam_width = 512
 
 num_steps = 500
@@ -222,7 +222,7 @@ def main(args):
 
         # Enumerate legal placements from the live search, then let the model rank.
         queue = np.array([p.value for p in py_env._queue], dtype=np.int32)
-        _ba, _bs, cand_actions, cand_scores, cand_seqs, cand_rows = (
+        _ba, _bs, cand_actions, cand_scores, cand_seqs, cand_rows, _v = (
             searcher.search_with_scores(
                 board=py_env._board,
                 active_piece=py_env._active_piece.piece_type.value,

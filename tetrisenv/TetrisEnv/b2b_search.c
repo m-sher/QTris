@@ -21,12 +21,10 @@
 
 // Spawn / top-out geometry (matches PyTetrisEnv): pieces spawn at row SPAWN_ROW just above the
 // 20-visible field; top-out = the piece-agnostic 7-cell spawn box (rows 17-18) is blocked OR a
-// column reaches DEATH_HEIGHT_CAP. HEIGHT_REF is the beam's height-gradient anchor (= death
-// height). NET_ROWS is the model-visible slice (bottom 24) emitted to the net.
+// column reaches DEATH_HEIGHT_CAP. NET_ROWS is the model-visible slice (bottom 24) emitted to the net.
 #define SPAWN_ROW 17
 #define DEATH_HEIGHT_CAP 35
 #define PERFECT_CLEAR_ATTACK 5
-#define HEIGHT_REF 22
 #define NET_ROWS 24
 #define SPIN_STATES 2
 
@@ -350,7 +348,7 @@ static inline uint64_t tt_hash(const SearchState* s, int board_height) {
     ph.f = s->parent_avg_height;
     h ^= (uint64_t)ua.u * 0x517cc1b727220a95ULL;
     h ^= (uint64_t)ph.u * 0x9e3779b97f4a7c15ULL;
-    // pieces_placed is the W_APP denominator, so it feeds the score and belongs in the key.
+    // pieces_placed divides the attack and ramp terms, so it belongs in the key.
     h ^= (uint64_t)(uint32_t)s->pieces_placed * 0x517cc1b727220a95ULL;
     // chain_ramp is path-cumulative and feeds the score through W_EXEC_RAMP.
     h ^= (uint64_t)(uint32_t)s->chain_ramp * 0x9e3779b97f4a7c15ULL;
@@ -397,36 +395,37 @@ static bool b2b_initialized = false;
 static int8_t B2B_KICKS[4][4][5][2];
 static int8_t B2B_I_KICKS[4][4][5][2];
 
-// Heuristic weights - hand-designed, bounded, survival-first.
-// Rationale is documented at each use site in evaluate_state().
-//
-// Scale discipline:
-//   - Instant-death: -1e6 (inviolable).
-//   - Near-death cliff: -5000..-10000 (dominates any achievable positive reward).
-static const int   NEAR_DEATH_ZONE   = 4;        // rows from the death line where the cliff fires
-static float W_NEAR_DEATH      = 5000.0f;  // per row of slack inside the zone
-static float W_HEIGHT_QUARTIC  = 80.0f;    // -W * h_ratio^4
-static float W_AVG_HEIGHT      = 40.0f;    // -W * avg_height (mean column height)
-static float W_BUMPINESS       = 1.0f;
+// Heuristic weights. Every term is in attack lines, so one unit of any weight is worth
+// one line sent; the only larger magnitudes are the instant-death floor (-1e6) and the
+// continuous height risk, which reaches W_RISK lines at RISK_H0 and e-folds every RISK_TAU
+// rows: 0.4 lines at height 8, 5 at 12, 21 at 14, 79 at 16, 154 at 17, 300 at 18.
+// Each weight multiplied into the score is a power of two, or a small integer times an
+// integer-valued operand, so every such product is exact.
+static float W_RISK            = 300.0f;   // risk term at effective height RISK_H0
+static float RISK_H0           = 18.0f;
+static float RISK_TAU          = 1.5f;     // rows per e-fold of the risk term
+// RISK_TABLE[h] = W_RISK * exp((h - RISK_H0) / RISK_TAU), filled by b2b_init_pieces.
+static float RISK_TABLE[DEATH_HEIGHT_CAP];
+static float W_AVG_HEIGHT      = 4.0f;     // * mean column height (rows)
+static float W_BUMPINESS       = 0.125f;
 
-static float W_HOLES           = 6.0f;     // * holes (enclosed cavities) * (1 + 0.5h), uncapped
-static float W_HOLE_CEILING    = 1.5f;     // * hole_ceiling_weight (buried-hole depth)
+static float W_HOLES           = 0.5f;     // * holes (enclosed cavities) * (1 + effective_h / HOLE_HEIGHT_SCALE)
+static float HOLE_HEIGHT_SCALE = 32.0f;
+static float W_HOLE_CEILING    = 0.125f;   // * hole_ceiling_weight (buried-hole depth)
 
-// B2B store (W_B2B_LINEAR is the dominant hold/hoarding driver)
-static float W_B2B_FLAT        = 5.0f;     // one-shot "b2b active" flag (b2b>=0, incl. starting b2b)
-static float W_B2B_SQRT        = 8.0f;     // * sqrt(b2b)
-static float W_B2B_LINEAR      = 20.0f;    // * b2b
+// B2B store. A break at b2b >= 4 sends b2b lines.
+static float W_B2B_FLAT        = 1.0f;     // one-shot "b2b active" flag (b2b >= 0)
+static float W_B2B_LINEAR      = 3.0f;     // * b2b
 
-// Attack realization
-static float W_ATTACK_TOTAL    = 1.0f;     // * (total_attack + max(0, leaf_b2b))
-static float W_APP             = 100.0f;   // * (total_attack + max(0,b2b)) / pieces_placed
-static float W_GARBAGE_PREVENT = 4.0f;     // * garbage_prevented - keep imminent garbage off the board
+// Attack realization, as a per-piece rate over the path times a horizon in pieces.
+static float W_ATTACK_H        = 10.0f;    // * attack / pieces_placed
+static float W_GARBAGE_PREVENT = 0.5f;     // * garbage_prevented
 
 // Spin-setup structure (b2b-maintaining clear potential)
-static float W_IMMOBILE_CLEAR  = 5.0f;     // * sqrt(immobile_clearing_placements)
-static float W_IMMOBILE_LINES  = 1.0f;     // * min(immobile_clearable_lines, 8)
-static float W_EXEC_RAMP       = 20.0f;    // per b2b-maintaining clear that continues a combo, times its combo index, along the path
-static float W_CHAIN[5]        = {0.0f, 0.0f, 40.0f, 100.0f, 180.0f};  // by affordable consecutive spin clears
+static float W_IMMOBILE_CLEAR  = 0.5f;     // * sqrt(immobile_clearing_placements)
+static float W_IMMOBILE_LINES  = 0.125f;   // * immobile_clearable_lines
+static float W_EXEC_RAMP       = 18.0f;    // * chain_ramp / pieces_placed
+static float W_CHAIN[5]        = {0.0f, 0.0f, 3.5f, 9.0f, 16.0f};  // by affordable consecutive spin clears
 
 // ============================================================
 // Piece / Kick Initialization (copied from pathfinder.c)
@@ -565,6 +564,10 @@ static void b2b_init_pieces(void) {
             }
             o->shape_key = k;
         }
+    }
+
+    for (int h = 0; h < DEATH_HEIGHT_CAP; h++) {
+        RISK_TABLE[h] = (float)((double)W_RISK * exp(((double)h - (double)RISK_H0) / (double)RISK_TAU));
     }
 
     b2b_initialized = true;
@@ -1188,7 +1191,8 @@ static int count_hole_sections(const uint16_t* board,
 // stays 0 and the `filled_above > 0` test can never fire.
 static float compute_hole_ceiling_weight(const uint16_t* board, int board_height,
                                           int top_filled, const uint16_t* reachable) {
-    float total_weight = 0.0f;
+    // Sum of filled_above * (1 + hole_height / board_height), as an integer numerator.
+    int total = 0;
 
     for (int c = 0; c < BOARD_COLS; c++) {
         uint16_t bit = (1 << c);
@@ -1203,14 +1207,13 @@ static float compute_hole_ceiling_weight(const uint16_t* board, int board_height
                 bool enclosed = !(reachable[r] & bit);
                 if (enclosed && filled_above > 0) {
                     int hole_height = board_height - r;
-                    float height_factor = (float)hole_height / (float)board_height;
-                    total_weight += (float)filled_above * (1.0f + height_factor);
+                    total += filled_above * (board_height + hole_height);
                 }
             }
         }
     }
 
-    return total_weight;
+    return (float)total / (float)board_height;
 }
 
 // ============================================================
@@ -1324,8 +1327,10 @@ static ImmobilePlacementResult count_immobile_placements(
 
     // Build per-piece-type best weight from queue position.
     // If a piece appears multiple times in the queue, use the best (earliest)
-    // weight. Weight for position i = 1.0 / (i + 1).
+    // weight. Weight for position i = 1.0 / (i + 1); piece_pos keeps i for the
+    // exact division in the weighted sums.
     float piece_weight[8]; // indexed by piece type (0=N unused, 1-7)
+    int piece_pos[8];
     memset(piece_weight, 0, sizeof(piece_weight));
     for (int i = 0; i < num_upcoming; i++) {
         int pt = upcoming_pieces[i];
@@ -1333,6 +1338,7 @@ static ImmobilePlacementResult count_immobile_placements(
         float w = 1.0f / (float)(i + 1);
         if (w > piece_weight[pt]) {
             piece_weight[pt] = w;
+            piece_pos[pt] = i;
         }
     }
 
@@ -1421,8 +1427,8 @@ static ImmobilePlacementResult count_immobile_placements(
         int lines_cap         = qc * 4;
         int capped_lines      = lines_this_piece < lines_cap ? lines_this_piece : lines_cap;
 
-        res.weighted_immobile_clearing += w * (float)capped_clearing;
-        res.weighted_immobile_lines    += w * (float)capped_lines;
+        res.weighted_immobile_clearing += (float)capped_clearing / (float)(piece_pos[pt] + 1);
+        res.weighted_immobile_lines    += (float)capped_lines / (float)(piece_pos[pt] + 1);
     }
 
     return res;
@@ -1585,6 +1591,33 @@ static int beam_cmp(const void* pa, const void* pb) {
 
 
 
+// Root scores are reported on a per-depth normalised scale, so roots whose lines died
+// at different depths stay comparable: each frontier maps to [-1, 0] by
+// (score - max) / (max - min), and a root keeps the best value it reached plus
+// ROOT_DEPTH_STEP per depth. The step exceeds the span, so surviving deeper always
+// outranks dying shallower, and quality orders the roots within one depth.
+#define ROOT_DEPTH_STEP 1.125f
+#define ROOT_FLOOR (-2.0f)
+
+// Raise every root of one pre-prune frontier. next_beam holds only live children.
+static void raise_root_norm(const SearchState* frontier, int n, int depth,
+                            float* root_norm, int depth0_count) {
+    if (n <= 0) return;
+    float hi = frontier[0].score, lo = frontier[0].score;
+    for (int i = 1; i < n; i++) {
+        if (frontier[i].score > hi) hi = frontier[i].score;
+        if (frontier[i].score < lo) lo = frontier[i].score;
+    }
+    float span = hi - lo;
+    float base = ROOT_DEPTH_STEP * (float)depth;
+    for (int i = 0; i < n; i++) {
+        int ri = frontier[i].depth0_placement_idx;
+        if (ri < 0 || ri >= depth0_count) continue;
+        float v = base + (span > 0.0f ? (frontier[i].score - hi) / span : 0.0f);
+        if (v > root_norm[ri]) root_norm[ri] = v;
+    }
+}
+
 #define BEAM_STRATA 8
 static inline int beam_stratum(const SearchState* s) {
     return s->rows_cleared < BEAM_STRATA - 1 ? s->rows_cleared : BEAM_STRATA - 1;
@@ -1653,18 +1686,11 @@ static float evaluate_state(const SearchState* state, int board_height,
         return -1e6f;
     }
 
-    float h_ratio = (float)effective_h / (float)HEIGHT_REF;
-
-    // ── Survival wall ─────────────────────────────────────────
-    // Near-death cliff: within NEAR_DEATH_ZONE rows of the death line, a penalty
-    // that beats every positive term combined (slack=0 => the next block kills us).
-    if (effective_h >= HEIGHT_REF - NEAR_DEATH_ZONE) {
-        int slack = HEIGHT_REF - 1 - effective_h;
-        score -= W_NEAR_DEATH * (float)(NEAR_DEATH_ZONE - slack);
-    }
-    // Smooth height (quartic) + linear volume penalty (rewards board emptiness).
+    // ── Height risk and volume ─────────────────────────────────
+    // Continuous risk in the effective height (tallest column plus pending garbage).
+    score -= RISK_TABLE[effective_h];
+    // Linear volume penalty (rewards board emptiness).
     // The volume penalty reads the parent skyline on an unlicensed D_cash lock.
-    score -= W_HEIGHT_QUARTIC * h_ratio * h_ratio * h_ratio * h_ratio;
     {
         float avg_h = state->unlicensed_cash ? state->parent_avg_height : bs.avg_height;
         score -= W_AVG_HEIGHT * avg_h;
@@ -1673,9 +1699,9 @@ static float evaluate_state(const SearchState* state, int board_height,
     score -= W_BUMPINESS * bs.bumpiness_exempted;
 
     // ── Hole accounting ───────────────────────────────────────
-    float hole_mult = 1.0f + 0.5f * h_ratio;
     if (bs.holes > 0) {
-        score -= W_HOLES * (float)bs.holes * hole_mult;
+        float hole_mult = 1.0f + (float)effective_h / HOLE_HEIGHT_SCALE;
+        score -= W_HOLES * ((float)bs.holes * hole_mult);
     }
     if (bs.hole_ceiling_weight > 0.0f) {
         score -= W_HOLE_CEILING * bs.hole_ceiling_weight;  // burying holes deeper is worse
@@ -1687,23 +1713,16 @@ static float evaluate_state(const SearchState* state, int board_height,
         score += W_B2B_FLAT;
     }
     if (state->b2b > 0) {
-        score += W_B2B_SQRT * sqrtf((float)state->b2b);
         score += W_B2B_LINEAR * (float)state->b2b;
     }
 
     // ── Attack realization ────────────────────────────────────
-    // Realized attack along the path + banked b2b (pending surge ~= b2b on break).
-    // Unlicensed D_cash (leftover I/PC at combo<0) does not enter APP/attack.
+    // Attack per piece along the path, over a horizon of W_ATTACK_H pieces.
+    // Unlicensed D_cash (leftover I/PC at combo<0) does not enter it.
     float atk_real = state->total_attack - state->unlicensed_cash_A;
     if (atk_real < 0.0f) atk_real = 0.0f;
-    float atk_credit = atk_real + (state->b2b > 0 ? (float)state->b2b : 0.0f);
-    if (atk_credit > 0.0f) {
-        score += W_ATTACK_TOTAL * atk_credit;
-    }
-    // Direct APP (attack-per-piece), counting stored b2b as pending surge attack.
     if (state->pieces_placed > 0) {
-        float b2b_val = state->b2b > 0 ? (float)state->b2b : 0.0f;
-        score += W_APP * ((atk_real + b2b_val) / (float)state->pieces_placed);
+        score += (W_ATTACK_H * atk_real) / (float)state->pieces_placed;
     }
     // Garbage prevention: keeping imminent garbage off the board (cancel or block-push).
     if (state->garbage_prevented > 0.0f) {
@@ -1718,7 +1737,10 @@ static float evaluate_state(const SearchState* state, int board_height,
         score += line_reward;
     }
     score += W_CHAIN[bs.chain_len];
-    score += W_EXEC_RAMP * (float)state->chain_ramp;
+    // Executed combo links per piece along the path.
+    if (state->pieces_placed > 0) {
+        score += (W_EXEC_RAMP * (float)state->chain_ramp) / (float)state->pieces_placed;
+    }
 
     _tt_e->hash = _tt_h;
     _tt_e->score = score;
@@ -1872,17 +1894,18 @@ void b2b_search_c(
     int* out_action_index,          // Output: action index
     int64_t* out_best_sequence,     // Output: key sequence (length max_len)
     // --- Optional per-root candidate output (for policy/value distillation) ---
-    // Pass max_roots<=0 or out_num_roots==NULL to skip.  For every root placement
-    // that survives to the final beam, writes its action index, best-leaf score
-    // (the value of the best continuation through that root), and reconstructed
-    // key sequence.  The overall value target is max(out_root_scores).  Scores are
-    // RAW search scores (no softmax - the caller decides any normalization).
+    // Pass max_roots<=0 or out_num_roots==NULL to skip.  Every legal root placement is
+    // written, pruned or not: its action index, its score on the per-depth normalised
+    // scale described at raise_root_norm, and its key sequence.  Those scores rank roots
+    // against each other and carry no unit; out_best_score is the value target, in
+    // attack lines.
     int max_roots,
     int* out_num_roots,
     int* out_root_action_indices,   // [max_roots]
     float* out_root_scores,         // [max_roots]
     int64_t* out_root_sequences,    // [max_roots * max_len]
-    int* out_root_landing_rows      // [max_roots] BFS lock row (0..board_height-1)
+    int* out_root_landing_rows,     // [max_roots] BFS lock row (0..board_height-1)
+    float* out_best_score           // Output: horizon score of the played line, in attack lines
 ) {
     if (out_num_roots) *out_num_roots = 0;
     if (!b2b_initialized) b2b_init_pieces();
@@ -1912,6 +1935,7 @@ void b2b_search_c(
         // Allocation failed
         *out_action_index = -1;
         for (int i = 0; i < max_len; i++) out_best_sequence[i] = KEY_PAD;
+        if (out_best_score) *out_best_score = -1e6f;
         free(curr_beam);
         free(next_beam);
         return;
@@ -1924,13 +1948,12 @@ void b2b_search_c(
     static __thread int depth0_is_hold[MAX_PLACEMENTS * 2];
     int depth0_count = 0;
 
-    // Per-root best descendant score, tracked across ALL depths (pre-prune) so
-    // every root placement keeps a score even after the beam prunes its subtree -
-    // gives a full candidate distribution despite the beam converging to one root.
+    // Per-root normalised score, raised from every depth's pre-prune frontier, so a
+    // root keeps a score after the beam prunes its subtree.
     const bool want_roots = (out_num_roots != NULL && max_roots > 0);
-    static __thread float root_best[MAX_PLACEMENTS * 2];
+    static __thread float root_norm[MAX_PLACEMENTS * 2];
     if (want_roots) {
-        for (int i = 0; i < MAX_PLACEMENTS * 2; i++) root_best[i] = -1e30f;
+        for (int i = 0; i < MAX_PLACEMENTS * 2; i++) root_norm[i] = -1e30f;
     }
 
     // Treat any pending garbage as imminent at depth 0 (timer = 0).  In the
@@ -2035,7 +2058,6 @@ void b2b_search_c(
                               mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
-                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
         depth0_placements[depth0_count] = *pl;
         depth0_is_hold[depth0_count] = 0;
@@ -2124,7 +2146,6 @@ void b2b_search_c(
                                   mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
-                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
             depth0_placements[depth0_count] = *pl;
             depth0_is_hold[depth0_count] = 1;
@@ -2211,7 +2232,6 @@ void b2b_search_c(
                                   mean_col_heights(root_col_heights), ar.attack);
                 s->score = evaluate_state(s, board_height, queue, queue_len);
                 s->sort_hash = state_hash(s, board_height);
-                root_best[depth0_count] = s->score;  // seed own eval: every legal root emitted
 
             depth0_placements[depth0_count] = *pl;
             depth0_is_hold[depth0_count] = 1;
@@ -2222,15 +2242,9 @@ void b2b_search_c(
         }
     }
 
-    // Record every root's depth-0 score before pruning (so roots pruned here
-    // still get a candidate score).
-    if (want_roots) {
-        for (int i = 0; i < next_beam_size; i++) {
-            int ri = next_beam[i].depth0_placement_idx;
-            if (ri >= 0 && ri < depth0_count && next_beam[i].score > root_best[ri])
-                root_best[ri] = next_beam[i].score;
-        }
-    }
+    // Record every root against the depth-0 frontier before pruning, so roots pruned
+    // here still get a candidate score.
+    if (want_roots) raise_root_norm(next_beam, next_beam_size, 0, root_norm, depth0_count);
 
     // Deterministic dedupe + top-K select.  (Dedupe at depth 0 is safe because two
     // placements that collapse to the same post-state have identical futures -
@@ -2329,14 +2343,9 @@ void b2b_search_c(
 
         next_beam_size = (next_count < max_next) ? next_count : max_next;
 
-        // Record each root's best descendant score at this depth before pruning.
-        if (want_roots) {
-            for (int i = 0; i < next_beam_size; i++) {
-                int ri = next_beam[i].depth0_placement_idx;
-                if (ri >= 0 && ri < depth0_count && next_beam[i].score > root_best[ri])
-                    root_best[ri] = next_beam[i].score;
-            }
-        }
+        // Record each root against this depth's frontier before pruning.
+        if (want_roots)
+            raise_root_norm(next_beam, next_beam_size, depth, root_norm, depth0_count);
 
         next_beam_size = finalize_beam(next_beam, next_beam_size, beam_width);
 
@@ -2366,6 +2375,7 @@ void b2b_search_c(
             *out_action_index = -1;
             for (int i = 0; i < max_len; i++) out_best_sequence[i] = KEY_PAD;
         }
+        if (out_best_score) *out_best_score = -1e6f;
         free(curr_beam);
         free(next_beam);
         return;
@@ -2378,6 +2388,8 @@ void b2b_search_c(
     for (int i = 1; i < curr_beam_size; i++) {
         if (beam_cmp(&curr_beam[i], &curr_beam[best_idx]) < 0) best_idx = i;
     }
+
+    if (out_best_score) *out_best_score = curr_beam[best_idx].score;
 
     int d0_idx = curr_beam[best_idx].depth0_placement_idx;
     Placement* best_pl = &depth0_placements[d0_idx];
@@ -2397,9 +2409,7 @@ void b2b_search_c(
     BFSStateMeta* meta_src = is_hold ? depth0_meta_hold : depth0_meta_active;
     b2b_write_sequence(meta_src, best_pl->bfs_state, is_hold, max_len, out_best_sequence);
 
-    // --- Per-root candidate output: every legal root placement is emitted (score =
-    //     its own eval, raised to its best surviving descendant; near-death roots stay
-    //     as very-low-scored candidates rather than being dropped).
+    // Per-root candidate output: every legal root placement, pruned or not.
     if (want_roots) {
         int n = 0;
         for (int ri = 0; ri < depth0_count && n < max_roots; ri++) {
@@ -2409,7 +2419,8 @@ void b2b_search_c(
                               : ((hold_piece != PIECE_N) ? hold_piece : queue[0]);
             int rcol = rpl->col + B2B_PIECES[rpiece].orientations[rpl->rot].min_col;
             out_root_action_indices[n] = rih * 160 + rpl->rot * 40 + rcol * 4 + rpl->spin_type;
-            out_root_scores[n] = root_best[ri];
+            out_root_scores[n] =
+                root_norm[ri] < -1e29f ? ROOT_FLOOR : root_norm[ri];
             if (out_root_landing_rows) out_root_landing_rows[n] = rpl->landing_row;
             BFSStateMeta* rmeta = rih ? depth0_meta_hold : depth0_meta_active;
             b2b_write_sequence(rmeta, rpl->bfs_state, rih, max_len,

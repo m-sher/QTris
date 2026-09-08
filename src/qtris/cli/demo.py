@@ -76,10 +76,55 @@ def main() -> None:
         default=0,
         help="--mode 1v1: RNG seed (piece sequence + garbage columns).",
     )
+    parser.add_argument(
+        "--oracle",
+        choices=["c", "gpu"],
+        default=None,
+        help="play the beam oracle itself instead of a checkpoint, with no network in "
+        "the loop: `c` is the C beam, `gpu` the CUDA teacher (needs the teacher extra "
+        "and a device). Implies single-player and makes --checkpoint unnecessary. The "
+        "flags below apply to it.",
+    )
+    parser.add_argument(
+        "--search-depth", type=int, default=7, help="--oracle: beam search depth."
+    )
+    parser.add_argument(
+        "--beam-width", type=int, default=128, help="--oracle: beam width."
+    )
+    parser.add_argument(
+        "--num-steps", type=int, default=500, help="--oracle: moves to play."
+    )
+    parser.add_argument(
+        "--queue-size", type=int, default=5, help="--oracle: visible queue length."
+    )
+    parser.add_argument("--max-len", type=int, default=15, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--fps", type=int, default=8, help="--oracle: window frame rate cap."
+    )
+    parser.add_argument(
+        "--dist-temp",
+        type=float,
+        default=1.0,
+        help="--oracle: softmax temperature for the candidate strip, over root scores "
+        "whose top candidates sit about 0.1 apart.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="--oracle: no window, print one row per turn.",
+    )
     args = parser.parse_args()
 
     if args.four_wide and args.mode != "single":
         parser.error("--four-wide is only implemented for `demo --mode single`.")
+
+    if args.oracle is not None:
+        if args.mode != "single":
+            parser.error("--oracle plays single-player; drop --mode 1v1.")
+        from qtris.demo.oracle import main as run
+
+        run(args)
+        return
 
     if args.mode == "1v1":
         if args.checkpoint is None or args.opponent is None:

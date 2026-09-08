@@ -34,7 +34,8 @@ def collect(
 
     For each position the beam search scores every reachable root placement; the
     target is a 128-slot pack of fusion-style placement vectors (64 no-hold + 64
-    hold) plus their raw search scores. The env advances by playing the best move.
+    hold) plus their root-ranking scores and the played line's value. The env advances
+    by playing the best move.
     """
     env = PyTetrisEnv(
         queue_size=queue_size,
@@ -72,7 +73,7 @@ def collect(
         bcg = obs["b2b_combo_garbage"].astype(np.float32)
 
         queue = np.array([p.value for p in env._queue], dtype=np.int32)
-        best_action, best_seq, cand_actions, cand_scores, _cand_seqs, cand_rows = (
+        best_action, best_seq, cand_actions, cand_scores, _seqs, cand_rows, value = (
             searcher.search_with_scores(
                 board=env._board,
                 active_piece=env._active_piece.piece_type.value,
@@ -103,7 +104,7 @@ def collect(
             queue0=int(queue[0]),
             row_norm=row_norm,
         )
-        transitions.append((board, pieces, bcg, placements, scores))
+        transitions.append((board, pieces, bcg, placements, scores, value))
 
         time_step = env._step(best_seq.astype(np.int64))
         total_attack += float(time_step.reward["attack"])
@@ -210,6 +211,7 @@ def main(args):
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
     cand_placements = np.stack([t[3] for t in new_transitions]).astype(np.float32)
     cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
+    value_scores = np.array([t[5] for t in new_transitions], dtype=np.float32)
 
     if existing is not None:
         boards = np.concatenate([existing["boards"], boards])
@@ -217,6 +219,7 @@ def main(args):
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
         cand_placements = np.concatenate([existing["cand_placements"], cand_placements])
         cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
+        value_scores = np.concatenate([existing["value_scores"], value_scores])
         print(
             f"Combined: {existing_count} existing + {len(new_transitions)} new = "
             f"{len(cand_scores)} total",
@@ -233,6 +236,7 @@ def main(args):
             "b2b_combo_garbage": bcg,
             "cand_placements": cand_placements,
             "cand_scores": cand_scores,
+            "value_scores": value_scores,
         }
     )
     dataset.save(dataset_path)

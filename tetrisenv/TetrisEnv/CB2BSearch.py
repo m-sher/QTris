@@ -50,6 +50,7 @@ class CB2BSearch:
                 ctypes.POINTER(ctypes.c_float),  # out_root_scores
                 ctypes.POINTER(ctypes.c_int64),  # out_root_sequences
                 ctypes.POINTER(ctypes.c_int),    # out_root_landing_rows
+                ctypes.POINTER(ctypes.c_float),  # out_best_score
             ]
             self._lib.b2b_search_c.restype = None
 
@@ -147,13 +148,14 @@ class CB2BSearch:
         beam_width: int = 128,
         max_len: int = 15,
         max_roots: int = 512,
-    ) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
         """Run the search and also return per-root candidates.
 
-        Returns (best_action_idx, best_sequence, cand_action_indices,
-        cand_scores, cand_sequences, cand_landing_rows) where the candidate arrays
-        cover every root placement that survived to the final beam. `cand_scores`
-        are RAW search scores (no softmax). The value target is `cand_scores.max()`.
+        Returns (best_action_idx, best_sequence, cand_action_indices, cand_scores,
+        cand_sequences, cand_landing_rows, best_score). The candidate arrays cover
+        every legal root placement. `cand_scores` rank the roots on the per-depth
+        normalised scale, so they are comparable across roots but carry no unit; the
+        value target is `best_score`, the played line's score in attack lines.
         `cand_landing_rows` is each placement's BFS lock row (0..board_height-1).
         `best_sequence` is the chosen move's key sequence (PAD-filled to max_len).
         """
@@ -177,6 +179,7 @@ class CB2BSearch:
         root_scores = np.zeros(max_roots, dtype=np.float32)
         root_sequences = np.full(max_roots * max_len, 11, dtype=np.int64)
         root_landing_rows = np.zeros(max_roots, dtype=np.int32)
+        best_score = ctypes.c_float(0.0)
 
         self._lib.b2b_search_c(
             mask_rows,
@@ -201,6 +204,7 @@ class CB2BSearch:
             root_scores.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
             root_sequences.ctypes.data_as(ctypes.POINTER(ctypes.c_int64)),
             root_landing_rows.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            ctypes.byref(best_score),
         )
 
         n = num_roots.value
@@ -211,6 +215,7 @@ class CB2BSearch:
             root_scores[:n],
             root_sequences[: n * max_len].reshape(n, max_len),
             root_landing_rows[:n],
+            best_score.value,
         )
 
     def lock_score(

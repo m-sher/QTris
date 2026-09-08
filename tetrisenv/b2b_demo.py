@@ -397,7 +397,7 @@ def run_headless(args):
 
         total_garb = env._get_total_garbage()
 
-        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows = (
+        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows, _v = (
             searcher.search_with_scores(
                 board=board,
                 active_piece=active,
@@ -417,7 +417,7 @@ def run_headless(args):
             print(f"\n** No valid move found at turn {step} - game over **")
             break
 
-        # Action distribution: raw search score (softmax %) per candidate
+        # Action distribution: root score (softmax %) per candidate
         dist = softmax_dist(cand_actions, cand_scores, top_n=5, temp=args.dist_temp)
         dist_str = "  ".join(
             f"[H{h}R{r}C{c}S{sp}] {sc:7.1f} ({p * 100:4.1f}%)"
@@ -497,9 +497,9 @@ def main():
     ap.add_argument('--garbage-max', type=int, default=4)
     ap.add_argument('--garbage-delay', type=int, default=1)
     ap.add_argument('--seed', type=int, default=42)
-    ap.add_argument('--dist-temp', type=float, default=30.0,
+    ap.add_argument('--dist-temp', type=float, default=1.0,
                     help='Softmax temperature for the move distribution display '
-                         '(scores are O(tens); ~30 spreads, 1 = raw/near-argmax)')
+                         '(top candidates sit about 0.1 apart)')
     args = ap.parse_args()
 
     if args.headless:
@@ -616,7 +616,7 @@ def main():
         sd = spinners["search_depth"].value
         bw = spinners["beam_width"].value
 
-        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows = (
+        action_idx, sequence, cand_actions, cand_scores, _cand_seqs, _cand_rows, _v = (
             searcher.search_with_scores(
                 board=board,
                 active_piece=active,

@@ -11,19 +11,14 @@ import tensorflow as tf
 
 from qtris.pretraining.placement import Pretrainer
 
-SENTINEL = -1e30
 BULK, TAIL = 4000, 200
 
 
-def _scores_dataset(vmax, n_cand=8, seed=0):
-    """Placement-schema dataset whose per-position max legal score is exactly `vmax`."""
-    rng = np.random.default_rng(seed)
-    scores = np.full((len(vmax), n_cand), SENTINEL, dtype=np.float32)
-    for i, v in enumerate(vmax):
-        k = int(rng.integers(1, n_cand + 1))
-        scores[i, :k] = v - rng.uniform(1.0, 50.0, size=k)
-        scores[i, 0] = v
-    return tf.data.Dataset.from_tensor_slices({"cand_scores": scores})
+def _scores_dataset(vmax):
+    """Placement-schema dataset whose per-position oracle value is `vmax`."""
+    return tf.data.Dataset.from_tensor_slices(
+        {"value_scores": np.asarray(vmax, dtype=np.float32)}
+    )
 
 
 def _vmax(seed=0, tail=TAIL):

@@ -163,20 +163,26 @@ def rollout_placement_states(
     for step in pbar:
         rec = _state_record(env)
 
-        best_action, best_seq, cand_actions, cand_scores, cand_seqs, cand_rows = (
-            searcher.search_with_scores(
-                board=rec["board_occ"],
-                active_piece=rec["active"],
-                hold_piece=rec["hold"],
-                queue=rec["queue"],
-                b2b=rec["b2b"],
-                combo=rec["combo"],
-                total_garbage=rec["total_garbage"],
-                garbage_push_delay=rec["push_delay"],
-                search_depth=search_depth,
-                beam_width=beam_width,
-                max_len=max_len,
-            )
+        (
+            best_action,
+            best_seq,
+            cand_actions,
+            cand_scores,
+            cand_seqs,
+            cand_rows,
+            value,
+        ) = searcher.search_with_scores(
+            board=rec["board_occ"],
+            active_piece=rec["active"],
+            hold_piece=rec["hold"],
+            queue=rec["queue"],
+            b2b=rec["b2b"],
+            combo=rec["combo"],
+            total_garbage=rec["total_garbage"],
+            garbage_push_delay=rec["push_delay"],
+            search_depth=search_depth,
+            beam_width=beam_width,
+            max_len=max_len,
         )
 
         if best_action < 0 or len(cand_scores) == 0:
@@ -191,6 +197,7 @@ def rollout_placement_states(
                 "cand_actions": cand_actions,
                 "cand_scores": cand_scores,
                 "cand_rows": cand_rows,
+                "value_score": value,
             }
         )
 
@@ -272,8 +279,9 @@ def label_placement_states(
         cand_scores = s.get("cand_scores")
         if cand_scores is not None:
             cand_actions, cand_rows = s["cand_actions"], s["cand_rows"]
+            value = s["value_score"]
         else:
-            best_action, _bseq, cand_actions, cand_scores, _cseq, cand_rows = (
+            best_action, _bseq, cand_actions, cand_scores, _cseq, cand_rows, value = (
                 searcher.search_with_scores(
                     board=s["board_occ"],
                     active_piece=s["active"],
@@ -304,7 +312,9 @@ def label_placement_states(
             int(s["queue"][0]),
             row_norm,
         )
-        transitions.append((s["board"], s["pieces"], s["bcg"], placements_t, scores_t))
+        transitions.append(
+            (s["board"], s["pieces"], s["bcg"], placements_t, scores_t, value)
+        )
     return transitions, beam_dead
 
 
@@ -417,6 +427,7 @@ def _merge_and_save(new_transitions, existing, dataset_path):
     pieces = np.stack([t[1] for t in new_transitions]).astype(np.int64)
     bcg = np.stack([t[2] for t in new_transitions]).astype(np.float32)
     cand_scores = np.stack([t[4] for t in new_transitions]).astype(np.float32)
+    value_scores = np.array([t[5] for t in new_transitions], dtype=np.float32)
     label = np.stack([t[3] for t in new_transitions]).astype(np.float32)
 
     if existing is not None:
@@ -425,6 +436,7 @@ def _merge_and_save(new_transitions, existing, dataset_path):
         bcg = np.concatenate([existing["b2b_combo_garbage"], bcg])
         label = np.concatenate([existing["cand_placements"], label])
         cand_scores = np.concatenate([existing["cand_scores"], cand_scores])
+        value_scores = np.concatenate([existing["value_scores"], value_scores])
         print(
             f"Combined: {len(existing['cand_scores'])} existing + "
             f"{len(new_transitions)} new = {len(cand_scores)} total",
@@ -438,6 +450,7 @@ def _merge_and_save(new_transitions, existing, dataset_path):
             "b2b_combo_garbage": bcg,
             "cand_placements": label,
             "cand_scores": cand_scores,
+            "value_scores": value_scores,
         }
     )
     # Write to a temp dir and swap, so an interrupted rewrite can't destroy the prior dataset

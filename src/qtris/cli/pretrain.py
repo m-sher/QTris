@@ -43,9 +43,9 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Temperature applied to candidate scores when forming the "
-        "policy target weights. Scores are raw search magnitude O(hundreds-thousands); "
-        "lower sharpens the target onto the search's best move, higher flattens it toward "
-        "the full distribution.",
+        "policy target weights. Scores rank roots on the search's per-depth normalised "
+        "scale, where adjacent candidates sit about 0.1 apart; lower sharpens the "
+        "target onto the best move, higher flattens it toward the full distribution.",
     )
     parser.add_argument(
         "--value-anchor",

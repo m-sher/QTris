@@ -125,20 +125,9 @@ class Pretrainer:
 
     @staticmethod
     def _dataset_vmax(dataset):
-        """Per-position max over legal candidate scores (the oracle's best-move value)."""
+        """The oracle's value per position, in attack lines."""
         return tf.concat(
-            [
-                tf.reduce_max(
-                    tf.where(
-                        batch["cand_scores"] > -1e29,
-                        batch["cand_scores"],
-                        tf.constant(-1e30, dtype=tf.float32),
-                    ),
-                    axis=-1,
-                )
-                for batch in dataset.batch(100_000)
-            ],
-            axis=0,
+            [batch["value_scores"] for batch in dataset.batch(100_000)], axis=0
         )
 
     def _assign_tanh_value_norm(self, dataset):
@@ -187,7 +176,7 @@ class Pretrainer:
         masked_scores = tf.where(mask, cand_scores, tf.constant(-1e30, tf.float32))
         target = tf.nn.softmax(masked_scores / self._policy_temp, axis=-1)  # (B, C)
         value_target = self._tanh_value_target(
-            tf.reduce_max(masked_scores, axis=-1, keepdims=True)
+            batch["value_scores"][:, None]
         )  # (B, 1) in [-1, 1], 0 = median board
 
         with tf.GradientTape() as tape:
