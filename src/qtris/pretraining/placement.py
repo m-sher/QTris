@@ -69,7 +69,7 @@ class Pretrainer:
         )
 
     def _load_dataset(self, batch_size):
-        """Load the 128-slot placement dataset (cand_placements + cand_scores).
+        """Load the 128-slot placement dataset (placements, scores, values).
 
         Calibrates the bounded tanh value label; the policy target is built per batch
         in the train step from cand_scores."""
@@ -80,10 +80,11 @@ class Pretrainer:
 
         dataset = tf.data.Dataset.load(self._dataset_path)
         spec = dataset.element_spec
-        if "cand_placements" not in spec or "cand_scores" not in spec:
+        needed = ("cand_placements", "cand_scores", "value_scores")
+        if any(k not in spec for k in needed):
             raise ValueError(
                 f"Dataset at {self._dataset_path} is not the placement schema (needs "
-                "`cand_placements` + `cand_scores`). Regenerate with `uv run datagen`."
+                f"{', '.join(needed)}). Regenerate with `uv run datagen`."
             )
 
         self._assign_tanh_value_norm(dataset)
@@ -112,10 +113,11 @@ class Pretrainer:
             raise FileNotFoundError(f"No val dataset at {val_path}.")
         ds = tf.data.Dataset.load(val_path)
         spec = ds.element_spec
-        if "cand_placements" not in spec or "cand_scores" not in spec:
+        needed = ("cand_placements", "cand_scores", "value_scores")
+        if any(k not in spec for k in needed):
             raise ValueError(
                 f"Val dataset at {val_path} is not the placement schema "
-                "(needs `cand_placements` + `cand_scores`)."
+                f"(needs {', '.join(needed)})."
             )
         return (
             ds.map(_trim_pieces, num_parallel_calls=tf.data.AUTOTUNE)
@@ -161,7 +163,7 @@ class Pretrainer:
         )
 
     def _tanh_value_target(self, vmax):
-        """Apply the calibrated bounded label to a batch of per-position max scores."""
+        """Apply the calibrated bounded label to a batch of oracle values."""
         return tf.tanh((vmax - self._value_center) / self._value_scale)
 
     @tf.function

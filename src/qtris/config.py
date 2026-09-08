@@ -39,6 +39,7 @@ class PretrainConfig(BaseModel):
 class DataGenConfig(BaseModel):
     search_depth: int = 10
     beam_width: int = 256
+    queue_size: int = 10  # oracle lookahead; ModelConfig.queue_size is the model's
     death_trim_count: int = 20
     num_steps: int = 200_000
     seed: int = 0

@@ -80,8 +80,8 @@ class GpuTeacher:
         self,
         max_batch=1,
         width=128,
-        depth=7,
-        queue_len=5,
+        depth=10,
+        queue_len=10,
         max_placements=MAX_PLACEMENTS,
         root_capacity=ROOT_CAPACITY,
         pool_per_parent=DEFAULT_POOL_PER_PARENT,
@@ -159,7 +159,7 @@ class GpuTeacher:
         total_garbage,
         garbage_push_delay=1,  # unread, as b2b_search.c:1964
         bag_seen=0,
-        search_depth=7,
+        search_depth=10,
         beam_width=128,
         max_roots=512,
     ):

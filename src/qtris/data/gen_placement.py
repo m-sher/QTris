@@ -1,3 +1,4 @@
+from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.config import DataGenConfig
@@ -6,6 +7,7 @@ from qtris.data.placement_features import (
     PLACEMENT_FEATURE_DIM,
     build_placement_target,
 )
+import functools
 import os
 import shutil
 import numpy as np
@@ -130,6 +132,148 @@ def collect(
     return transitions, deaths, max_b2b, app
 
 
+def collect_batched(
+    seed,
+    num_steps,
+    search_depth,
+    beam_width,
+    queue_size,
+    max_len,
+    max_holes,
+    max_steps_env,
+    garbage_chance,
+    garbage_min,
+    garbage_max,
+    garbage_push_delay,
+    num_row_tiers,
+    batch,
+    headless=False,
+    log_every=1000,
+):
+    """Collect the same targets as `collect`, from `batch` envs run in lockstep.
+
+    One batched search per round serves every env. `num_steps` counts transitions,
+    not rounds; the last round is truncated.
+    """
+    from qtris.search.placement_search import descriptor_key_sequence
+    from teacher.api import GpuTeacher, placement_of
+
+    # Each env resets to its own seed + 1 on death, so stride the seeds by more than
+    # the resets any one env can make.
+    envs = [
+        PyTetrisEnv(
+            queue_size=queue_size,
+            max_holes=max_holes,
+            max_steps=max_steps_env,
+            max_len=max_len,
+            pathfinding=True,
+            seed=seed + i * (num_steps + 1),
+            idx=i,
+            garbage_chance=garbage_chance,
+            garbage_min=garbage_min,
+            garbage_max=garbage_max,
+            garbage_push_delay=garbage_push_delay,
+            auto_push_garbage=True,
+            auto_fill_queue=True,
+            num_row_tiers=num_row_tiers,
+        )
+        for i in range(batch)
+    ]
+    steps = [env.reset() for env in envs]
+    teacher = GpuTeacher(
+        max_batch=batch, width=beam_width, depth=search_depth, queue_len=queue_size
+    )
+
+    transitions = []
+    deaths = 0
+    max_b2b = 0
+    total_attack = 0.0
+    pieces_placed = 0
+    forced = np.full(max_len, Keys.PAD, dtype=np.int64)
+    forced[0], forced[1] = Keys.START, Keys.HARD_DROP
+    fallbacks = 0
+
+    pbar = tqdm(
+        total=num_steps, disable=headless, desc="datagen placement", unit="step"
+    )
+    while len(transitions) < num_steps:
+        obs = [ts.observation for ts in steps]
+        queues = np.stack(
+            [np.array([p.value for p in e._queue], dtype=np.int32) for e in envs]
+        )
+        result = teacher.search_batch(
+            np.stack([e._board for e in envs]),
+            np.array([e._active_piece.piece_type.value for e in envs], dtype=np.int32),
+            np.array([e._hold_piece.value for e in envs], dtype=np.int32),
+            queues,
+            queue_size,
+            np.array([int(e._scorer._b2b) for e in envs], dtype=np.int32),
+            np.array([int(e._scorer._combo) for e in envs], dtype=np.int32),
+            np.array([int(e._get_total_garbage()) for e in envs], dtype=np.int32),
+        )
+        if (
+            result.placement_overflow
+            or result.pool_overflow
+            or result.workitem_overflow
+        ):
+            raise RuntimeError(
+                "teacher buffers overflowed; lower --batch or the beam width"
+            )
+
+        for i, env in enumerate(envs):
+            action = int(result.action[i])
+            n = int(result.root_count[i])
+            ri = int(result.root_index[i])
+            if action < 0 or n == 0 or not 0 <= ri < n:
+                deaths += 1
+                steps[i] = env.reset()
+                continue
+
+            board = obs[i]["board"].astype(np.float32)
+            pieces = obs[i]["pieces"].astype(np.int64)
+            bcg = obs[i]["b2b_combo_garbage"].astype(np.float32)
+            placements, scores = build_placement_target(
+                result.root_action[i, :n],
+                result.root_score[i, :n],
+                result.root_row[i, :n],
+                active_piece=env._active_piece.piece_type.value,
+                hold_piece=env._hold_piece.value,
+                queue0=int(queues[i, 0]),
+                row_norm=env._board.shape[0] - 1,
+            )
+            transitions.append(
+                (board, pieces, bcg, placements, scores, float(result.best_score[i]))
+            )
+
+            seq = descriptor_key_sequence(
+                env, placement_of(action, int(result.root_row[i, ri])), max_len
+            )
+            fallbacks += int(np.array_equal(seq, forced))
+            steps[i] = env._step(np.asarray(seq, dtype=np.int64))
+            total_attack += float(steps[i].reward["attack"])
+            pieces_placed += 1
+            max_b2b = max(max_b2b, int(env._scorer._b2b))
+            if steps[i].is_last():
+                deaths += 1
+                steps[i] = env.reset()
+
+        done = min(len(transitions), num_steps)
+        pbar.n = done
+        stats = (
+            f"transitions={done} deaths={deaths} max_b2b={max_b2b} "
+            f"app={total_attack / max(pieces_placed, 1):.3f} fallbacks={fallbacks}"
+        )
+        if headless and done % log_every < batch:
+            print(f"Step {done}/{num_steps} | {stats}", flush=True)
+        else:
+            pbar.set_postfix_str(stats)
+        pbar.refresh()
+    pbar.close()
+
+    app = total_attack / max(pieces_placed, 1)
+    return transitions[:num_steps], deaths, max_b2b, app
+
+
 def main(args):
     dataset_path = (
         str(args.output) if args.output else "datasets/tetris_oracle_placement"
@@ -138,7 +282,7 @@ def main(args):
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()
-    queue_size = 10
+    queue_size = datagen_cfg.queue_size
     max_len = 15
     max_holes = 50
     max_steps_env = 9999999
@@ -159,13 +303,14 @@ def main(args):
             }
             existing_count = len(existing.get("cand_scores", []))
             cp = existing.get("cand_placements")
-            if cp is None or cp.shape[1:] != (
-                CANDIDATE_CAPACITY,
-                PLACEMENT_FEATURE_DIM,
+            if (
+                cp is None
+                or cp.shape[1:] != (CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM)
+                or "value_scores" not in existing
             ):
                 print(
-                    "Existing dataset is an older schema (not 128-slot "
-                    "`cand_placements`) - starting fresh.",
+                    "Existing dataset is an older schema (needs 128-slot "
+                    "`cand_placements` and `value_scores`) - starting fresh.",
                     flush=True,
                 )
                 existing = None
@@ -178,12 +323,24 @@ def main(args):
         except Exception:
             print("Existing dataset load failed, starting fresh", flush=True)
 
-    print(
-        f"Collecting {num_steps} steps in single env (seed offset {existing_count})...",
-        flush=True,
-    )
+    engine = getattr(args, "engine", "c")
+    batch = int(getattr(args, "batch", 64))
+    if engine == "gpu":
+        print(
+            f"Collecting {num_steps} steps over {batch} envs on the GPU teacher "
+            f"(seed offset {existing_count})...",
+            flush=True,
+        )
+        collector = functools.partial(collect_batched, batch=batch)
+    else:
+        print(
+            f"Collecting {num_steps} steps in single env "
+            f"(seed offset {existing_count})...",
+            flush=True,
+        )
+        collector = collect
 
-    new_transitions, deaths, max_b2b, app = collect(
+    new_transitions, deaths, max_b2b, app = collector(
         seed=seed + existing_count,
         num_steps=num_steps,
         search_depth=datagen_cfg.search_depth,

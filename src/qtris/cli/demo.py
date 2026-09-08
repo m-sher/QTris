@@ -86,7 +86,7 @@ def main() -> None:
         "flags below apply to it.",
     )
     parser.add_argument(
-        "--search-depth", type=int, default=7, help="--oracle: beam search depth."
+        "--search-depth", type=int, default=10, help="--oracle: beam search depth."
     )
     parser.add_argument(
         "--beam-width", type=int, default=128, help="--oracle: beam width."
@@ -95,7 +95,7 @@ def main() -> None:
         "--num-steps", type=int, default=500, help="--oracle: moves to play."
     )
     parser.add_argument(
-        "--queue-size", type=int, default=5, help="--oracle: visible queue length."
+        "--queue-size", type=int, default=10, help="--oracle: visible queue length."
     )
     parser.add_argument("--max-len", type=int, default=15, help=argparse.SUPPRESS)
     parser.add_argument(

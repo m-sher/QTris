@@ -63,7 +63,7 @@ class GpuOracle:
         total_garbage,
         garbage_push_delay=1,
         bag_seen=0,
-        search_depth=7,
+        search_depth=10,
         beam_width=128,
         max_len=15,
         max_roots=512,

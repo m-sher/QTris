@@ -114,6 +114,7 @@ def rollout_placement_states(
     search_depth,
     beam_width,
     queue_size,
+    model_pieces,
     max_len,
     max_holes,
     max_steps_env,
@@ -217,7 +218,7 @@ def rollout_placement_states(
         policy_seq, _, _, _ = p_model.predict(
             (
                 tf.constant(rec["board"][None], dtype=tf.float32),
-                tf.constant(rec["pieces"][None], dtype=tf.int64),
+                tf.constant(rec["pieces"][None, :model_pieces], dtype=tf.int64),
                 tf.constant(rec["bcg"][None], dtype=tf.float32),
                 tf.constant(infer_pl[None], dtype=tf.float32),
                 tf.constant(infer_mask[None], dtype=tf.bool),
@@ -325,6 +326,7 @@ def collect_dagger_placement(
     search_depth,
     beam_width,
     queue_size,
+    model_pieces,
     max_len,
     max_holes,
     max_steps_env,
@@ -347,6 +349,7 @@ def collect_dagger_placement(
         search_depth,
         beam_width,
         queue_size,
+        model_pieces,
         max_len,
         max_holes,
         max_steps_env,
@@ -384,7 +387,7 @@ def _build_placement_model(args):
     p_model(
         (
             keras.Input(shape=(24, 10, 1), dtype=tf.float32),
-            keras.Input(shape=(args.queue_size + 2,), dtype=tf.int64),
+            keras.Input(shape=(args.model_pieces,), dtype=tf.int64),
             keras.Input(shape=(3,), dtype=tf.float32),
             keras.Input(shape=(None, PLACEMENT_FEATURE_DIM), dtype=tf.float32),
             keras.Input(shape=(None,), dtype=tf.bool),
@@ -408,9 +411,10 @@ def _load_existing(dataset_path):
         return None, 0
     count = len(existing.get("cand_scores", []))
     cp = existing.get("cand_placements")
-    schema_ok = cp is not None and cp.shape[1:] == (
-        CANDIDATE_CAPACITY,
-        PLACEMENT_FEATURE_DIM,
+    schema_ok = (
+        cp is not None
+        and cp.shape[1:] == (CANDIDATE_CAPACITY, PLACEMENT_FEATURE_DIM)
+        and "value_scores" in existing
     )
     if not schema_ok:
         print(
@@ -517,18 +521,20 @@ def main_label(cli_args):
 
 def main(cli_args):
     from types import SimpleNamespace
-    from qtris.config import ModelConfig, EnvConfig
+    from qtris.config import DataGenConfig, EnvConfig, ModelConfig
 
     m = ModelConfig()
     e = EnvConfig()
+    g = DataGenConfig()
     args = SimpleNamespace(
         policy_checkpoint=getattr(cli_args, "checkpoint", None),
         dataset_path=getattr(cli_args, "output", None),
         num_steps=cli_args.num_steps,
         seed=getattr(cli_args, "seed", 10_000_000),
-        search_depth=16,
+        search_depth=g.search_depth,
         beam_width=200,
-        queue_size=m.queue_size,
+        queue_size=g.queue_size,
+        model_pieces=m.queue_size + 2,
         max_len=m.max_len,
         piece_dim=m.piece_dim,
         depth=m.depth,
@@ -588,6 +594,7 @@ def main(cli_args):
             search_depth=args.search_depth,
             beam_width=args.beam_width,
             queue_size=args.queue_size,
+            model_pieces=args.model_pieces,
             max_len=args.max_len,
             max_holes=args.max_holes,
             max_steps_env=args.max_steps_env,

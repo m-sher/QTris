@@ -46,7 +46,9 @@ search_depth = 10
 beam_width = 512
 
 num_steps = 500
-queue_size = 5
+# The oracle searches this queue; the model reads a shorter slice.
+queue_size = 10
+model_queue_size = 5
 max_holes = 100
 
 
@@ -64,7 +66,7 @@ def main(args):
     p_model(
         (
             tf.keras.Input(shape=(24, 10, 1), dtype=tf.float32),
-            tf.keras.Input(shape=(queue_size + 2,), dtype=tf.int64),
+            tf.keras.Input(shape=(model_queue_size + 2,), dtype=tf.int64),
             tf.keras.Input(shape=(3,), dtype=tf.float32),
             tf.keras.Input(shape=(None, 18), dtype=tf.float32),
             tf.keras.Input(shape=(None,), dtype=tf.bool),
@@ -196,7 +198,7 @@ def main(args):
         board = time_step.observation["board"]
         vis_board = time_step.observation.get("vis_board", None)
         b2b_combo_garbage = time_step.observation["b2b_combo_garbage"]
-        pieces = time_step.observation["pieces"]
+        pieces = time_step.observation["pieces"][:, : model_queue_size + 2]
         attack = time_step.reward["attack"].numpy()[0]
         clear = time_step.reward["clear"].numpy()[0]
         attack_reward = time_step.reward["attack_reward"].numpy()[0]

@@ -87,7 +87,7 @@ class CB2BSearch:
         total_garbage: int,
         garbage_push_delay: int = 1,
         bag_seen: int = 0,
-        search_depth: int = 7,
+        search_depth: int = 10,
         beam_width: int = 128,
         max_len: int = 15,
     ) -> Tuple[int, np.ndarray]:
@@ -144,7 +144,7 @@ class CB2BSearch:
         total_garbage: int,
         garbage_push_delay: int = 1,
         bag_seen: int = 0,
-        search_depth: int = 7,
+        search_depth: int = 10,
         beam_width: int = 128,
         max_len: int = 15,
         max_roots: int = 512,

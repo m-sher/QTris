@@ -19,6 +19,21 @@ def main() -> None:
         "--num-steps", type=int, default=200_000, help="Number of env steps to collect."
     )
     parser.add_argument(
+        "--engine",
+        choices=["c", "gpu"],
+        default="c",
+        help="beam engine: `c` searches one position at a time on all cores, "
+        "`gpu` steps --batch envs in lockstep through the CUDA teacher (needs the "
+        "teacher extra and a device). Both produce the same targets.",
+    )
+    parser.add_argument(
+        "--batch",
+        type=int,
+        default=64,
+        help="--engine gpu: envs stepped in lockstep. The teacher needs a large "
+        "batch to pay off; at 1 it is slower than the C.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
