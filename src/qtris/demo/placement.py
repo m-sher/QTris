@@ -29,7 +29,7 @@ from qtris.demo.rendering import (
     draw_garbage_bar,
 )
 from qtris.demo.utils import load_checkpoint, save_frames_as_video
-from qtris.training.placement_az import _load_trace_pools
+from qtris.data.garbage import resolve_traces
 
 num_envs = 1
 piece_dim = 8
@@ -90,16 +90,8 @@ def main(args):
 
     p_model.summary()
 
-    garbage_traces = None
-    traces_dir = getattr(args, "garbage_traces", None)
-    if traces_dir:
-        pools = _load_trace_pools(traces_dir)
-        tier = getattr(args, "trace_tier", None) or (list(pools)[-1] if pools else None)
-        if tier not in pools:
-            raise SystemExit(
-                f"trace tier {tier!r} not found in {traces_dir} (have {list(pools)})"
-            )
-        garbage_traces = pools[tier]
+    garbage_traces, tier = resolve_traces(args)
+    if garbage_traces:
         print(f"Trace garbage: tier {tier} ({len(garbage_traces)} traces)", flush=True)
 
     four_wide = getattr(args, "four_wide", False)

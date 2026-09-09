@@ -8,7 +8,7 @@ from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 
 from qtris.demo.constants import PIECE_COLORS, PIECE_DISPLAY
-from qtris.training.placement_az import _load_trace_pools
+from qtris.data.garbage import resolve_traces
 
 BOARD_ROWS, BOARD_COLS = 24, 10
 CELL = 25
@@ -77,20 +77,6 @@ class Stats:
     @property
     def run_app(self):
         return self.run_attack / self.run_pieces if self.run_pieces else 0.0
-
-
-def resolve_traces(args):
-    """(trace pool, tier name) named by --garbage-traces, or (None, None)."""
-    traces_dir = getattr(args, "garbage_traces", None)
-    if not traces_dir:
-        return None, None
-    pools = _load_trace_pools(traces_dir)
-    tier = getattr(args, "trace_tier", None) or (list(pools)[-1] if pools else None)
-    if tier not in pools:
-        raise SystemExit(
-            f"trace tier {tier!r} not found in {traces_dir} (have {list(pools)})"
-        )
-    return pools[tier], tier
 
 
 def make_env(args, seed, traces=None):

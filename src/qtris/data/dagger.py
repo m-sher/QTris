@@ -23,6 +23,7 @@ from tqdm import tqdm
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
 from qtris.models.placement.model import PlacementPolicyValueNet
+from qtris.data.garbage import resolve_traces
 from qtris.data.placement_features import (
     CANDIDATE_CAPACITY,
     PLACEMENT_FEATURE_DIM,
@@ -123,6 +124,7 @@ def rollout_placement_states(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    garbage_traces,
     searcher,
     headless=False,
     log_every=1000,
@@ -148,6 +150,7 @@ def rollout_placement_states(
         auto_push_garbage=True,
         auto_fill_queue=True,
         num_row_tiers=num_row_tiers,
+        garbage_traces=garbage_traces,
     )
 
     time_step = env.reset()
@@ -335,6 +338,7 @@ def collect_dagger_placement(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    garbage_traces=None,
     headless=False,
     log_every=1000,
 ):
@@ -358,6 +362,7 @@ def collect_dagger_placement(
         garbage_max,
         garbage_push_delay,
         num_row_tiers,
+        garbage_traces,
         searcher,
         headless=headless,
         log_every=log_every,
@@ -543,11 +548,16 @@ def main(cli_args):
         dropout_rate=m.dropout_rate,
         max_holes=e.max_holes,
         max_steps_env=9_999_999,
-        garbage_chance=e.garbage_chance,
+        garbage_chance=(
+            float(cli_args.garbage_chance)
+            if getattr(cli_args, "garbage_chance", None) is not None
+            else e.garbage_chance
+        ),
         garbage_min=e.garbage_min,
         garbage_max=e.garbage_max,
         garbage_push_delay=e.garbage_push_delay,
         num_row_tiers=m.num_row_tiers,
+        garbage_traces=resolve_traces(cli_args)[0],
         headless=getattr(cli_args, "headless", False),
         log_every=1000,
     )
@@ -603,6 +613,7 @@ def main(cli_args):
             garbage_max=args.garbage_max,
             garbage_push_delay=args.garbage_push_delay,
             num_row_tiers=args.num_row_tiers,
+            garbage_traces=args.garbage_traces,
             headless=args.headless,
             log_every=args.log_every,
         )

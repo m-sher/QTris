@@ -41,6 +41,27 @@ def main() -> None:
         "--dagger). For --engine gpu, device memory scales with --batch times this.",
     )
     parser.add_argument(
+        "--garbage-chance",
+        type=float,
+        default=None,
+        help="per-step garbage chance (default: EnvConfig.garbage_chance). 0 gives a "
+        "clean-board dataset; ignored when --garbage-traces is set.",
+    )
+    parser.add_argument(
+        "--garbage-traces",
+        type=str,
+        default=None,
+        help="trace-replay garbage from this library dir, replacing the chance model "
+        "(see train --garbage-traces).",
+    )
+    parser.add_argument(
+        "--trace-tier",
+        type=str,
+        default=None,
+        help="--garbage-traces: tier subdir to draw from "
+        "(default: last sorted = strongest).",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,

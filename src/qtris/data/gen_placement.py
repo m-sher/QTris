@@ -1,7 +1,8 @@
 from TetrisEnv.Moves import Keys
 from TetrisEnv.PyTetrisEnv import PyTetrisEnv
 from TetrisEnv.CB2BSearch import CB2BSearch
-from qtris.config import DataGenConfig
+from qtris.config import DataGenConfig, EnvConfig
+from qtris.data.garbage import resolve_traces
 from qtris.data.placement_features import (
     CANDIDATE_CAPACITY,
     PLACEMENT_FEATURE_DIM,
@@ -29,6 +30,7 @@ def collect(
     garbage_max,
     garbage_push_delay,
     num_row_tiers,
+    garbage_traces=None,
     headless=False,
     log_every=1000,
 ):
@@ -54,6 +56,7 @@ def collect(
         auto_push_garbage=True,
         auto_fill_queue=True,
         num_row_tiers=num_row_tiers,
+        garbage_traces=garbage_traces,
     )
 
     time_step = env.reset()
@@ -147,6 +150,7 @@ def collect_batched(
     garbage_push_delay,
     num_row_tiers,
     batch,
+    garbage_traces=None,
     headless=False,
     log_every=1000,
 ):
@@ -176,6 +180,7 @@ def collect_batched(
             auto_push_garbage=True,
             auto_fill_queue=True,
             num_row_tiers=num_row_tiers,
+            garbage_traces=garbage_traces,
         )
         for i in range(batch)
     ]
@@ -282,15 +287,24 @@ def main(args):
     seed = getattr(args, "seed", 0)
 
     datagen_cfg = DataGenConfig()
+    env_cfg = EnvConfig()
     queue_size = datagen_cfg.queue_size
     max_len = 15
-    max_holes = 50
+    max_holes = env_cfg.max_holes
     max_steps_env = 9999999
-    garbage_chance = 0.15
-    garbage_min = 1
-    garbage_max = 4
-    garbage_push_delay = 1
+    garbage_chance = env_cfg.garbage_chance
+    if getattr(args, "garbage_chance", None) is not None:
+        garbage_chance = float(args.garbage_chance)
+    garbage_min = env_cfg.garbage_min
+    garbage_max = env_cfg.garbage_max
+    garbage_push_delay = env_cfg.garbage_push_delay
     num_row_tiers = 2
+    garbage_traces, trace_tier = resolve_traces(args)
+    if garbage_traces:
+        print(
+            f"Trace garbage: tier {trace_tier} ({len(garbage_traces)} traces)",
+            flush=True,
+        )
 
     existing_count = 0
     existing = None
@@ -355,6 +369,7 @@ def main(args):
         garbage_max=garbage_max,
         garbage_push_delay=garbage_push_delay,
         num_row_tiers=num_row_tiers,
+        garbage_traces=garbage_traces,
         headless=getattr(args, "headless", False),
     )
 
