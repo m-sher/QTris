@@ -1,4 +1,4 @@
-"""Host driver for the batched beam search; b2b_search.c:1986-2435."""
+"""Host driver for the batched beam search; b2b_search.c:1991-2440."""
 
 # The teacher import runs the CUDA library bootstrap and must come first.
 from teacher.constants import (
@@ -278,7 +278,7 @@ def _expand(buf, depth, n_children, child_item, child_slot, root_index):
         c.score,
     )
     # Every live child raises its root against this frontier, pruned or not;
-    # b2b_search.c:2247, 2351.
+    # b2b_search.c:2252, 2351.
     buf.frontier_hi.fill(np.float32(-np.inf))
     buf.frontier_lo.fill(np.float32(np.inf))
     frontier_range_kernel[grid, THREADS](
@@ -338,25 +338,25 @@ def _collect(buf, counts, n_parents):
 
     alive = counts_h > 0
     action = np.full(batch, -1, dtype=np.int32)
-    # Value target: the played line's score in attack lines; b2b_search.c:2392.
+    # Value target: the played line's score in attack lines; b2b_search.c:2397.
     best_score = np.full(batch, DEATH_SCORE, dtype=np.float32)
     # Index of the root the best leaf descends from. An action index alone does not
     # identify a root, since multi-landing placements share one.
     root_index = np.full(batch, -1, dtype=np.int32)
     for g in range(batch):
         if alive[g]:
-            # The beam is grouped by game in the C total order; b2b_search.c:2387.
+            # The beam is grouped by game in the C total order; b2b_search.c:2388.
             ri = int(depth0[starts[g]])
             best_score[g] = leaf_score[starts[g]]
             if 0 <= ri < root_action.shape[1]:
                 action[g] = root_action[g, ri]
                 root_index[g] = ri
         else:
-            # An emptied beam returns before the root block; b2b_search.c:2363-2382.
+            # An emptied beam returns before the root block; b2b_search.c:2368-2387.
             action[g] = fallback[g]
             root_count[g] = 0
 
-    # A root every child of which died was never raised; b2b_search.c:2422-2423.
+    # A root every child of which died was never raised; b2b_search.c:2427-2428.
     tail = np.arange(root_action.shape[1])[None, :] >= root_count[:, None]
     root_score[~tail & (root_score < -1e29)] = ROOT_FLOOR
     root_action[tail] = -1
@@ -395,14 +395,14 @@ def search_batch(buffers, depth, width, profile=None):
     device synchronisation after every stage.
     """
     # Both are clamped to the C's caps and to what the buffers were sized for;
-    # b2b_search.c:1917-1919.
+    # b2b_search.c:1922-1924.
     depth = min(max(int(depth), 1), MAX_SEARCH_DEPTH, buffers.depth)
     width = min(int(width), MAX_BEAM_WIDTH, buffers.width)
 
     n_parents = buffers.n_parents
     counts = cp.zeros(buffers.batch, dtype=cp.int32)
 
-    # Depth 0 then depths 1..depth-1; b2b_search.c:2265.
+    # Depth 0 then depths 1..depth-1; b2b_search.c:2270.
     for d in range(depth):
         if n_parents == 0:
             break

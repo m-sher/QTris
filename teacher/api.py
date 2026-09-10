@@ -22,7 +22,7 @@ _COL_BITS = (np.uint16(1) << np.arange(BOARD_COLS, dtype=np.uint16)).astype(np.u
 
 
 class Placement(NamedTuple):
-    """A placement in descriptor form; b2b_search.c:2406."""
+    """A placement in descriptor form; b2b_search.c:2411."""
 
     is_hold: int
     rot: int
@@ -157,7 +157,7 @@ class GpuTeacher:
         b2b,
         combo,
         total_garbage,
-        garbage_push_delay=1,  # unread, as b2b_search.c:1964
+        garbage_push_delay=1,  # unread, as b2b_search.c:1969
         bag_seen=0,
         search_depth=10,
         beam_width=128,
@@ -190,7 +190,7 @@ class GpuTeacher:
             ri = int(result.root_index[0])
             row = int(result.root_row[0, ri]) if ri >= 0 else -1
         else:
-            # An emptied beam plays the depth-0 fallback; b2b_search.c:2363-2373.
+            # An emptied beam plays the depth-0 fallback; b2b_search.c:2368-2378.
             row = int(buf.fallback_row[0])
 
         n = min(int(result.root_count[0]), int(max_roots))

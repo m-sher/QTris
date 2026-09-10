@@ -1655,16 +1655,9 @@ static int finalize_beam(SearchState* beam, int n, int K) {
     return kept;
 }
 
-static float evaluate_state(const SearchState* state, int board_height,
+// Heuristic score of one state in attack lines, with no cache.
+static float evaluate_terms(const SearchState* state, int board_height,
                             const int* queue, int queue_len) {
-    uint64_t _tt_h = tt_hash(state, board_height);
-    uint32_t _tt_idx = (uint32_t)(_tt_h & TT_MASK);
-    TTEntry* _tt_e = &g_tt[_tt_idx];
-    if (_tt_e->hash == _tt_h && _tt_e->generation != 0 &&
-        (g_tt_generation - _tt_e->generation) <= TT_GENERATION_EXPIRY) {
-        return _tt_e->score;
-    }
-
     float score = 0.0f;
 
     int upcoming[MAX_SEARCH_DEPTH + 2];
@@ -1741,7 +1734,19 @@ static float evaluate_state(const SearchState* state, int board_height,
     if (state->pieces_placed > 0) {
         score += (W_EXEC_RAMP * (float)state->chain_ramp) / (float)state->pieces_placed;
     }
+    return score;
+}
 
+static float evaluate_state(const SearchState* state, int board_height,
+                            const int* queue, int queue_len) {
+    uint64_t _tt_h = tt_hash(state, board_height);
+    uint32_t _tt_idx = (uint32_t)(_tt_h & TT_MASK);
+    TTEntry* _tt_e = &g_tt[_tt_idx];
+    if (_tt_e->hash == _tt_h && _tt_e->generation != 0 &&
+        (g_tt_generation - _tt_e->generation) <= TT_GENERATION_EXPIRY) {
+        return _tt_e->score;
+    }
+    float score = evaluate_terms(state, board_height, queue, queue_len);
     _tt_e->hash = _tt_h;
     _tt_e->score = score;
     _tt_e->generation = g_tt_generation;
@@ -2605,6 +2610,7 @@ typedef struct {
     int four_wide;               // hold cols 0-2 / 7-9 at FOUR_WIDE_WALL_HEIGHT every step
     float w_residual;            // four_wide: bonus per clearing edge that leaves the middle
                                  // stack top matching a residual template; 0 = off
+    float w_oracle;              // beam evaluation as a potential, in attack lines; 0 = off
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -2940,6 +2946,28 @@ static inline float b2b_phi(int b2b) {
 #define MCTS_HEIGHT_MAX 24.0f
 #define MCTS_BUMPINESS_MAX 48.0f
 #define MCTS_HOLES_MAX 16.0f
+// The beam's evaluation of a node as a potential. The beam plays the front of its
+// queue, so the active piece leads the queue handed over; with no pieces placed the
+// attack and ramp terms drop out, leaving the board, bank, risk and spin-structure
+// terms. A dead board reads 0.
+static float mcts_oracle_potential(const MState* s, const MConfig* cfg) {
+    SearchState st;
+    memset(&st, 0, sizeof(st));
+    memcpy(st.board, s->board, sizeof(uint16_t) * cfg->board_height);
+    compute_col_heights_full(st.board, cfg->board_height, st.col_heights);
+    st.b2b = s->b2b;
+    st.combo = s->combo;
+    st.hold_piece = s->hold;
+    for (int i = 0; i < s->gcnt; i++) st.garbage_remaining += s->gq[i].rows;
+    int effective_h = max_stack_height_c(st.board, cfg->board_height) + st.garbage_remaining;
+    if (spawn_envelope_blocked_c(st.board) || effective_h >= DEATH_HEIGHT_CAP) return 0.0f;
+    int q[MAXVQ + 1];
+    int qn = 0;
+    if (s->active != PIECE_N) q[qn++] = s->active;
+    for (int i = 0; i < s->qlen && qn < MAXVQ + 1; i++) q[qn++] = s->queue[i];
+    return evaluate_terms(&st, cfg->board_height, q, qn);
+}
+
 static float mcts_board_penalty(const MConfig* cfg, const uint16_t* board) {
     float pen = 0.0f;
     if (cfg->w_height != 0.0f || cfg->w_bumpiness != 0.0f) {
@@ -3006,6 +3034,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool terminal = false;
                 float credit = 0.0f;
                 bool plain = false;
+                float phi_node = cfg->w_oracle != 0.0f ? mcts_oracle_potential(&node->st, cfg) : 0.0f;
                 mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal, &credit, &plain);
                 float plain_cost = plain ? cfg->w_plain : 0.0f;
                 node->child[slot] = leaf;
@@ -3020,7 +3049,8 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                         mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
                         + (mcts_board_penalty(cfg, node->st.board)
                            - cfg->w_death
-                           - cfg->w_b2b * b2b_phi(node->st.b2b))
+                           - cfg->w_b2b * b2b_phi(node->st.b2b)
+                           - cfg->w_oracle * phi_node)
                               / (cfg->return_scale + 1e-8f);
                     mtree_backup(t, cfg, path, plen, 0.0f);
                     done++;
@@ -3036,12 +3066,14 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                      && residual_match(leaf->st.board, cfg->board_height))
                         ? cfg->w_residual / (cfg->return_scale + 1e-8f)
                         : 0.0f;
+                float phi_leaf = cfg->w_oracle != 0.0f ? mcts_oracle_potential(&leaf->st, cfg) : 0.0f;
                 node->edge_reward[slot] =
                     mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
                     + (cfg->w_b2b
                            * (cfg->gamma * b2b_phi(leaf->st.b2b) - b2b_phi(node->st.b2b))
                        + mcts_board_penalty(cfg, node->st.board)
-                       - cfg->gamma * mcts_board_penalty(cfg, leaf->st.board))
+                       - cfg->gamma * mcts_board_penalty(cfg, leaf->st.board)
+                       + cfg->w_oracle * (cfg->gamma * phi_leaf - phi_node))
                           / (cfg->return_scale + 1e-8f)
                     + res_bonus;
                 leaf->awaiting_eval = true;
@@ -3075,7 +3107,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   float return_scale, int max_len, int max_nodes,
                   int leaves_per_round, float vloss, float w_b2b, int q_norm,
                   float w_height, float w_bumpiness, float fpu, float w_holes,
-                  float w_plain, int four_wide, float w_residual) {
+                  float w_plain, int four_wide, float w_residual, float w_oracle) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3108,6 +3140,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.w_holes = w_holes; e->cfg.w_plain = w_plain;
     e->cfg.four_wide = four_wide;
     e->cfg.w_residual = w_residual;
+    e->cfg.w_oracle = w_oracle;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -3293,7 +3326,7 @@ int mcts_branch_capacity(void) { return MBRANCH; }
 // Height handshake: the walls the search levels must be the ones the env builds.
 int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 25; }
+int mcts_create_arity(void) { return 26; }
 int mcts_result_arity(void) { return 6; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {

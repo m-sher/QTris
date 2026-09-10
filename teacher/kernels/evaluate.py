@@ -46,7 +46,7 @@ import numpy as np
 _W_CHAIN = np.asarray(W_CHAIN, dtype=np.float32)
 _RISK_TABLE = np.asarray(RISK_TABLE, dtype=np.float32)
 
-# Length of the upcoming-piece list; b2b_search.c:1670.
+# Length of the upcoming-piece list; b2b_search.c:1663.
 UPCOMING_CAP = MAX_SEARCH_DEPTH + 2
 
 # Fields of the ImmobilePlacementResult scratch; b2b_search.c:1289.
@@ -63,7 +63,7 @@ _IPR_BEST_C = 5
 def build_upcoming(hold_piece, queue, queue_len, next_queue_idx, upcoming_out):
     """Fill upcoming_out with hold then the live queue, returning its length.
 
-    b2b_search.c:1670.
+    b2b_search.c:1663.
     """
     num_upcoming = 0
     if hold_piece != PIECE_N:
@@ -276,7 +276,7 @@ def evaluate_state(
     col_heights,
     has_hint,
 ):
-    """Heuristic score of one leaf state; b2b_search.c:1658.
+    """Heuristic score of one leaf state; b2b_search.c:1659.
 
     Carries no transposition table, so it always computes.
     """

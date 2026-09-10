@@ -199,17 +199,11 @@ def test_penalty_changes_the_visit_distribution():
     assert not np.array_equal(off, on)
 
 
-def test_shaping_weights_are_on_by_default():
+def test_the_shaping_weights_every_pipeline_searches_with():
     """Every pipeline builds its search from these defaults and overrides none of them."""
     cfg = MCTSConfig()
-    assert (
-        cfg.w_attack,
-        cfg.w_b2b,
-        cfg.w_height,
-        cfg.w_bumpiness,
-        cfg.w_holes,
-        cfg.w_plain,
-    ) == (0.006, 0.0054, 0.06, 0.03, 0.16, 0.03)
+    assert (cfg.w_attack, cfg.w_oracle, cfg.w_plain) == (0.006, 0.006, 0.03)
+    assert (cfg.w_b2b, cfg.w_height, cfg.w_bumpiness, cfg.w_holes) == (0, 0, 0, 0)
 
 
 def _run_holes(env, sims, w_holes):

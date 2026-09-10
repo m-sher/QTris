@@ -87,7 +87,7 @@ def enumerate_kernel(
 
     wi_count[i] = 0
 
-    # A carry item copies its parent forward and places nothing; b2b_search.c:2283.
+    # A carry item copies its parent forward and places nothing; b2b_search.c:2288.
     if wi_carry[i] != 0:
         return
 

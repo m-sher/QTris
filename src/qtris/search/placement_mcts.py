@@ -11,11 +11,12 @@ as Q).
 Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole attack
 and only the rows a non-difficult clear cancels from the own garbage queue (combo and the
 b2b-break surge are already inside `compute_attack`'s attack), minus `w_plain` for a
-non-difficult clear made with nothing queued, plus two potential differences:
-`w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`, and
+non-difficult clear made with nothing queued, plus three potential differences:
+`w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`,
 `pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +
-w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`; terminal edges add
-`-w_death` and read both potentials as 0. In four_wide mode a clearing edge that leaves
+w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`, and
+`w_oracle * (gamma*E(child) - E(parent))` with `E` the beam's evaluation of the state
+in attack lines; terminal edges add `-w_death` and read every potential as 0. In four_wide mode a clearing edge that leaves
 the middle stack matching a residual template adds `w_residual`. The leaf bootstrap is
 the net value directly. PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw
 return_scale units otherwise; an unvisited child scores its parent's net value minus
@@ -44,10 +45,10 @@ class MCTSConfig:
     w_death: float = (
         100.0  # terminal-edge penalty (raw attack units; same scale as a strong clear)
     )
-    w_b2b: float = 0.0054  # b2b-build potential shaping; Phi=min(max(0,b2b),45), 0=off
-    w_height: float = 0.06  # board potential on min(1, max_height/24), 0=off
-    w_bumpiness: float = 0.03  # board potential on min(1, bumpiness/48), 0=off
-    w_holes: float = 0.16  # board potential on min(1, holes/16), 0=off
+    w_b2b: float = 0.0  # b2b-build potential shaping; Phi=min(max(0,b2b),45), 0=off
+    w_height: float = 0.0  # board potential on min(1, max_height/24), 0=off
+    w_bumpiness: float = 0.0  # board potential on min(1, bumpiness/48), 0=off
+    w_holes: float = 0.0  # board potential on min(1, holes/16), 0=off
     w_plain: float = 0.03  # cost of a non-difficult clear with nothing queued, 0=off
     q_norm: bool = True  # rank on per-tree min-max normalised Q
     fpu: float = 0.4  # unvisited child scores parent value minus this; <0 scores 0
@@ -55,6 +56,7 @@ class MCTSConfig:
     w_residual: float = (
         0.0  # four_wide: bonus per clearing edge into a residual-matched stack
     )
+    w_oracle: float = 0.006  # beam evaluation as a potential, in attack lines; 0=off
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -150,6 +152,7 @@ class PlacementMCTS:
             w_plain=self.cfg.w_plain,
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
+            w_oracle=self.cfg.w_oracle,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -249,6 +252,7 @@ class PlacementMCTS:
             w_plain=self.cfg.w_plain,
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
+            w_oracle=self.cfg.w_oracle,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

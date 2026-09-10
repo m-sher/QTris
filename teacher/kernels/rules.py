@@ -167,7 +167,7 @@ def clear_lines(board, board_height):
 
 @cuda.jit(device=True, inline=True)
 def is_perfect_clear(board, board_height):
-    """Whether every row is empty; b2b_search.c:1802."""
+    """Whether every row is empty; b2b_search.c:1807."""
     for r in range(board_height):
         if board[r] != 0:
             return False

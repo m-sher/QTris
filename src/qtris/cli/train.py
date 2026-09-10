@@ -131,6 +131,14 @@ def main() -> None:
         "--learning-rate", type=float, default=3e-4, help="Adam learning rate."
     )
     parser.add_argument(
+        "--w-oracle",
+        type=float,
+        default=0.006,
+        help="weight on the beam oracle's state evaluation as a potential-based shaping "
+        "term in the MCTS, in attack lines. 0 = off; the default equals w_attack, so a "
+        "line of evaluation is worth a line of attack.",
+    )
+    parser.add_argument(
         "--w-death",
         type=float,
         default=100.0,

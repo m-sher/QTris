@@ -375,6 +375,7 @@ def main(args):
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
+        w_oracle=float(getattr(args, "w_oracle", 0.006)),
     )
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
@@ -459,6 +460,7 @@ def main(args):
         fpu=cfg.fpu,
         w_holes=cfg.w_holes,
         w_plain=cfg.w_plain,
+        w_oracle=cfg.w_oracle,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,

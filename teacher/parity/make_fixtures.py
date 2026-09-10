@@ -58,7 +58,7 @@ def grid_of(masks):
 
 def decode_action(index):
     """(is_hold, rot, norm_col, spin) of a packed action index."""
-    # b2b_search.c:2406
+    # b2b_search.c:2411
     index = int(index)
     return index // 160, (index % 160) // 40, (index % 40) // 4, index % 4
 
@@ -221,7 +221,7 @@ def run_locks(search, grids, queues, pos, counts, acts, rows):
         action = int(acts[i, k])
         is_hold, rot, norm_col, spin = decode_action(action)
         hold = int(pos["hold"][i])
-        # b2b_search.c:2852
+        # b2b_search.c:2858
         if not is_hold:
             piece = int(pos["active"][i])
         elif hold != 0:

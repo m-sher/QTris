@@ -14,8 +14,8 @@ from teacher.constants import (
 )
 
 # Branches one parent opens at one depth
-NORMAL_BRANCHES = 2  # played piece and hold swap; b2b_search.c:2315-2339
-SPECULATIVE_BRANCHES = 14  # 7 bag pieces, each with a hold swap; b2b_search.c:2278-2310
+NORMAL_BRANCHES = 2  # played piece and hold swap; b2b_search.c:2320-2344
+SPECULATIVE_BRANCHES = 14  # 7 bag pieces, each with a hold swap; b2b_search.c:2283-2315
 
 DEFAULT_POOL_PER_PARENT = 96
 
@@ -23,7 +23,7 @@ DEFAULT_POOL_PER_PARENT = 96
 def speculative_reachable(depth: int, queue_len: int) -> bool:
     """True when an expanded depth can reach next_queue_idx >= queue_len."""
     # A parent entering loop depth d carries next_queue_idx <= d and the deepest
-    # expanded depth is depth - 1; b2b_search.c:2264-2277.
+    # expanded depth is depth - 1; b2b_search.c:2269-2282.
     return depth - 1 >= queue_len
 
 
@@ -152,8 +152,8 @@ class BeamBuffers:
         pool_per_parent: int = DEFAULT_POOL_PER_PARENT,
     ) -> None:
         self.batch = int(batch)
-        self.width = min(int(width), MAX_BEAM_WIDTH)  # b2b_search.c:1918
-        self.depth = min(max(int(depth), 1), MAX_SEARCH_DEPTH)  # b2b_search.c:1917-1919
+        self.width = min(int(width), MAX_BEAM_WIDTH)  # b2b_search.c:1923
+        self.depth = min(max(int(depth), 1), MAX_SEARCH_DEPTH)  # b2b_search.c:1922-1924
         self.queue_capacity = max(int(queue_len), 1)
         self.max_placements = int(max_placements)
         self.root_capacity = int(root_capacity)
@@ -165,12 +165,12 @@ class BeamBuffers:
             else NORMAL_BRANCHES
         )
         # spec_mult doubles the child bound while speculative depths run;
-        # b2b_search.c:1926
+        # b2b_search.c:1931
         self.spec_mult = 2 if self.branches_per_parent > NORMAL_BRANCHES else 1
         # M = one work item per branch of every beam slot of every game
         self.workitem_capacity = self.batch * self.width * self.branches_per_parent
         # N = pool_per_parent children per work item, clamped to the C's max_next
-        # of beam_width * MAX_PLACEMENTS * spec_mult per game (b2b_search.c:1927)
+        # of beam_width * MAX_PLACEMENTS * spec_mult per game (b2b_search.c:1932)
         # and floored at one full beam or one full root expansion per game
         self.state_capacity = max(
             min(
@@ -310,7 +310,7 @@ class BeamBuffers:
 
     def swap(self) -> None:
         """Exchange the parent and child banks and zero the child counter."""
-        # b2b_search.c:2255-2261
+        # b2b_search.c:2260-2266
         self.curr, self.next = self.next, self.curr
         self.child_total.fill(0)
 
@@ -357,7 +357,7 @@ class BeamBuffers:
         self.queue_len[:] = cp.asarray(qlen)
         self.active_piece[:] = cp.asarray(_per_game(active, b, np.int32))
 
-        # Depth-0 parent, one per game; b2b_search.c:1910-1970
+        # Depth-0 parent, one per game; b2b_search.c:1915-1975
         p = self.curr
         p.board[:b] = cp.asarray(boards)
         p.col_heights[:b] = cp.asarray(_root_col_heights(boards))
@@ -371,7 +371,7 @@ class BeamBuffers:
         p.next_queue_idx[:b] = 0
         p.depth0_idx[:b] = -1
         p.garbage_remaining[:b] = cp.asarray(_per_game(total_garbage, b, np.int32))
-        p.garbage_timer[:b] = 0  # garbage_push_delay ignored; b2b_search.c:1964-1965
+        p.garbage_timer[:b] = 0  # garbage_push_delay ignored; b2b_search.c:1969-1970
         p.garbage_prevented[:b] = 0.0
         p.bag_seen[:b] = cp.asarray(_per_game(bag_seen, b, np.uint8))
         p.unlicensed_cash[:b] = 0

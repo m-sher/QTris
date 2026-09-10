@@ -1,4 +1,4 @@
-"""Child construction kernel, a port of expand_and_insert; b2b_search.c:1787."""
+"""Child construction kernel, a port of expand_and_insert; b2b_search.c:1792."""
 
 # The teacher import runs the CUDA library bootstrap and must precede numba.cuda.
 from teacher.buffers import StateBank
@@ -91,7 +91,7 @@ def expand_kernel(
     wi = child_item[k]
     pi = wi_parent[wi]
 
-    # Carry: the parent enters the next beam unchanged; b2b_search.c:2283-2287.
+    # Carry: the parent enters the next beam unchanged; b2b_search.c:2288-2292.
     if wi_carry[wi] != 0:
         parent_board = p_board[pi]
         board = c_board[k]
@@ -151,7 +151,7 @@ def expand_kernel(
     new_qi = wi_new_qi[wi]
     new_bag = wi_new_bag[wi]
 
-    # Path accumulators; b2b_search.c:1811-1819
+    # Path accumulators; b2b_search.c:1816-1824
     ramp = 0
     if clears > 0 and b2b_maintaining and parent_combo >= 0:
         ramp = parent_combo + 1
@@ -170,7 +170,7 @@ def expand_kernel(
     else:
         c_depth0_idx[k] = p_depth0_idx[pi]
 
-    # Garbage cancel, push and prevention; b2b_search.c:1820-1850
+    # Garbage cancel, push and prevention; b2b_search.c:1825-1855
     gr = p_garbage_remaining[pi]
     gt = p_garbage_timer[pi]
     gr_initial = gr
@@ -302,7 +302,7 @@ def debug_expand(
     pl_row = cp.full((1, 1), int(landing_row), dtype=cp.int8)
     pl_spin = cp.full((1, 1), int(spin), dtype=cp.int8)
 
-    # Parent: the zero-path root the C seeds at depth 0; b2b_search.c:1998-2011
+    # Parent: the zero-path root the C seeds at depth 0; b2b_search.c:2003-2016
     parent = StateBank(1)
     parent.board[0] = cp.asarray(board)
     parent.col_heights[0] = cp.asarray(heights)

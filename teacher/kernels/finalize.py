@@ -36,7 +36,7 @@ def count_branches_kernel(
     queue_len,
     out_counts,
 ):
-    """Work items one parent opens at this depth; b2b_search.c:1985-2340."""
+    """Work items one parent opens at this depth; b2b_search.c:1990-2345."""
     i = cuda.grid(1)
     if i >= n_parents:
         return
@@ -44,7 +44,7 @@ def count_branches_kernel(
     ql = queue_len[game[i]]
     held = hold_piece[i]
 
-    # Depth 0: the active piece, then the hold swap; b2b_search.c:1985-2243.
+    # Depth 0: the active piece, then the hold swap; b2b_search.c:1990-2248.
     if depth == 0:
         if held != PIECE_N or ql > 0:
             out_counts[i] = 2
@@ -122,7 +122,7 @@ def emit_items_kernel(
     wi_game,
     wi_carry,
 ):
-    """Write a parent's branches at its scan offset; b2b_search.c:1985-2340.
+    """Write a parent's branches at its scan offset; b2b_search.c:1990-2345.
 
     At depth 0 the active-piece branch precedes the hold branch, so ranking the
     children of a game by (item, placement) numbers them as the C's
@@ -140,7 +140,7 @@ def emit_items_kernel(
     base = offsets[i]
     cap = wi_parent.shape[0]
 
-    # Depth 0: active piece keeps the hold, the swap takes it; b2b_search.c:1985-2243.
+    # Depth 0: active piece keeps the hold, the swap takes it; b2b_search.c:1990-2248.
     if depth == 0:
         active = active_piece[g]
         if base < cap:
@@ -210,7 +210,7 @@ def emit_items_kernel(
     if qi >= ql:
         remaining = bag_remaining_count(bag)
         if remaining == 0:
-            # Bag empty: the parent is copied forward; b2b_search.c:2283-2287.
+            # Bag empty: the parent is copied forward; b2b_search.c:2288-2292.
             if base < cap:
                 _write_item(
                     base,
@@ -326,7 +326,7 @@ def emit_items_kernel(
                 wi_carry,
             )
     elif qi + 1 < ql:
-        # Empty hold plays queue[qi + 1] and holds queue[qi]; b2b_search.c:2332-2339.
+        # Empty hold plays queue[qi + 1] and holds queue[qi]; b2b_search.c:2337-2344.
         if base + 1 < cap:
             _write_item(
                 base + 1,
@@ -382,7 +382,7 @@ def raise_root_norm_kernel(n, depth, game, dead, depth0_idx, score, hi, lo, root
 
 @cuda.jit(device=True, inline=True)
 def _action_index(is_hold, piece, rot, col, spin):
-    """Action id of a placement, piece being the played one; b2b_search.c:2398-2406."""
+    """Action id of a placement, piece being the played one; b2b_search.c:2403-2411."""
     norm_col = col + PIECE_MIN_COL[piece, rot]
     return is_hold * 160 + rot * 40 + norm_col * 4 + spin
 
@@ -403,7 +403,7 @@ def seed_roots_kernel(
     root_row,
     root_count,
 ):
-    """Write the depth-0 placements as per-game roots; b2b_search.c:2413-2431.
+    """Write the depth-0 placements as per-game roots; b2b_search.c:2418-2436.
 
     wi_root_base[w] is the per-game exclusive scan of pl_count over that game's
     depth-0 items in emission order, so wi_root_base[w] + p is both the root
@@ -447,7 +447,7 @@ def record_fallback_kernel(
     fallback_action,
     fallback_row,
 ):
-    """Record each game's first depth-0 placement; b2b_search.c:1988-1992.
+    """Record each game's first depth-0 placement; b2b_search.c:1993-1997.
 
     The item holding root index 0 is the first branch with any placement, dead
     or not, which the C keeps for an emptied beam at :2366-2374.

@@ -55,8 +55,8 @@ BFS_QUEUE_CAPACITY = 8192  # b2b_search.c:72
 BFS_STATE_SPACE = BOARD_ROWS * BOARD_COLS * ROTATIONS  # b2b_search.c:73
 BFS_DEPTH_CAP = 12  # a state at this depth is not expanded; b2b_search.c:970
 BEAM_STRATA = 8  # b2b_search.c:1621
-ROOT_CAPACITY = 2 * MAX_PLACEMENTS  # b2b_search.c:1954
-ROOT_SCORE_INIT = -1e30  # unseeded root slot, never emitted; b2b_search.c:1956
+ROOT_CAPACITY = 2 * MAX_PLACEMENTS  # b2b_search.c:1959
+ROOT_SCORE_INIT = -1e30  # unseeded root slot, never emitted; b2b_search.c:1961
 
 # Zobrist slot counts
 Z_B2B_SLOTS = 64  # b2b_search.c:218
@@ -97,7 +97,7 @@ W_CHAIN = (0.0, 0.0, 3.5, 9.0, 16.0)  # by spin clears; b2b_search.c:428
 # it reached plus one step per depth; b2b_search.c:1596-1619.
 ROOT_DEPTH_STEP = 1.125  # b2b_search.c:1599
 ROOT_FLOOR = -2.0  # every child dead, so the root was never raised; b2b_search.c:1600
-DEATH_SCORE = -1e6  # b2b_search.c:1686
+DEATH_SCORE = -1e6  # b2b_search.c:1679
 
 # Attack base tables, indexed by min(clears, 4). A perfect clear takes
 # PERFECT_CLEAR_ATTACK in place of any table; b2b_search.c:829-841.
@@ -106,9 +106,9 @@ ATTACK_TM_TABLE = (0, 0, 1, 2, 0)  # SPIN_T_MINI; b2b_search.c:836
 ATTACK_PLAIN_TABLE = (0, 0, 1, 2, 4)  # SPIN_NONE and SPIN_ALL_MINI; b2b_search.c:839
 
 # Action encoding
-ACTION_HOLD_STRIDE = 160  # b2b_search.c:2406
-ACTION_ROT_STRIDE = 40  # b2b_search.c:2406
-ACTION_COL_STRIDE = 4  # b2b_search.c:2406
+ACTION_HOLD_STRIDE = 160  # b2b_search.c:2411
+ACTION_ROT_STRIDE = 40  # b2b_search.c:2411
+ACTION_COL_STRIDE = 4  # b2b_search.c:2411
 ACTION_SPACE = 2 * ACTION_HOLD_STRIDE
 
 
