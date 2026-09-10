@@ -2573,8 +2573,9 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // gamma*penalty(child) on board quality (height, bumpiness, holes), and
 // w_oracle*(gamma*E(child) - E(parent)) on the beam's evaluation, with -w_death on
 // terminal edges, where every potential reads 0; the leaf bootstrap is the net value
-// directly. A parallel shaping-free channel (leaf values + death edges only) feeds the
-// per-tree root value readout. Dirichlet noise + final sampling stay in Python.
+// directly. A parallel shaping-free channel (leaf values, w_value_attack*attack per edge
+// and the death edges, no potentials) feeds the per-tree root value readout. Dirichlet
+// noise + final sampling stay in Python.
 // ============================================================
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
@@ -2620,6 +2621,7 @@ typedef struct {
     float w_residual;            // four_wide: bonus per clearing edge that leaves the middle
                                  // stack top matching a residual template; 0 = off
     float w_oracle;              // beam evaluation as a potential, in attack lines; 0 = off
+    float w_value_attack;        // value-channel reward per raw attack line; 0 = death only
     int max_len;
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
@@ -2634,8 +2636,9 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
-    // Shaping-free value channel: edge_value carries only the death term, Wv accumulates
-    // it with the leaf values, so the root readout is a Q that skips the shaping.
+    // Shaping-free value channel: edge_value carries the raw attack at w_value_attack and
+    // the death term, Wv accumulates them with the leaf values, so the root readout is a Q
+    // that skips the shaping.
     float edge_value[MCAP], Wv[MCAP];
     struct MNode* child[MCAP];
 } MNode;
@@ -3046,14 +3049,16 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 float credit = 0.0f;
                 bool plain = false;
                 float phi_node = cfg->w_oracle != 0.0f ? mcts_oracle_potential(&node->st, cfg) : 0.0f;
-                mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal, &credit, &plain);
+                float raw_attack =
+                    mcts_apply_step(&leaf->st, cfg, node->desc[slot], &terminal, &credit, &plain);
                 float plain_cost = plain ? cfg->w_plain : 0.0f;
                 node->child[slot] = leaf;
                 // Death (top-out/holes, or a resulting no-legal position) is the loss signal.
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
-                    node->edge_value[slot] = -cfg->w_death / (cfg->return_scale + 1e-8f);
+                    node->edge_value[slot] = (cfg->w_value_attack * raw_attack - cfg->w_death)
+                                             / (cfg->return_scale + 1e-8f);
                     // Every potential reads 0 at a terminal: the edge returns
                     // -w_b2b*Phi(parent) - w_oracle*E(parent) and refunds the board penalty.
                     node->edge_reward[slot] =
@@ -3067,7 +3072,8 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     done++;
                     break;
                 }
-                node->edge_value[slot] = 0.0f;
+                node->edge_value[slot] =
+                    (cfg->w_value_attack * raw_attack) / (cfg->return_scale + 1e-8f);
                 // Potential-based shaping on the bank, board quality and the beam
                 // evaluation, plus the four_wide residual bonus on a clearing edge that
                 // leaves a matching child (combo >= 0 iff the placement cleared).
@@ -3118,7 +3124,8 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
                   float return_scale, int max_len, int max_nodes,
                   int leaves_per_round, float vloss, float w_b2b, int q_norm,
                   float w_height, float w_bumpiness, float fpu, float w_holes,
-                  float w_plain, int four_wide, float w_residual, float w_oracle) {
+                  float w_plain, int four_wide, float w_residual, float w_oracle,
+                  float w_value_attack) {
     b2b_init_pieces();
     // Prime the pathfinder's init_pieces() single-threaded before any parallel enumerate.
     { uint16_t b[MBH]; memset(b, 0, sizeof(b)); int32_t lr[160]; int64_t sq[160 * 32];
@@ -3152,6 +3159,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     e->cfg.four_wide = four_wide;
     e->cfg.w_residual = w_residual;
     e->cfg.w_oracle = w_oracle;
+    e->cfg.w_value_attack = w_value_attack;
     e->cfg.max_len = max_len;
     if (leaves_per_round < 1) leaves_per_round = 1;
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
@@ -3337,7 +3345,7 @@ int mcts_branch_capacity(void) { return MBRANCH; }
 // Height handshake: the walls the search levels must be the ones the env builds.
 int mcts_four_wide_wall_height(void) { return FOUR_WIDE_WALL_HEIGHT; }
 // ABI handshake: cmcts refuses a .so whose mcts_create arity differs from its argtypes.
-int mcts_create_arity(void) { return 26; }
+int mcts_create_arity(void) { return 27; }
 int mcts_result_arity(void) { return 6; }
 // Test hook for the residual matcher.
 int mcts_residual_match(const uint16_t* board, int board_height) {

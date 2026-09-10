@@ -5,8 +5,8 @@ bitboard+scalars node, OpenMP-threaded across the N self-play games; only the TF
 net stays in Python. Per move: build one C tree per game, evaluate the roots in one batched net
 call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one net call ->
 `apply_leaves` until the budget is spent, and read out per-root visit counts plus the
-shaping-free root value (leaf values + death edges only, in the same return_scale units
-as Q).
+shaping-free root value (leaf values, `w_value_attack` per raw attack line and death
+edges, no potentials, in the same return_scale units as Q).
 
 Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole attack
 and only the rows a non-difficult clear cancels from the own garbage queue (combo and the
@@ -58,6 +58,9 @@ class MCTSConfig:
         0.0  # four_wide: bonus per clearing edge into a residual-matched stack
     )
     w_oracle: float = 0.006  # beam evaluation as a potential, in attack lines; 0=off
+    w_value_attack: float = (
+        0.0  # value-channel reward per raw attack line; 0=death only
+    )
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
@@ -154,6 +157,7 @@ class PlacementMCTS:
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
             w_oracle=self.cfg.w_oracle,
+            w_value_attack=self.cfg.w_value_attack,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -254,6 +258,7 @@ class PlacementMCTS:
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
             w_oracle=self.cfg.w_oracle,
+            w_value_attack=self.cfg.w_value_attack,
         )
         out = np.zeros(n, dtype=np.float32)
         try:

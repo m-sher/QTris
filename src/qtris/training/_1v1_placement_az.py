@@ -4,12 +4,14 @@ The learner (player 1) duels an opponent (player 2) sampled each generation from
 frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
 (the opponent's already-sent garbage is seen at the root; none is modeled landing within the
 search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
-its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
-value when the move cap ended the game unresolved; every earlier position gets the
-shaping-free post-search root value of the position n_step later. The search runs at
-w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
-only in-search terminal.
+`PyTetris1v1Env` does. The value head regresses n-step targets: a position takes the
+discounted sum of `w_value_attack * attack` over its next n_step placements plus the
+discounted bootstrap n_step later, the net's own root prediction or, under
+`bootstrap="search"`, the post-search root value; a position within n_step of its game's
+end takes the rewards to the end plus the realized outcome z in {-1, 0, +1} on the last
+step, or the final position's bootstrap when the move cap ended the game unresolved. The
+search runs at w_death=1, return_scale=1, the same gamma and MCTSConfig's shaping weights;
+own-death = -1 is the only in-search terminal.
 
 Both players' trajectories are trained, each labeled with its own outcome z; only the
 learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
@@ -134,13 +136,27 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _n_step(values, z, n, truncated):
-    """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
-    position bootstraps on the value n steps later, and the last n positions take the
-    outcome z, or the final position's value when the game was cut off unresolved."""
+def _n_step(values, rewards, z, n, gamma, truncated):
+    """n-step value targets for one trajectory: every position takes the discounted
+    rewards of its next n steps plus the discounted bootstrap value n positions later,
+    and the last n positions take the rewards to the end plus the outcome z on the last
+    step, or the final position's value when the game was cut off unresolved."""
     length = len(values)
-    tail = values[length - 1] if truncated else z
-    return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
+    out = []
+    for t in range(length):
+        end = min(t + n, length - 1)
+        g, disc = 0.0, 1.0
+        for i in range(t, end):
+            g += disc * rewards[i]
+            disc *= gamma
+        if t + n <= length - 1:
+            g += disc * values[end]
+        elif truncated:
+            g += disc * values[length - 1]
+        else:
+            g += disc * (rewards[length - 1] + z)
+        out.append(g)
+    return out
 
 
 def _mean_or_none(xs):
@@ -169,13 +185,15 @@ def _grounding(values, z, steps_to_end):
     return out
 
 
-def _episode(pend, p1_died, p2_died, n_step):
+def _episode(
+    pend, p1_died, p2_died, n_step, gamma=1.0, w_value_attack=0.0, bootstrap="v_search"
+):
     """Stamp each player's value targets on its pending positions and return both players'
     rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
     p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
     collected. A game with no death is a draw for rating and diagnostics but a truncation
-    for the value target. z and steps_to_end are carried for diagnostics and are not
-    training inputs."""
+    for the value target. `bootstrap` names the position field the target bootstraps on.
+    z and steps_to_end are carried for diagnostics and are not training inputs."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
     if glen == 0:
         return None
@@ -192,7 +210,14 @@ def _episode(pend, p1_died, p2_died, n_step):
         n = len(positions)
         if n == 0:
             continue
-        targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
+        targets = _n_step(
+            [p[bootstrap] for p in positions],
+            [w_value_attack * p.get("attack", 0.0) for p in positions],
+            z,
+            n_step,
+            gamma,
+            truncated,
+        )
         rows += [
             (p, t, mask, z, n - 1 - i)
             for i, (p, t) in enumerate(zip(positions, targets))
@@ -346,6 +371,11 @@ def main(args):
     eval_interval = getattr(args, "eval_interval", 20)
     eval_games = getattr(args, "eval_games", 32)
     n_step = max(1, int(getattr(args, "n_step", 14)))
+    gamma = getattr(args, "gamma", None)
+    gamma = 0.97 if gamma is None else float(gamma)
+    w_value_attack = float(getattr(args, "w_value_attack", 0.006))
+    bootstrap = getattr(args, "bootstrap", "root")
+    target_args = (n_step, gamma, w_value_attack, f"v_{bootstrap}")
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
         checkpoint_dir = "checkpoints/1v1_placement_az"
@@ -369,13 +399,14 @@ def main(args):
         c_puct=getattr(args, "c_puct", 1.5),
         dirichlet_alpha=getattr(args, "dirichlet_alpha", 0.3),
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
-        gamma=1.0,
+        gamma=gamma,
         temp_moves=getattr(args, "temp_moves", 12),
         w_death=1.0,
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
         w_oracle=float(getattr(args, "w_oracle", 0.006)),
+        w_value_attack=w_value_attack,
     )
 
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
@@ -461,6 +492,9 @@ def main(args):
         w_holes=cfg.w_holes,
         w_plain=cfg.w_plain,
         w_oracle=cfg.w_oracle,
+        w_value_attack=cfg.w_value_attack,
+        gamma=cfg.gamma,
+        bootstrap=bootstrap,
         mini_batch_size=mini_batch_size,
         num_epochs=num_epochs,
         value_coef=value_coef,
@@ -552,7 +586,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], n_step)
+                    ep = _episode(pending[g], a["dead"], b["dead"], *target_args)
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -563,6 +597,8 @@ def main(args):
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    pending[g]["p1"][-1]["attack"] = float(atk1)
+                    pending[g]["p2"][-1]["attack"] = float(atk2)
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
@@ -602,7 +638,7 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, n_step)
+                    ep = _episode(pending[g], p1_died, p2_died, *target_args)
 
                 if ep is not None:
                     rows, glen, p1_won, draw = ep

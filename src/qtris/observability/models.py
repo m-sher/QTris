@@ -66,10 +66,11 @@ class AlphaZeroTrainConfig(BaseModel):
 class OneVsOnePlacementAZConfig(BaseModel):
     """1v1 opponent-pool AlphaZero trainer hyperparams.
 
-    n-step value target: raw outcome z in {-1,0,+1} within n_step of the game end (the
-    final search value instead when the move cap ended it), the shaping-free post-search
-    root value n_step later elsewhere; w_death=1, gamma=1,
-    return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
+    n-step value target: the discounted sum of w_value_attack * attack over the next
+    n_step placements plus the discounted bootstrap n_step later (the net's own root
+    value, or the post-search root value under bootstrap="search"); the last n_step positions
+    take the rewards to the end plus the outcome z in {-1,0,+1}, or the final position's
+    bootstrap when the move cap ended the game; w_death=1, return_scale=1. The learner duels frozen snapshots sampled from a disk pool; both
     players' trajectories train the value head, the learner's also the policy."""
 
     num_games: int
@@ -88,6 +89,9 @@ class OneVsOnePlacementAZConfig(BaseModel):
     w_holes: float = 0.0
     w_plain: float = 0.0
     w_oracle: float = 0.0
+    w_value_attack: float = 0.0
+    gamma: float = 1.0
+    bootstrap: str = "search"
     mini_batch_size: int
     num_epochs: int
     value_coef: float

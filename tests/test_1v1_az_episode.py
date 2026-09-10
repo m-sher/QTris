@@ -8,11 +8,21 @@ from qtris.training._1v1_placement_az import (
 )
 
 
-def _pend(n1, n2, v=0.5):
+def _pend(n1, n2, v=0.5, attack=0.0):
     return {
-        "p1": [{"v_search": v + 0.01 * i} for i in range(n1)],
-        "p2": [{"v_search": v + 0.01 * i} for i in range(n2)],
+        "p1": [
+            {"v_search": v + 0.01 * i, "v_root": -v, "attack": attack}
+            for i in range(n1)
+        ],
+        "p2": [
+            {"v_search": v + 0.01 * i, "v_root": -v, "attack": attack}
+            for i in range(n2)
+        ],
     }
+
+
+def _zeros(n):
+    return [0.0] * n
 
 
 def test_episode_emits_both_players_rows():
@@ -39,8 +49,8 @@ def test_episode_targets_match_n_step():
     """The targets are the pure n-step targets, for both players."""
     pend = _pend(5, 5, v=0.25)
     rows, *_ = _episode(pend, True, False, 2)
-    exp1 = _n_step([p["v_search"] for p in pend["p1"]], -1.0, 2, False)
-    exp2 = _n_step([p["v_search"] for p in pend["p2"]], 1.0, 2, False)
+    exp1 = _n_step([p["v_search"] for p in pend["p1"]], _zeros(5), -1.0, 2, 1.0, False)
+    exp2 = _n_step([p["v_search"] for p in pend["p2"]], _zeros(5), 1.0, 2, 1.0, False)
     assert [r[1] for r in rows if r[2] == 1.0] == pytest.approx(exp1)
     assert [r[1] for r in rows if r[2] == 0.0] == pytest.approx(exp2)
 
@@ -50,14 +60,57 @@ def test_n_step_bootstraps_n_ahead_and_grounds_the_tail():
     n of the end gets raw z, the terminal row included, unless the game was truncated,
     when those rows take the final position's value instead."""
     values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-    targets = _n_step(values, -1.0, 2, False)
+    z6 = _zeros(6)
+    targets = _n_step(values, z6, -1.0, 2, 1.0, False)
     assert targets == pytest.approx([0.3, 0.4, 0.5, 0.6, -1.0, -1.0])
-    assert _n_step(values, -1.0, 10, False) == pytest.approx([-1.0] * 6)
-    assert _n_step([0.7], 1.0, 1, False) == pytest.approx([1.0])
-    assert _n_step(values, 0.0, 2, True) == pytest.approx(
+    assert _n_step(values, z6, -1.0, 10, 1.0, False) == pytest.approx([-1.0] * 6)
+    assert _n_step([0.7], [0.0], 1.0, 1, 1.0, False) == pytest.approx([1.0])
+    assert _n_step(values, z6, 0.0, 2, 1.0, True) == pytest.approx(
         [0.3, 0.4, 0.5, 0.6, 0.6, 0.6]
     )
-    assert _n_step(values, 0.0, 10, True) == pytest.approx([0.6] * 6)
+    assert _n_step(values, z6, 0.0, 10, 1.0, True) == pytest.approx([0.6] * 6)
+
+
+def test_n_step_sums_discounted_rewards_before_the_bootstrap():
+    """G_t = sum_{i<n} gamma^i r_{t+i} + gamma^n v_{t+n}; a row within n of the end sums
+    its rewards to the last step, where the outcome z joins the last reward, and a
+    truncated tail discounts the final value by the steps to it."""
+    values = [0.1, 0.2, 0.3, 0.4]
+    rewards = [1.0, 2.0, 3.0, 4.0]
+    g = 0.5
+    got = _n_step(values, rewards, -1.0, 2, g, False)
+    assert got == pytest.approx(
+        [
+            1.0 + g * 2.0 + g * g * 0.3,
+            2.0 + g * 3.0 + g * g * 0.4,
+            3.0 + g * (4.0 - 1.0),
+            4.0 - 1.0,
+        ]
+    )
+    got = _n_step(values, rewards, 0.0, 2, g, True)
+    assert got == pytest.approx(
+        [
+            1.0 + g * 2.0 + g * g * 0.3,
+            2.0 + g * 3.0 + g * g * 0.4,
+            3.0 + g * 0.4,
+            0.4,
+        ]
+    )
+    # A whole-game horizon at gamma 1 is the Monte Carlo return.
+    assert _n_step(values, rewards, 1.0, 10, 1.0, False) == pytest.approx(
+        [11.0, 10.0, 8.0, 5.0]
+    )
+
+
+def test_episode_scales_attack_by_w_value_attack_and_can_bootstrap_on_the_root():
+    pend = _pend(4, 4, v=0.5, attack=2.0)
+    rows, *_ = _episode(pend, True, False, 2, gamma=1.0, w_value_attack=0.25)
+    p1 = [r[1] for r in rows if r[2] == 1.0]
+    # 0.25 * 2 lines = 0.5 per step: two steps then the search value, or to the end + z.
+    assert p1 == pytest.approx([1.0 + 0.52, 1.0 + 0.53, 1.0 - 1.0, 0.5 - 1.0])
+    rows, *_ = _episode(pend, True, False, 2, bootstrap="v_root")
+    p1 = [r[1] for r in rows if r[2] == 1.0]
+    assert p1 == pytest.approx([-0.5, -0.5, -1.0, -1.0])
 
 
 def test_capped_game_is_a_draw_for_rating_and_a_truncation_for_the_target():

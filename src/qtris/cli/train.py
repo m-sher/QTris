@@ -103,8 +103,23 @@ def main() -> None:
         "--gamma",
         type=float,
         default=None,
-        help="single-player only: discount for MCTS backup + MC return target "
-        "(default 0.99). Rejected for 1v1, whose reward is terminal-only.",
+        help="discount for the MCTS backup and the value target (default 0.99 "
+        "single-player, 0.97 for 1v1).",
+    )
+    parser.add_argument(
+        "--w-value-attack",
+        type=float,
+        default=0.006,
+        help="1v1 only: reward per raw attack line in the value channel and the n-step "
+        "target, in return units. 0 = terminal-only target; the default equals "
+        "w_attack, so a line is worth what the search credits it.",
+    )
+    parser.add_argument(
+        "--bootstrap",
+        choices=("search", "root"),
+        default="root",
+        help="1v1 only: value the n-step target bootstraps on n_step later: the net's "
+        "own root prediction, or the post-search root value.",
     )
     parser.add_argument(
         "--temp-moves",
@@ -257,12 +272,6 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.mode == "1v1":
-        if args.gamma is not None:
-            parser.error(
-                "1v1 does not accept --gamma: its reward is terminal-only "
-                "(z in {-1,0,1}) and the n-step target is undiscounted. Use "
-                "--n-step to trade outcome grounding against bootstrap."
-            )
         from qtris.training._1v1_placement_az import main as run
     else:
         from qtris.training.placement_az import main as run
