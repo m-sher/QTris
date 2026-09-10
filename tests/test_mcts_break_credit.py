@@ -99,7 +99,7 @@ def _legal_desc(env):
 
 
 def _position_with_break_and_maintain():
-    for seed in (7, 11, 13, 17, 19, 23):
+    for seed in (9, 20, 30, 7, 11, 13, 17, 19, 23):
         env = _played_env(seed)
         desc, slots = _legal_desc(env)
         cands = _candidates(env, desc, slots)

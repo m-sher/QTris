@@ -335,8 +335,11 @@ def evaluate_state(
     atk_real = np.float32(total_attack) - np.float32(unlicensed_cash_A)
     if atk_real < np.float32(0.0):
         atk_real = np.float32(0.0)
+    atk_eff = atk_real
+    if b2b >= 4:
+        atk_eff = atk_eff + np.float32(b2b)
     if pieces_placed > 0:
-        score += (np.float32(W_ATTACK_H) * atk_real) / np.float32(pieces_placed)
+        score += (np.float32(W_ATTACK_H) * atk_eff) / np.float32(pieces_placed)
     if garbage_prevented > np.float32(0.0):
         score += np.float32(W_GARBAGE_PREVENT) * np.float32(garbage_prevented)
 

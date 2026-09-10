@@ -413,12 +413,13 @@ static float W_HOLES           = 0.5f;     // * holes (enclosed cavities) * (1 +
 static float HOLE_HEIGHT_SCALE = 32.0f;
 static float W_HOLE_CEILING    = 0.125f;   // * hole_ceiling_weight (buried-hole depth)
 
-// B2B store. A break at b2b >= 4 sends b2b lines.
+// B2B store. A break at b2b >= 4 sends b2b lines, and that face value is banked attack,
+// counted in the effective-attack rate below.
 static float W_B2B_FLAT        = 1.0f;     // one-shot "b2b active" flag (b2b >= 0)
-static float W_B2B_LINEAR      = 3.0f;     // * b2b
+static float W_B2B_LINEAR      = 2.0f;     // * b2b, for worth beyond the banked face value
 
 // Attack realization, as a per-piece rate over the path times a horizon in pieces.
-static float W_ATTACK_H        = 10.0f;    // * attack / pieces_placed
+static float W_ATTACK_H        = 10.0f;    // * (attack + banked surge) / pieces_placed
 static float W_GARBAGE_PREVENT = 0.5f;     // * garbage_prevented
 
 // Spin-setup structure (b2b-maintaining clear potential)
@@ -1700,8 +1701,10 @@ static float evaluate_terms(const SearchState* state, int board_height,
         score -= W_HOLE_CEILING * bs.hole_ceiling_weight;  // burying holes deeper is worse
     }
 
-    // ── B2B economy (store terms; W_B2B_LINEAR is the hoarding driver) ─────────
-    // W_B2B_FLAT fires for b2b >= 0, so it ALSO rewards starting b2b (b2b==0).
+    // ── B2B economy ───────────────────────────────────────────
+    // W_B2B_FLAT fires for b2b >= 0, so it ALSO rewards starting b2b (b2b==0). The
+    // counter's own lines are banked attack, priced in the rate below; W_B2B_LINEAR
+    // prices whatever a deep bank is worth beyond them.
     if (state->b2b >= 0) {
         score += W_B2B_FLAT;
     }
@@ -1710,12 +1713,17 @@ static float evaluate_terms(const SearchState* state, int board_height,
     }
 
     // ── Attack realization ────────────────────────────────────
-    // Attack per piece along the path, over a horizon of W_ATTACK_H pieces.
-    // Unlicensed D_cash (leftover I/PC at combo<0) does not enter it.
+    // Effective attack per piece along the path, over a horizon of W_ATTACK_H pieces:
+    // what the path sent, plus what the counter would send if broken now, so realizing
+    // the bank moves lines from one half of the numerator to the other. A counter below
+    // 4 banks nothing, as a break there sends no surge. Unlicensed D_cash (leftover
+    // I/PC at combo<0) does not enter it.
     float atk_real = state->total_attack - state->unlicensed_cash_A;
     if (atk_real < 0.0f) atk_real = 0.0f;
+    float atk_eff = atk_real;
+    if (state->b2b >= 4) atk_eff += (float)state->b2b;
     if (state->pieces_placed > 0) {
-        score += (W_ATTACK_H * atk_real) / (float)state->pieces_placed;
+        score += (W_ATTACK_H * atk_eff) / (float)state->pieces_placed;
     }
     // Garbage prevention: keeping imminent garbage off the board (cancel or block-push).
     if (state->garbage_prevented > 0.0f) {
@@ -2942,9 +2950,10 @@ static inline float b2b_phi(int b2b) {
 }
 
 // The beam's evaluation of a node as a potential. The beam plays the front of its
-// queue, so the active piece leads the queue handed over; with no pieces placed and
-// no garbage prevented, the attack, ramp and prevention terms drop out, leaving the
-// board, bank, risk and spin-structure terms. A dead board reads 0.
+// queue, so the active piece leads the queue handed over. The node has no path, so the
+// attack, ramp and prevention totals are zero and the state is priced at the horizon,
+// W_ATTACK_H pieces, where the effective-attack rate reads the banked surge alone and
+// returns it at face value. A dead board reads 0.
 static float mcts_oracle_potential(const MState* s, const MConfig* cfg) {
     SearchState st;
     memset(&st, 0, sizeof(st));
@@ -2953,6 +2962,7 @@ static float mcts_oracle_potential(const MState* s, const MConfig* cfg) {
     st.b2b = s->b2b;
     st.combo = s->combo;
     st.hold_piece = s->hold;
+    st.pieces_placed = (int)W_ATTACK_H;
     for (int i = 0; i < s->gcnt; i++) st.garbage_remaining += s->gq[i].rows;
     int effective_h = max_stack_height_c(st.board, cfg->board_height) + st.garbage_remaining;
     if (spawn_envelope_blocked_c(st.board) || effective_h >= DEATH_HEIGHT_CAP) return 0.0f;
