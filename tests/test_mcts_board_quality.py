@@ -200,7 +200,7 @@ def test_penalty_changes_the_visit_distribution():
 
 
 def test_the_shaping_weights_every_pipeline_searches_with():
-    """Every pipeline builds its search from these defaults and overrides none of them."""
+    """Every pipeline builds its search from these defaults; only w_oracle has a flag."""
     cfg = MCTSConfig()
     assert (cfg.w_attack, cfg.w_oracle, cfg.w_plain) == (0.006, 0.006, 0.03)
     assert (cfg.w_b2b, cfg.w_height, cfg.w_bumpiness, cfg.w_holes) == (0, 0, 0, 0)

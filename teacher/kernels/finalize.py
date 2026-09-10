@@ -450,7 +450,7 @@ def record_fallback_kernel(
     """Record each game's first depth-0 placement; b2b_search.c:1993-1997.
 
     The item holding root index 0 is the first branch with any placement, dead
-    or not, which the C keeps for an emptied beam at :2366-2374.
+    or not, which the C keeps for an emptied beam at :2369-2377.
     """
     i = cuda.grid(1)
     if i >= n_items:

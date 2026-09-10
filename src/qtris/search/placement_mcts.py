@@ -16,8 +16,9 @@ non-difficult clear made with nothing queued, plus three potential differences:
 `pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +
 w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`, and
 `w_oracle * (gamma*E(child) - E(parent))` with `E` the beam's evaluation of the state
-in attack lines; terminal edges add `-w_death` and read every potential as 0. In four_wide mode a clearing edge that leaves
-the middle stack matching a residual template adds `w_residual`. The leaf bootstrap is
+in attack lines; terminal edges add `-w_death` and read every potential as 0. In
+four_wide mode a clearing edge that leaves the middle stack matching a residual
+template adds `w_residual`. The leaf bootstrap is
 the net value directly. PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw
 return_scale units otherwise; an unvisited child scores its parent's net value minus
 `fpu`, floored at the tree minimum under `q_norm`. Dirichlet noise + sampling stay in

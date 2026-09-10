@@ -2560,10 +2560,11 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 // batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
 // w_attack*credit, where credit is all of a difficult clear's attack and only the rows
 // a non-difficult clear cancels from the own queue, minus w_plain for a non-difficult
-// clear made with nothing queued, plus two potential differences,
-// w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank and penalty(parent) -
-// gamma*penalty(child) on board quality (height, bumpiness, holes), with -w_death on
-// terminal edges, where both potentials read 0; the leaf bootstrap is the net value
+// clear made with nothing queued, plus three potential differences,
+// w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank, penalty(parent) -
+// gamma*penalty(child) on board quality (height, bumpiness, holes), and
+// w_oracle*(gamma*E(child) - E(parent)) on the beam's evaluation, with -w_death on
+// terminal edges, where every potential reads 0; the leaf bootstrap is the net value
 // directly. A parallel shaping-free channel (leaf values + death edges only) feeds the
 // per-tree root value readout. Dirichlet noise + final sampling stay in Python.
 // ============================================================
@@ -2940,16 +2941,10 @@ static inline float b2b_phi(int b2b) {
     return (float)(p < B2B_POTENTIAL_CAP ? p : B2B_POTENTIAL_CAP);
 }
 
-// Board-quality potential: max column height, bumpiness and holes of a board, each as a
-// fraction of its maximum and capped at 1. An edge pays penalty(parent) -
-// gamma*penalty(child).
-#define MCTS_HEIGHT_MAX 24.0f
-#define MCTS_BUMPINESS_MAX 48.0f
-#define MCTS_HOLES_MAX 16.0f
 // The beam's evaluation of a node as a potential. The beam plays the front of its
-// queue, so the active piece leads the queue handed over; with no pieces placed the
-// attack and ramp terms drop out, leaving the board, bank, risk and spin-structure
-// terms. A dead board reads 0.
+// queue, so the active piece leads the queue handed over; with no pieces placed and
+// no garbage prevented, the attack, ramp and prevention terms drop out, leaving the
+// board, bank, risk and spin-structure terms. A dead board reads 0.
 static float mcts_oracle_potential(const MState* s, const MConfig* cfg) {
     SearchState st;
     memset(&st, 0, sizeof(st));
@@ -2968,6 +2963,12 @@ static float mcts_oracle_potential(const MState* s, const MConfig* cfg) {
     return evaluate_terms(&st, cfg->board_height, q, qn);
 }
 
+// Board-quality potential: max column height, bumpiness and holes of a board, each as a
+// fraction of its maximum and capped at 1. An edge pays penalty(parent) -
+// gamma*penalty(child).
+#define MCTS_HEIGHT_MAX 24.0f
+#define MCTS_BUMPINESS_MAX 48.0f
+#define MCTS_HOLES_MAX 16.0f
 static float mcts_board_penalty(const MConfig* cfg, const uint16_t* board) {
     float pen = 0.0f;
     if (cfg->w_height != 0.0f || cfg->w_bumpiness != 0.0f) {
@@ -3043,8 +3044,8 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 if (dead) {
                     leaf->terminal = true;
                     node->edge_value[slot] = -cfg->w_death / (cfg->return_scale + 1e-8f);
-                    // Both potentials read 0 at a terminal: the edge returns
-                    // -w_b2b*Phi(parent) and refunds the parent's board penalty.
+                    // Every potential reads 0 at a terminal: the edge returns
+                    // -w_b2b*Phi(parent) - w_oracle*E(parent) and refunds the board penalty.
                     node->edge_reward[slot] =
                         mcts_scale_reward(cfg, cfg->w_attack * credit - plain_cost)
                         + (mcts_board_penalty(cfg, node->st.board)
@@ -3057,9 +3058,9 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                     break;
                 }
                 node->edge_value[slot] = 0.0f;
-                // Potential-based shaping on the bank and on board quality, plus the
-                // four_wide residual bonus on a clearing edge that leaves a matching child
-                // (combo >= 0 iff the placement cleared).
+                // Potential-based shaping on the bank, board quality and the beam
+                // evaluation, plus the four_wide residual bonus on a clearing edge that
+                // leaves a matching child (combo >= 0 iff the placement cleared).
                 float res_bonus =
                     (cfg->four_wide && cfg->w_residual != 0.0f
                      && leaf->st.combo >= 0

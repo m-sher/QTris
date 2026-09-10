@@ -345,7 +345,7 @@ def _collect(buf, counts, n_parents):
     root_index = np.full(batch, -1, dtype=np.int32)
     for g in range(batch):
         if alive[g]:
-            # The beam is grouped by game in the C total order; b2b_search.c:2388.
+            # The beam is grouped by game in the C total order; b2b_search.c:2389.
             ri = int(depth0[starts[g]])
             best_score[g] = leaf_score[starts[g]]
             if 0 <= ri < root_action.shape[1]:

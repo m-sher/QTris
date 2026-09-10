@@ -299,6 +299,7 @@ def main(args):
         gamma=GAMMA if gamma is None else gamma,
         temp_moves=getattr(args, "temp_moves", 12),
         w_death=getattr(args, "w_death", 100.0),
+        w_oracle=float(getattr(args, "w_oracle", 0.006)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
