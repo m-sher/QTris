@@ -262,6 +262,8 @@ def run_window(args):
     """Play in a pygame window driven entirely by the oracle."""
     import pygame
 
+    from qtris.demo.panels import confirm_save, run_replay
+
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     pygame.display.set_caption(f"beam oracle ({args.oracle})")
@@ -281,6 +283,7 @@ def run_window(args):
         args.max_len,
     )
     stats = Stats()
+    frames = []
     paused = False
     last_ms = 0.0
     probs = np.zeros(0, np.float32)
@@ -333,6 +336,7 @@ def run_window(args):
             ],
         )
         pygame.display.flip()
+        frames.append(pygame.surfarray.array3d(screen).swapaxes(0, 1))
         clock.tick(args.fps)
 
         if env._is_top_out(env._board):
@@ -350,7 +354,15 @@ def run_window(args):
             )
             stats.reset_episode()
 
-    pygame.quit()
+    if not frames:
+        pygame.quit()
+        return
+    if confirm_save(screen, font):
+        # Imported here so a run that saves nothing never loads TensorFlow.
+        from qtris.demo.utils import save_frames_as_video
+
+        save_frames_as_video(frames, "DemoOracle.mp4")
+    run_replay(screen, font, frames, len(frames))
 
 
 def main(args):

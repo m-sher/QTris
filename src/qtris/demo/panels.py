@@ -189,24 +189,30 @@ def confirm_save(screen, font, message="Save video?   Y / N"):
         clock.tick(60)
 
 
-def run_replay(screen, font, frames, num_steps, draw_overlay):
+def run_replay(screen, font, frames, num_steps, draw_overlay=None):
     """Replay UI shared by the single-player demos; runs until window close.
 
     The window grows by a header strip holding the scrubber and speed controls
-    so they never cover gameplay; the recorded frame is blitted below it.
-    draw_overlay(surface, ind) redraws the per-step overlay (the bottom info
-    panel) on top of the recorded frame.
+    so they never cover gameplay; the recorded frame is blitted below it. The
+    transport sits at the right edge and the scrubber fills what is left, so the
+    header fits any frame width. draw_overlay(surface, ind), when given, redraws
+    the per-step overlay on top of the recorded frame; frames that already carry
+    their panel pass nothing.
     """
     header_h = 60
     frame_h, frame_w = frames[0].shape[:2]
     screen = pygame.display.set_mode((frame_w, header_h + frame_h))
     play_area = screen.subsurface((0, header_h, frame_w, frame_h))
 
+    play_x = frame_w - 70
+    fwd_x = play_x - 38
+    back_x = fwd_x - 32
+
     slider = Slider(
         screen,
         x=10,
         y=8,
-        width=585,
+        width=back_x - 20,
         height=10,
         min=0,
         max=num_steps - 1,
@@ -218,7 +224,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
     # Held in vars so pygame_widgets' WeakSet doesn't GC them (bare exprs vanish).
     _back_btn = Button(
         screen,
-        605,
+        back_x,
         3,
         28,
         20,
@@ -230,7 +236,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
 
     _fwd_btn = Button(
         screen,
-        637,
+        fwd_x,
         3,
         28,
         20,
@@ -249,7 +255,7 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
 
     play_btn = Button(
         screen,
-        675,
+        play_x,
         3,
         60,
         20,
@@ -307,7 +313,8 @@ def run_replay(screen, font, frames, num_steps, draw_overlay):
             )
             screen.blit(speed_text, (220, 33))
             pygame_widgets.update(events)
-            draw_overlay(play_area, ind)
+            if draw_overlay is not None:
+                draw_overlay(play_area, ind)
             pygame.display.update()
             prev_ind, prev_paused = ind, paused
         clock.tick(60)
