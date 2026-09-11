@@ -65,7 +65,7 @@ def test_hazard_death_at_horizon_and_censoring():
 def test_calibration_excludes_unobserved_future():
     _, _, y, seen = death_targets(3, False)
     p = np.full_like(y, 0.2)
-    result = risk_calibration(p, y, seen)
+    result = risk_calibration(p, y, seen, horizons=(1, 24))
     assert result["brier_h1"] == pytest.approx(0.04)
     assert result["brier_h24"] is None
     assert result["censored_fraction_h24"] == 1

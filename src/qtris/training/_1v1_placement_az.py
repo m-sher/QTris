@@ -82,10 +82,7 @@ def _pos(r):
         "cand_placements": r["cand_placements"],
         "cand_mask": r["cand_mask"],
         "pi": r["pi"],
-        "v_root": r["value"],
-        "v_search": r["v_search"],
         "slot": r["slot"],
-        "gate_mask": r["gate_mask"],
         "risk_prediction": r["risk_prediction"][r["slot"]],
         "risk_curve": r["risk_curve"],
     }
@@ -148,46 +145,24 @@ def _mean_or_none(xs):
 
 def _collection_metrics(
     search_metrics,
-    cfg,
     learner_attack,
     productive_attack,
     surge_attack,
     learner_placements,
-    total_placements,
     elapsed,
 ):
     return {
         "attack/total_app": learner_attack / max(1, learner_placements),
         "attack/productive_app": productive_attack / max(1, learner_placements),
         "attack/surge_app": surge_attack / max(1, learner_placements),
-        "attack/other_app": (learner_attack - productive_attack - surge_attack)
-        / max(1, learner_placements),
         "progress/generation_seconds": elapsed,
-        "progress/placements_per_second": total_placements / max(elapsed, 1e-9),
-        "search/requested_simulations": cfg.num_simulations,
-        "search/completed_simulations": _mean_or_none(
-            [r["completed_simulations"] for r in search_metrics]
-        ),
         "search/max_depth": _mean_or_none([r["max_depth"] for r in search_metrics]),
-        "search/legal_candidates": _mean_or_none(
-            [int(r["cand_mask"].sum()) for r in search_metrics]
-        ),
         "search/eligible_candidates": _mean_or_none(
             [int(r["gate_mask"].sum()) for r in search_metrics]
-        ),
-        "gate/breaks_admitted": sum(
-            int(np.any(r["break_mask"] & r["gate_mask"])) for r in search_metrics
-        ),
-        "gate/breaks_blocked": sum(
-            int(np.any(r["break_mask"] & ~r["gate_mask"])) for r in search_metrics
-        ),
-        "gate/forced_breaks": sum(
-            int(r["risk_best_keep"] is None) for r in search_metrics
         ),
         "gate/breaks_chosen": sum(
             int(r["break_mask"][r["slot"]]) for r in search_metrics
         ),
-        "gate/chosen_risk": _mean_or_none([r["risk_chosen"] for r in search_metrics]),
         "gate/break_risk_reduction": _mean_or_none(
             [
                 r["risk_best_keep"] - r["risk_chosen"]
@@ -589,15 +564,7 @@ def main(args):
     move_count = np.zeros(num_games, dtype=np.int64)
     # Per-game pending positions for BOTH players, carried across gens until the game ends.
     pending = [{"p1": [], "p2": []} for _ in range(num_games)]
-    # Per-game peak b2b for the current episode, carried across gens like `pending`.
-    ep_max_b2b = [-1] * num_games
-    # Run of consecutive difficult clears (flushed by any other placement), the b2b bank run
-    # (difficult clears in a streak, tolerating stacking in between), and the combo peak after
-    # a b2b break (-1 = idle) with the combo already carried into that break.
     cur_chain = [0] * num_games
-    cur_bank = [0] * num_games
-    post_break_peak = [-1] * num_games
-    post_break_base = [0] * num_games
 
     replay = deque()
     replay_size = 0
@@ -615,16 +582,15 @@ def main(args):
         gen_pos = []
         completed_episodes = []
         search_metrics = []
+        search_work = {}
         productive_attack = surge_attack = 0.0
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
-        total_attack = total_placements = 0
         learner_attack = learner_placements = 0
         # Learner b2b/combo economics, from p1's scorer around each committed placement.
-        b2b_at_death, b2b_at_cashout, episode_max_b2b = [], [], []
-        chain_runs, bank_runs, post_break_combos, post_break_clears = [], [], [], []
-        n_difficult = n_breaks = n_deaths = 0
+        b2b_at_death, chain_runs = [], []
+        n_deaths = 0
 
         for _t in range(horizon):
             temps_p1 = np.where(move_count < cfg.temp_moves, 1.0, 0.0).astype(
@@ -632,6 +598,9 @@ def main(args):
             )
             r1 = mcts.search([p[0] for p in pairs], 1.0, temps_p1)  # learner
             r2 = opp_mcts.search([p[1] for p in pairs], 1.0, opp_temps)  # pool opponent
+            for search in (mcts, opp_mcts):
+                for key, value in search.last_stats.items():
+                    search_work[key] = search_work.get(key, 0) + value
 
             for g in range(N):
                 a, b = r1[g], r2[g]
@@ -663,39 +632,16 @@ def main(args):
                         pre_b2b if pre_b2b >= 4 and e1._scorer._b2b == -1 else 0
                     )
                     search_metrics.append(a)
-                    post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
-                    broke = pre_b2b >= 0 and post_b2b == -1
-                    if post_b2b == pre_b2b + 1:  # a difficult clear
-                        n_difficult += 1
+                    post_b2b = e1._scorer._b2b
+                    if post_b2b == pre_b2b + 1:
                         cur_chain[g] += 1
-                        cur_bank[g] += 1
-                    else:  # chain_run flushes on ANY other placement, bank_run does not
+                    else:
                         if cur_chain[g] > 0:
                             chain_runs.append(cur_chain[g])
                         cur_chain[g] = 0
-                    if broke:
-                        n_breaks += 1
-                        bank_runs.append(cur_bank[g])
-                        cur_bank[g] = 0
-                        if pre_b2b >= 4:
-                            b2b_at_cashout.append(pre_b2b)
-                            post_break_peak[g] = post_combo
-                            post_break_base[g] = post_combo
-                    elif post_break_peak[g] >= 0:
-                        if post_combo >= 0:
-                            post_break_peak[g] = max(post_break_peak[g], post_combo)
-                        else:
-                            post_break_combos.append(post_break_peak[g])
-                            post_break_clears.append(
-                                post_break_peak[g] - post_break_base[g]
-                            )
-                            post_break_peak[g] = -1
-                    ep_max_b2b[g] = max(ep_max_b2b[g], post_b2b)
                     if p1_died:
                         b2b_at_death.append(pre_b2b)
                         n_deaths += 1
-                    total_attack += atk1 + atk2
-                    total_placements += 2
                     learner_attack += atk1
                     learner_placements += 1
                     move_count[g] += 1
@@ -711,18 +657,9 @@ def main(args):
                         (state_observation(e1), state_observation(e2)),
                     )
                 )
-                episode_max_b2b.append(ep_max_b2b[g])
-                ep_max_b2b[g] = -1
                 if cur_chain[g] > 0:
                     chain_runs.append(cur_chain[g])
                 cur_chain[g] = 0
-                if cur_bank[g] > 0:
-                    bank_runs.append(cur_bank[g])
-                cur_bank[g] = 0
-                if post_break_peak[g] >= 0:
-                    post_break_combos.append(post_break_peak[g])
-                    post_break_clears.append(post_break_peak[g] - post_break_base[g])
-                post_break_peak[g] = -1
                 e1._reset()
                 e2._reset()
                 move_count[g] = 0
@@ -773,19 +710,25 @@ def main(args):
             if write_gen:
                 whr.to_json(ratings_path)
 
+        search_stats = {
+            f"search/{k}": search_work.get(k, 0) for k in ("seconds", "inference_calls")
+        }
+        search_stats["search/inference_batch_utilization"] = search_work.get(
+            "inference_rows", 0
+        ) / max(1, search_work.get("inference_capacity", 0))
         collection_stats = _collection_metrics(
             search_metrics,
-            cfg,
             learner_attack,
             productive_attack,
             surge_attack,
             learner_placements,
-            total_placements,
             time.monotonic() - gen_started,
         )
         collection_stats.update(
             {
-                "outcomes/app_learner": learner_attack / max(1, learner_placements),
+                **search_stats,
+                "progress/optimization_seconds": 0.0,
+                "progress/buffer_size": replay_size,
                 "progress/completed_games": len(game_lens),
                 "progress/updates": 0,
                 "counts/n_deaths": n_deaths,
@@ -807,23 +750,11 @@ def main(args):
         pi_tgt = np.stack([p["pi"] for p, *_ in gen_pos]).astype(np.float32)
         value_tgt = np.array([r[1] for r in gen_pos], dtype=np.float32)
         policy_mask = np.array([r[2] for r in gen_pos], dtype=np.float32)
-        v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
-        gate_mask = np.stack([p["gate_mask"] for p, *_ in gen_pos])
         slots = np.array([p["slot"] for p, *_ in gen_pos], np.int32)
         hazard_target = np.stack([p["hazard_target"] for p, *_ in gen_pos])
         hazard_mask = np.stack([p["hazard_mask"] for p, *_ in gen_pos])
         # gen_pos interleaves both players; policy_mask==1 is the learner.
         lrn = policy_mask == 1.0
-        # Policy perplexity is exp(H(pi)); 1 means one candidate carries all mass.
-        pi_l = pi_tgt[lrn]
-        p_nz = np.where(pi_l > 0.0, pi_l, 1.0)  # 0*log(0) = 0
-        visit_perplexity = np.exp(-(pi_l * np.log(p_nz)).sum(axis=1))
-        top1_visit_share = pi_l.max(axis=1)
-        visit_coverage = (pi_l > 0.0).sum(axis=1) / np.maximum(
-            cand_mk[lrn].sum(axis=1), 1
-        )
-        root_cands_visited = (pi_l > 0.0).sum(axis=1)
-
         replay.append(
             {
                 "boards": boards,
@@ -834,7 +765,6 @@ def main(args):
                 "pi_target": pi_tgt,
                 "value_target": value_tgt,
                 "policy_mask": policy_mask,
-                "gate_mask": gate_mask,
                 "slot": slots,
                 "hazard_target": hazard_target,
                 "hazard_mask": hazard_mask,
@@ -844,6 +774,7 @@ def main(args):
         while replay_size > replay_capacity and len(replay) > 1:
             replay_size -= len(replay.popleft()["value_target"])
 
+        collection_stats["progress/buffer_size"] = replay_size
         if replay_size < mini_batch_size:
             log_step(OneVsOneCollectionLog(diagnostics=collection_stats), step=gen)
             print(
@@ -852,6 +783,7 @@ def main(args):
             )
             continue
 
+        optimization_started = time.monotonic()
         full = {k: np.concatenate([e[k] for e in replay], axis=0) for k in replay[0]}
         total_steps = num_epochs * max(1, n_new // mini_batch_size)
         ds = (
@@ -872,7 +804,7 @@ def main(args):
                 tf.constant(pieces[learner_idx]),
                 tf.constant(bcg[learner_idx]),
                 tf.constant(cand_pl[learner_idx]),
-                tf.constant(gate_mask[learner_idx]),
+                tf.constant(cand_mk[learner_idx]),
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
 
@@ -901,19 +833,11 @@ def main(args):
             )
         else:
             update_kl = 0.0
+        optimization_seconds = time.monotonic() - optimization_started
 
         n_games = len(game_lens)
         win_rate = wins / decisive if decisive else 0.0
-        draw_rate = n_draw / n_games if n_games else 0.0
-        app = total_attack / total_placements if total_placements else 0.0
         app_learner = learner_attack / learner_placements if learner_placements else 0.0
-        attack_corr = None
-        if (
-            lrn.sum() >= 2
-            and np.std(v_root[lrn]) > 1e-6
-            and np.std(value_tgt[lrn]) > 1e-6
-        ):
-            attack_corr = float(np.corrcoef(v_root[lrn], value_tgt[lrn])[0, 1])
         learner_rows = [p for p, _target, pm, *_ in gen_pos if pm]
         death_target = np.stack([p["death_target"] for p in learner_rows])
         death_observed = np.stack([p["death_observed"] for p in learner_rows])
@@ -928,19 +852,20 @@ def main(args):
             death_observed,
         )
         extras = {
+            **search_stats,
+            "progress/optimization_seconds": optimization_seconds,
             **{f"risk/{k}": v for k, v in risk_stats.items()},
-            **{f"risk_search/{k}": v for k, v in risk_search_stats.items()},
-            "attack/target_correlation": attack_corr,
-            "attack/target_mse": float(np.mean((v_root[lrn] - value_tgt[lrn]) ** 2)),
+            **{
+                f"risk_search/{k}": risk_search_stats[k]
+                for k in ("predicted_h24", "brier_h24")
+            },
             "risk/loss": opt["risk_loss"],
             **_collection_metrics(
                 search_metrics,
-                cfg,
                 learner_attack,
                 productive_attack,
                 surge_attack,
                 learner_placements,
-                total_placements,
                 time.monotonic() - gen_started,
             ),
         }
@@ -963,72 +888,24 @@ def main(args):
                 whr.fit(gen=gen, full_sigma=True)
                 whr.to_json(ratings_path)
 
-        # Per-opponent rating fan; new series appear as the pool grows.
-        present = [os.path.basename(p) for p in _pool_snaps(pool_dir)]
-        elo_tags = {}
-        if whr is not None:
-            summ = whr.present_summary(present)
-            elo_tags = {
-                "elo/learner": whr.ratings["learner"],
-                "elo/learner_sigma": whr.sigmas["learner"],
-                "elo/reference": whr.ratings["gen_0"],
-                "elo/best_pool": summ["best_pool"],
-                "elo/learner_minus_ref": summ["learner_minus_ref"],
-                "elo/gap_to_pool": summ["gap_to_pool"],
-                "elo/ctx_offset": whr.ctx_offset,
-                "elo/ref_decisive": float(last_ref_dec),
-                **{
-                    f"elo/pool/{g}": whr.ratings[g]
-                    for g in present
-                    if g != "gen_0" and g in whr.ratings
-                },
-            }
-
         log_step(
             OneVsOneAZLog(
                 policy_loss=opt["policy_loss"],
                 value_loss=opt["value_loss"],
                 entropy=opt["entropy"],
-                policy_kl=opt["policy_kl"],
                 update_kl=update_kl,
                 explained_var=opt["explained_var"],
-                value_mean=opt["value_mean"],
-                value_target_var=opt["value_target_var"],
                 grad_norm=opt["grad_norm"],
-                avg_game_len=float(np.mean(game_lens)),
-                win_rate=win_rate,
                 win_rate_vs_ref=last_wr_ref,
-                draw_rate=draw_rate,
-                app=app,
-                app_learner=app_learner,
+                ref_decisive=last_ref_dec,
                 avg_b2b=float(bcg[lrn, 0].mean()),
-                max_b2b=float(bcg[lrn, 0].max()),
-                avg_combo=float(bcg[lrn, 1].mean()),
-                surge_rate=float((bcg[lrn, 0] >= 4).mean()),
                 b2b_at_death=_mean_or_none(b2b_at_death),
-                b2b_at_cashout=_mean_or_none(b2b_at_cashout),
-                episode_max_b2b=_mean_or_none(episode_max_b2b),
                 chain_run_len=_mean_or_none(chain_runs),
-                bank_run_len=_mean_or_none(bank_runs),
-                post_break_combo=_mean_or_none(post_break_combos),
-                post_break_clears=_mean_or_none(post_break_clears),
-                n_difficult_clears=n_difficult,
-                n_chain_runs=len(chain_runs),
-                n_breaks=n_breaks,
-                n_cashouts=len(b2b_at_cashout),
                 n_deaths=n_deaths,
-                decisive_games=decisive,
-                visit_perplexity=float(visit_perplexity.mean()),
-                top1_visit_share=float(top1_visit_share.mean()),
-                visit_coverage=float(visit_coverage.mean()),
-                root_cands_visited=float(root_cands_visited.mean()),
                 updates=updates,
                 buffer_size=replay_size,
                 completed_games=n_games,
-                pool_size=len(present),
-                elo=elo_tags,
                 diagnostics=extras,
-                board=batch["boards"][0, ..., 0].numpy(),
             ),
             step=gen,
         )
@@ -1037,7 +914,8 @@ def main(args):
             f"Value: {opt['value_loss']:2.3f} | "
             f"Ent: {opt['entropy']:1.3f} | "
             f"WR(pool {opp_tag}): {win_rate:1.2f} | WRvsRef: {last_wr_ref:1.2f} | "
-            f"Games: {n_games} | APP: {app:1.3f} | Updates: {updates}",
+            f"Games: {n_games} | APP: {app_learner:1.3f} | "
+            f"Productive APP: {extras['attack/productive_app']:1.3f} | Updates: {updates}",
             flush=True,
         )
 

@@ -133,6 +133,29 @@ def test_censored_hazard_labels_cannot_change_loss():
     assert float(loss_a) == pytest.approx(float(loss_b))
 
 
+def test_single_gated_target_trains_against_all_legal_candidates():
+    tf.keras.utils.set_random_seed(7)
+    net = _net()
+    net.compile(optimizer=tf.keras.optimizers.SGD(0.01))
+    net.optimizer.build(net.trainable_variables)
+    net.score_top.kernel.assign(tf.zeros_like(net.score_top.kernel))
+    net.score_top.bias.assign(tf.zeros_like(net.score_top.bias))
+    batch = _batch()
+    batch["cand_mask"] = tf.constant([[True] * 3 + [False] * (CAP - 3)] * 2)
+    batch["gate_mask"] = tf.constant([[True] + [False] * (CAP - 1)] * 2)
+    inputs = tuple(
+        batch[key]
+        for key in ("boards", "pieces", "bcg", "cand_placements", "cand_mask")
+    )
+    before, _, _ = net.attack_risk(inputs, training=False)
+    stats = train_step(net, batch, tf.constant(0.0), tf.constant(0.0))
+    assert float(stats["policy_loss"]) == pytest.approx(np.log(3), abs=1e-6)
+    assert float(stats["entropy"]) == pytest.approx(np.log(3), abs=1e-6)
+    after, _, _ = net.attack_risk(inputs, training=False)
+    assert float(after[0, 0] - after[0, 1]) > float(before[0, 0] - before[0, 1])
+    assert np.any(net.score_top.kernel.numpy() != 0)
+
+
 def test_destination_profile_and_migration_rejection(tmp_path):
     cfg = attack_risk_config()
     source = tf.train.Checkpoint(model=_net(False)).save(

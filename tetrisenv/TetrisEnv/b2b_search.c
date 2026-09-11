@@ -2875,9 +2875,10 @@ static float mcts_action_risk(const MNode* node, int slot, int h) {
         : node->risk->prediction[slot][h];
 }
 
-static void mcts_gate(const MNode* node, const MConfig* cfg, uint8_t* eligible) {
+// Search admission enforces the B2B-break rule at every node.
+static void mcts_admit(const MNode* node, const MConfig* cfg, uint8_t* eligible) {
     memset(eligible, 0, MCAP);
-    float best_keep = 2.0f, best_admitted = 2.0f;
+    float best_keep = 2.0f;
     if (cfg->risk_gate) {
         for (int k = 0; k < node->n_legal; k++) {
             int slot = node->legal[k];
@@ -2894,9 +2895,19 @@ static void mcts_gate(const MNode* node, const MConfig* cfg, uint8_t* eligible) 
             || (best_keep > cfg->risk_threshold
                 && risk <= best_keep - cfg->risk_margin);
         eligible[slot] = admit;
-        if (admit) best_admitted = fminf(best_admitted, risk);
     }
+}
+
+// Final choices and leaf continuation use the survival filter within admitted moves.
+static void mcts_gate(const MNode* node, const MConfig* cfg, uint8_t* eligible) {
+    mcts_admit(node, cfg, eligible);
     if (cfg->risk_gate) {
+        float best_admitted = 2.0f;
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            if (eligible[slot]) best_admitted = fminf(best_admitted,
+                mcts_action_risk(node, slot, RISK_HORIZON - 1));
+        }
         float limit = best_admitted <= cfg->risk_threshold
             ? cfg->risk_threshold : best_admitted + 1e-6f;
         for (int k = 0; k < node->n_legal; k++) {
@@ -2948,7 +2959,21 @@ static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float 
     float total = 0.0f, prior_mass = 0.0f;
     int eligible_count = 0;
     uint8_t eligible[MCAP];
-    mcts_gate(node, cfg, eligible);
+    mcts_admit(node, cfg, eligible);
+    if (cfg->risk_gate) {
+        bool has_surviving = false;
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            if (eligible[slot] && !node->risk->immediate_death[slot])
+                has_surviving = true;
+        }
+        if (has_surviving) {
+            for (int k = 0; k < node->n_legal; k++) {
+                int slot = node->legal[k];
+                if (node->risk->immediate_death[slot]) eligible[slot] = 0;
+            }
+        }
+    }
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
         if (eligible[slot]) {
@@ -3399,7 +3424,7 @@ void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead,
 }
 
 // Optional attack/risk protocol; scalar clients use the same search engine.
-int mcts_protocol_version(void) { return 1; }
+int mcts_protocol_version(void) { return 2; }
 int mcts_risk_horizon(void) { return RISK_HORIZON; }
 
 int mcts_configure(void* h, int budget, int risk_gate, float threshold, float margin) {

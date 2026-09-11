@@ -113,7 +113,7 @@ def train_step(net, batch, value_coef, risk_coef):
             ),
             training=True,
         )
-        masked = tf.where(batch["gate_mask"], logits, tf.constant(-1e9, tf.float32))
+        masked = tf.where(batch["cand_mask"], logits, tf.constant(-1e9, tf.float32))
         log_probs = tf.nn.log_softmax(masked, axis=-1)
         tgt = batch["pi_target"]
         pm = batch["policy_mask"]
@@ -134,7 +134,6 @@ def train_step(net, batch, value_coef, risk_coef):
     grad_norm = tf.linalg.global_norm(grads)
     net.optimizer.apply_gradients(zip(grads, net.trainable_variables))
     entropy = -tf.reduce_sum(tf.exp(log_probs) * log_probs, axis=-1)
-    tgt_entropy = -tf.reduce_sum(tgt * tf.math.log(tgt + 1e-12), axis=-1)
     target_var = tf.math.reduce_variance(batch["value_target"])
     residual_var = tf.math.reduce_variance(batch["value_target"] - values[:, 0])
     return {
@@ -142,11 +141,7 @@ def train_step(net, batch, value_coef, risk_coef):
         "value_loss": value_loss,
         "risk_loss": risk_loss,
         "entropy": tf.math.divide_no_nan(tf.reduce_sum(pm * entropy), pnorm),
-        "policy_kl": policy_loss
-        - tf.math.divide_no_nan(tf.reduce_sum(pm * tgt_entropy), pnorm),
         "explained_var": 1.0 - tf.math.divide_no_nan(residual_var, target_var),
-        "value_mean": tf.reduce_mean(values[:, 0]),
-        "value_target_var": target_var,
         "grad_norm": grad_norm,
     }
 
@@ -222,10 +217,10 @@ def prepare_destination(directory, init_checkpoint, cfg, n_step):
     return source
 
 
-def risk_calibration(predictions, targets, observed):
+def risk_calibration(predictions, targets, observed, horizons=(RISK_HORIZON,)):
     """Score cumulative death probabilities only where outcomes were observed."""
     result = {}
-    for h in (1, 6, 12, RISK_HORIZON):
+    for h in horizons:
         mask = observed[:, h - 1].astype(bool)
         p, y = predictions[mask, h - 1], targets[mask, h - 1]
         result[f"observed_h{h}"] = int(mask.sum())

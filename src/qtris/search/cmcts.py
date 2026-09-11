@@ -108,7 +108,7 @@ def _load_lib():
     try:
         lib.mcts_protocol_version.restype = ctypes.c_int
         lib.mcts_risk_horizon.restype = ctypes.c_int
-        if lib.mcts_protocol_version() != 1 or lib.mcts_risk_horizon() != RISK_HORIZON:
+        if lib.mcts_protocol_version() != 2 or lib.mcts_risk_horizon() != RISK_HORIZON:
             raise RuntimeError("MCTS protocol mismatch; rebuild tetrisenv")
     except AttributeError:
         raise RuntimeError("stale MCTS protocol; rebuild tetrisenv") from None

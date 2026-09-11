@@ -1,6 +1,7 @@
 """Batched C PUCT search with scalar or productive-attack/death-risk critics."""
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 import tensorflow as tf
@@ -45,6 +46,7 @@ class PlacementMCTS:
     def __init__(self, net, cfg: MCTSConfig):
         self.net = net
         self.cfg = cfg
+        self.last_stats = {}
 
     def _net_eval(self, boards, pieces, bcg, pls, masks):
         # Pad to the fixed inference batch and discard padded outputs.
@@ -95,6 +97,24 @@ class PlacementMCTS:
         Counts retain all committed visits; pi and gate_mask describe final eligibility.
         Commit descriptor=(hold, rotation, column, landing_row, spin) with placement_step.
         """
+        started = time.monotonic()
+        self.last_stats = {
+            "seconds": 0.0,
+            "inference_seconds": 0.0,
+            "inference_calls": 0,
+            "inference_rows": 0,
+            "inference_capacity": 0,
+        }
+
+        def evaluate(*inputs):
+            inference_started = time.monotonic()
+            outputs = self._net_eval(*inputs)
+            self.last_stats["inference_seconds"] += time.monotonic() - inference_started
+            self.last_stats["inference_calls"] += 1
+            self.last_stats["inference_rows"] += inputs[0].shape[0]
+            self.last_stats["inference_capacity"] += self._fullb
+            return outputs
+
         n = len(real_envs)
         self._fullb = n * min(
             16, max(1, self.cfg.leaves_per_round)
@@ -142,7 +162,7 @@ class PlacementMCTS:
             nv, req = engine.collect_roots()
             if nv:
                 boards, pieces, bcg, pls, masks, tree_ids = req
-                logits, values, risks = self._net_eval(boards, pieces, bcg, pls, masks)
+                logits, values, risks = evaluate(boards, pieces, bcg, pls, masks)
                 noise = np.zeros((nv, MCTS_CANDIDATE_CAPACITY), dtype=np.float32)
                 for k in range(nv):
                     ls = np.flatnonzero(masks[k])
@@ -172,9 +192,7 @@ class PlacementMCTS:
                 nv, req = engine.collect_leaves()
                 if nv:
                     boards, pieces, bcg, pls, masks, _tree_ids = req
-                    logits, values, risks = self._net_eval(
-                        boards, pieces, bcg, pls, masks
-                    )
+                    logits, values, risks = evaluate(boards, pieces, bcg, pls, masks)
                 else:
                     logits = np.empty((0, MCTS_CANDIDATE_CAPACITY), np.float32)
                     values = np.empty(0, np.float32)
@@ -222,6 +240,7 @@ class PlacementMCTS:
                 **obs[i],
             }
             results.append(row)
+        self.last_stats["seconds"] = time.monotonic() - started
         return results
 
     def root_values(self, real_envs):

@@ -126,133 +126,43 @@ class OneVsOneCollectionLog(LogPayloadModel):
 
 
 class OneVsOneAZLog(LogPayloadModel):
-    """1v1 opponent-pool AlphaZero per-generation metrics."""
+    """1v1 learning, survival, and productive-attack diagnostics."""
 
-    # Optimization
     policy_loss: float
     value_loss: float
     entropy: float
-    policy_kl: float
     update_kl: float
     explained_var: float
-    value_mean: float
-    value_target_var: float  # spread of the value target itself; read EV against this
-    grad_norm: float  # global grad norm before the optimizer's clipnorm
-
-    # Outcomes / gameplay.
-    avg_game_len: float
-    win_rate: float  # learner's decisive WR vs the sampled pool opponent
-    win_rate_vs_ref: float  # learner's decisive WR vs the frozen gen_0 reference
-    draw_rate: float
-    app: float  # both players' attack per placement, gross, garbage exchange on
-    app_learner: float  # learner-only attack per learner placement
+    grad_norm: float
+    win_rate_vs_ref: float
+    ref_decisive: int
     avg_b2b: float
-    max_b2b: float
-    avg_combo: float
-    surge_rate: float  # share of learner positions SITTING at b2b>=4 (occupancy)
-
-    # Learner b2b economics; None when the gen produced no qualifying event.
-    b2b_at_death: Optional[float]  # learner b2b carried into its fatal placement
-    b2b_at_cashout: Optional[
-        float
-    ]  # b2b entering a surge break (trivial clear at b2b>=4); floored at 4
-    episode_max_b2b: Optional[float]  # mean per-episode peak b2b
-    chain_run_len: Optional[
-        float
-    ]  # difficult clears in a row; ANY other placement flushes
-    bank_run_len: Optional[
-        float
-    ]  # difficult clears per b2b streak, tolerating stacking between them (the hoard)
-    post_break_combo: Optional[
-        float
-    ]  # peak combo over a surge break, including combo carried into it
-    post_break_clears: Optional[float]  # clears chained AFTER a surge break
-
-    # Event counts.
-    n_difficult_clears: int
-    n_chain_runs: int
-    n_breaks: int
-    n_cashouts: int
+    b2b_at_death: Optional[float]
+    chain_run_len: Optional[float]
     n_deaths: int
-    decisive_games: int
-
-    # Search
-    visit_perplexity: float  # exp(H(pi)): effective candidates in the final policy
-    top1_visit_share: float
-    visit_coverage: float  # legal-candidate fraction with nonzero final policy mass
-    root_cands_visited: Optional[
-        float
-    ]  # mean candidates with nonzero final policy mass
-
-    # Training progress
     updates: int
     buffer_size: int
     completed_games: int
-    pool_size: int
-
-    # Opponent-pool Elo: pre-formatted "elo/..." tags spliced in by to_payload.
-    elo: dict[str, float] = {}
-
     diagnostics: dict[str, float | None] = {}
-
-    # Visualization (wrapped at log time)
-    board: np.ndarray
 
     def to_payload(self) -> dict[str, Any]:
         d = super().to_payload()
-        d.update(d.pop("elo", {}))
         d.update(d.pop("diagnostics", {}))
         return d
 
-    _image_fields: tuple[str, ...] = ("board",)
     _tag_groups: dict[str, tuple[str, ...]] = {
         "optimization": (
             "policy_loss",
             "value_loss",
             "entropy",
-            "policy_kl",
             "update_kl",
             "explained_var",
-            "value_mean",
-            "value_target_var",
             "grad_norm",
         ),
-        "outcomes": (
-            "avg_game_len",
-            "win_rate",
-            "win_rate_vs_ref",
-            "draw_rate",
-            "app",
-            "app_learner",
-        ),
-        "gameplay": (
-            "avg_b2b",
-            "max_b2b",
-            "avg_combo",
-            "surge_rate",
-            "b2b_at_death",
-            "b2b_at_cashout",
-            "episode_max_b2b",
-            "chain_run_len",
-            "bank_run_len",
-            "post_break_combo",
-            "post_break_clears",
-        ),
-        "counts": (
-            "n_difficult_clears",
-            "n_chain_runs",
-            "n_breaks",
-            "n_cashouts",
-            "n_deaths",
-            "decisive_games",
-        ),
-        "search": (
-            "visit_perplexity",
-            "top1_visit_share",
-            "visit_coverage",
-            "root_cands_visited",
-        ),
-        "progress": ("updates", "buffer_size", "completed_games", "pool_size"),
+        "outcomes": ("win_rate_vs_ref", "ref_decisive"),
+        "gameplay": ("avg_b2b", "b2b_at_death", "chain_run_len"),
+        "counts": ("n_deaths",),
+        "progress": ("updates", "buffer_size", "completed_games"),
     }
 
 

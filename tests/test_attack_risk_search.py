@@ -9,6 +9,7 @@ from qtris.search.cmcts import CMCTS, CANDIDATE_CAPACITY as CAP, RISK_HORIZON as
 from qtris.search.placement_mcts import PlacementMCTS
 from qtris.training.attack_risk import attack_risk_config
 from test_mcts_break_credit import _position_with_break_and_maintain
+from test_mcts_rounds import _played_env
 
 
 def test_c_committed_statistics_gate_and_risk_backup(tmp_path):
@@ -156,3 +157,40 @@ def test_plain_clears_remain_unproductive_without_an_active_bank(position):
         assert not result["gate_mask"][brk]
     finally:
         env._scorer._b2b = previous
+
+
+@pytest.mark.parametrize("risk24", [0.09, 0.11, 0.25])
+def test_preserving_alternatives_fill_batches_above_risk_threshold(risk24):
+    class VariedRiskNet:
+        calls = 0
+
+        def policy_attack_risk(self, inputs):
+            self.calls += 1
+            n = inputs[0].shape[0]
+            curve = (risk24 + np.arange(CAP)[:, None] * 0.0001) * np.linspace(
+                1 / H, 1, H
+            )
+            return (
+                tf.zeros((n, CAP)),
+                tf.zeros((n, 1)),
+                tf.constant(np.broadcast_to(curve, (n, CAP, H)), tf.float32),
+            )
+
+    env = _played_env(7)
+    net = VariedRiskNet()
+    search = PlacementMCTS(
+        net,
+        attack_risk_config(num_simulations=256, leaves_per_round=8, dirichlet_eps=0),
+    )
+    rows = search.search([env] * 16, 1, 1)
+    stats = search.last_stats
+    assert net.calls == stats["inference_calls"]
+    assert stats["inference_calls"] <= 40
+    assert stats["inference_rows"] / stats["inference_capacity"] > 0.8
+    assert stats["inference_seconds"] <= stats["seconds"]
+    for row in rows:
+        assert row["completed_simulations"] == row["visits"] == 256
+        assert not row["break_mask"][row["slot"]]
+        assert row["gate_mask"][row["slot"]]
+        assert not row["pi"][~row["gate_mask"]].any()
+        assert row["counts"][row["break_mask"]].sum() == 0

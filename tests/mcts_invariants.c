@@ -83,6 +83,29 @@ static void risk_backup(void) {
     free(tree);
 }
 
+static void search_admission_and_final_choice(void) {
+    MRisk risks = {0};
+    MNode node = {.n_legal = 3, .legal = {0, 1, 2}, .risk = &risks};
+    MConfig cfg = {.risk_gate = 1, .risk_threshold = .10f, .risk_margin = .05f,
+                   .c_puct = 1.5f, .fpu = .4f};
+    risks.prediction[0][23] = .15f;
+    risks.prediction[1][23] = .1501f;
+    risks.prediction[2][23] = .1499f;
+    risks.breaks[2] = true;
+    node.prior[1] = 1;
+    node.prior[2] = 1000;
+    uint8_t eligible[MCAP];
+    mcts_gate(&node, &cfg, eligible);
+    assert(eligible[0] && !eligible[1] && !eligible[2]);
+    assert(mcts_select(&node, &cfg, 0, 0) == 1);
+    risks.immediate_death[1] = true;
+    assert(mcts_select(&node, &cfg, 0, 0) == 0);
+    risks.prediction[2][23] = .09f;
+    assert(mcts_select(&node, &cfg, 0, 0) == 2);
+    mcts_gate(&node, &cfg, eligible);
+    assert(!eligible[0] && !eligible[1] && eligible[2]);
+}
+
 static void attack_credit_and_cancellation(void) {
     b2b_init_pieces();
     MConfig cfg = {.board_height = 40, .max_holes = -1, .risk_gate = 1};
@@ -119,6 +142,7 @@ static void attack_credit_and_cancellation(void) {
 int main(void) {
     real_statistics();
     gate_boundaries();
+    search_admission_and_final_choice();
     risk_backup();
     attack_credit_and_cancellation();
     return 0;
