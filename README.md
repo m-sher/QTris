@@ -56,6 +56,10 @@ uv run demo --mode 1v1 --checkpoint checkpoints/placement_az --opponent checkpoi
 Run any command with `--help` for the full flag surface (MCTS knobs, garbage schedule,
 garbage traces, etc.).
 
+The 1v1 trainer uses productive-attack targets and a 24-placement own-death risk gate.
+See [the training guide](ATTACK_RISK_TRAINING.md) for the C rebuild, initializing from
+a selected checkpoint with fresh critics and opponent pool, and evaluating the run.
+
 ## Environment
 
 `tetrisenv/` is a subtree of [TFTetrisEnv](https://github.com/m-sher/TFTetrisEnv).

@@ -44,17 +44,20 @@ def _flat(arr, sel):
 
 
 def warm_start_policy_only(net, warm):
-    """Restore a BC checkpoint's trunk and policy into `net`, leaving its value head fresh.
-
-    This net's head is linear over an unbounded return in return_scale units, while the
-    pretrained head is tanh over a bounded label; a tanh pre-activation read linearly
-    reaches the search as saturated leaf bootstraps. 1v1 AZ, whose head is also tanh,
-    restores it."""
-    value_vars = net.value_trunk.weights + net.value_top.weights
-    fresh = [w.numpy() for w in value_vars]
-    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-    for var, init in zip(value_vars, fresh):
-        var.assign(init)
+    """Restore encoder and policy weights, retaining freshly initialized critics."""
+    policy = tf.train.Checkpoint(
+        **{
+            name: child
+            for name, child in net._trackable_children().items()
+            if name not in {"value_trunk", "value_top", "risk_top", "optimizer"}
+        }
+    )
+    names = [name for name, _ in tf.train.list_variables(warm)]
+    if any(name.startswith("model/") for name in names):
+        status = tf.train.Checkpoint(model=policy).read(warm)
+    else:
+        status = policy.read(warm)
+    status.expect_partial().assert_existing_objects_matched()
 
 
 @tf.function

@@ -5,37 +5,30 @@ import pytest
 from qtris.cli.train import main
 
 
-def _run(argv, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["train", *argv])
-    return main()
+@pytest.fixture
+def dispatch(monkeypatch):
+    captured = []
+    monkeypatch.setattr("qtris.training._1v1_placement_az.main", captured.append)
+    monkeypatch.setattr("qtris.training.placement_az.main", captured.append)
+    monkeypatch.setattr(
+        "tf_agents.system.multiprocessing.handle_main", lambda fn, argv: fn(argv)
+    )
+    return captured
 
 
-ONE_V_ONE = ["--mode", "1v1"]
+@pytest.mark.parametrize("gamma", ["0.95", "0.99", "1.0"])
+def test_1v1_accepts_gamma(monkeypatch, dispatch, gamma):
+    monkeypatch.setattr(sys, "argv", ["train", "--mode", "1v1", "--gamma", gamma])
+    main()
+    assert dispatch[0].gamma == float(gamma)
 
 
-def test_1v1_rejects_gamma(monkeypatch, capsys):
-    """1v1 exits 2 on --gamma, naming the flag."""
-    with pytest.raises(SystemExit) as exc:
-        _run([*ONE_V_ONE, "--gamma", "0.95"], monkeypatch)
-    assert exc.value.code == 2
-    assert "does not accept --gamma" in capsys.readouterr().err
-
-
-def test_1v1_rejects_gamma_at_any_value(monkeypatch):
-    """Rejection does not depend on the value."""
-    with pytest.raises(SystemExit) as exc:
-        _run([*ONE_V_ONE, "--gamma", "0.99"], monkeypatch)
-    assert exc.value.code == 2
-
-
-def test_1v1_without_gamma_reaches_dispatch(monkeypatch):
-    """Omitting --gamma passes the guard; stop at the trainer import so no training runs."""
-    sentinel = RuntimeError("dispatched")
-
-    def _boom(*_a, **_kw):
-        raise sentinel
-
-    monkeypatch.setattr("tf_agents.system.multiprocessing.handle_main", _boom)
-    with pytest.raises(RuntimeError) as exc:
-        _run(ONE_V_ONE, monkeypatch)
-    assert exc.value is sentinel
+def test_1v1_defaults_and_migration_flags(monkeypatch, dispatch):
+    monkeypatch.setattr(
+        sys, "argv", ["train", "--mode", "1v1", "--init-checkpoint", "old/ckpt-5"]
+    )
+    main()
+    args = dispatch[0]
+    assert args.gamma is None
+    assert args.risk_threshold == 0.1 and args.risk_margin == 0.05
+    assert args.init_checkpoint == "old/ckpt-5"

@@ -1,3 +1,4 @@
+import math
 import tensorflow as tf
 import keras
 from keras import layers
@@ -29,12 +30,14 @@ class PlacementPolicyValueNet(QtrisModelBase):
         dropout_rate,
         candidate_capacity=MCTS_CANDIDATE_CAPACITY,
         value_activation=None,
+        risk_horizon=0,
     ):
         super().__init__()
 
         self._batch_size = batch_size
         self._depth = depth
         self._candidate_capacity = candidate_capacity
+        self.risk_horizon = risk_horizon
 
         # Shared board/piece/bcg encoder (process_obs reads these).
         self.make_patches = make_patches(depth)
@@ -97,7 +100,7 @@ class PlacementPolicyValueNet(QtrisModelBase):
         )
         self.score_top = layers.Dense(1, name="cand_logit")
 
-        # Value head: state-only scalar from the shared board latent.
+        # Value head: state-only scalar from the encoded piece and BCG tokens.
         self.value_trunk = keras.Sequential(
             [
                 layers.Flatten(),
@@ -107,10 +110,23 @@ class PlacementPolicyValueNet(QtrisModelBase):
             ],
             name="value_trunk",
         )
-        # Linear serves solo AZ, whose return target is unbounded. Placement BC and 1v1
-        # AZ pass "tanh": their labels are bounded to [-1, 1] and read 0 as neutral, so
-        # the head transfers between those two.
-        self.value_top = layers.Dense(1, activation=value_activation, name="value")
+        self.value_top = layers.Dense(
+            1,
+            activation=value_activation,
+            name="value",
+            kernel_initializer="zeros" if risk_horizon else "glorot_uniform",
+        )
+        if risk_horizon:
+            hazard = 1.0 - 0.95 ** (1.0 / risk_horizon)
+            self.risk_top = layers.Dense(
+                risk_horizon,
+                name="death_hazards",
+                kernel_initializer="zeros",
+                bias_initializer=keras.initializers.Constant(
+                    math.log(hazard / (1 - hazard))
+                ),
+            )
+            self.risk_top.build((None, candidate_capacity, depth))
 
     def process_obs(self, inputs, training=False):
         """Encoder pass returning the piece latent AND the board patch latent.
@@ -145,19 +161,40 @@ class PlacementPolicyValueNet(QtrisModelBase):
 
         return piece_dec, board_dec, piece_scores
 
-    def score_candidates(self, context, cand_placements, cand_mask, training=False):
-        # context = board patches + pieces + bcg tokens (the full encoded state).
-        move_emb = self.move_encoder(cand_placements, training=training)  # (B,C,depth)
-        cand_dec = move_emb
+    def candidate_features(self, context, cand_placements, training=False):
+        cand_dec = self.move_encoder(cand_placements, training=training)
         for layer in self.cand_decoder_layers:
             cand_dec, _ = layer([context, cand_dec], training=training)
-        logits = tf.squeeze(
-            self.score_top(
-                self.score_trunk(cand_dec, training=training), training=training
-            ),
-            axis=-1,
-        )  # (B,C)
+        return self.score_trunk(cand_dec, training=training)
+
+    def score_candidates(self, context, cand_placements, cand_mask, training=False):
+        features = self.candidate_features(context, cand_placements, training=training)
+        logits = tf.squeeze(self.score_top(features, training=training), axis=-1)
         return tf.where(cand_mask, logits, tf.constant(-1e9, dtype=tf.float32))
+
+    def attack_risk(self, inputs, training=False):
+        """Return policy logits, attack value, and per-candidate death-hazard logits."""
+        board, piece, bcg, placements, mask = inputs
+        piece_dec, board_dec, _ = self.process_obs(
+            (board, piece, bcg), training=training
+        )
+        features = self.candidate_features(
+            tf.concat([board_dec, piece_dec], axis=1), placements, training=training
+        )
+        logits = tf.squeeze(self.score_top(features, training=training), axis=-1)
+        logits = tf.where(mask, logits, tf.constant(-1e9, tf.float32))
+        return (
+            logits,
+            self.score_value(piece_dec, training=training),
+            self.risk_top(features),
+        )
+
+    @tf.function(jit_compile=True, reduce_retracing=True)
+    def policy_attack_risk(self, inputs):
+        """Return policy, attack value, and monotonic cumulative own-death risks."""
+        logits, value, hazards = self.attack_risk(inputs, training=False)
+        risks = -tf.math.expm1(tf.math.cumsum(tf.math.log_sigmoid(-hazards), axis=-1))
+        return logits, value, risks
 
     def score_value(self, piece_dec, training=False):
         return self.value_top(

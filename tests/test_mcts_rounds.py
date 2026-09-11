@@ -67,9 +67,8 @@ def _played_env(seed, moves=30):
     return env
 
 
-def _root_counts(q_norm, seed, leaf_values):
-    """Drive one search with flat priors and constant leaf values, so the descent is fully
-    deterministic and every round's descents would otherwise collide on one leaf."""
+def _root_counts(q_norm, seed, leaf_values, varied=False):
+    """Return root visits from a deterministic search with flat priors."""
     env = _played_env(seed)
     engine = _engine(q_norm)
     try:
@@ -78,12 +77,12 @@ def _root_counts(q_norm, seed, leaf_values):
         assert nv == 1
         zeros = np.zeros(nv * CANDIDATE_CAPACITY, np.float32)
         engine.apply_roots(zeros, np.zeros(nv, np.float32), zeros.copy(), 0.0)
-        rounds = (SIMS + LPR - 1) // LPR
-        for _ in range(rounds):
+        while engine.progress()[0, 0] < SIMS:
             nv2, _ = engine.collect_leaves()
             engine.apply_leaves(
                 np.zeros(nv2 * CANDIDATE_CAPACITY, np.float32),
-                np.full(nv2, leaf_values, np.float32),
+                np.full(nv2, leaf_values, np.float32)
+                + (np.arange(nv2, dtype=np.float32) * 0.02 if varied else 0),
             )
         _pi, counts, _desc, dead, _rv = engine.result()
         assert not dead[0]
@@ -101,8 +100,8 @@ def test_num_simulations_is_a_count():
 
 def test_q_norm_reaches_the_search():
     """With distinct leaf values in play the normalised ranking visits differently."""
-    off = _root_counts(False, 7, leaf_values=0.3)
-    on = _root_counts(True, 7, leaf_values=0.3)
+    off = _root_counts(False, 7, leaf_values=0.3, varied=True)
+    on = _root_counts(True, 7, leaf_values=0.3, varied=True)
     assert off.sum() == SIMS and on.sum() == SIMS
     assert not np.array_equal(off, on)
 

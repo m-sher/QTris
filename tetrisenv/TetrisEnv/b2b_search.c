@@ -2535,22 +2535,11 @@ void b2b_lock_score_c(uint16_t* board, int board_height,
 }
 
 
-// ============================================================
-// Fully-C MCTS sim engine (OpenMP-threaded across games/trees)
-// ------------------------------------------------------------
-// The entire PUCT simulation loop runs in C on a compact bitboard+scalars node;
-// only the TF policy/value net stays in Python. The engine keeps a persistent tree
-// per game across all sims of a move and ping-pongs to Python once per round for the
-// batched net eval (collect_leaves -> net -> apply_leaves). Reward = per-edge
-// w_attack*credit, where credit is all of a difficult clear's attack and only the rows
-// a non-difficult clear cancels from the own queue, minus w_plain for a non-difficult
-// clear made with nothing queued, plus two potential differences,
-// w_b2b*(gamma*Phi(child) - Phi(parent)) on the b2b bank and penalty(parent) -
-// gamma*penalty(child) on board quality (height, bumpiness, holes), with -w_death on
-// terminal edges, where both potentials read 0; the leaf bootstrap is the net value
-// directly. A parallel shaping-free channel (leaf values + death edges only) feeds the
-// per-tree root value readout. Dirichlet noise + final sampling stay in Python.
-// ============================================================
+// Fully-C MCTS simulation engine, OpenMP-threaded across games.
+// Scalar search combines configured attack credit, potentials, and death penalties.
+// Attack/risk search rewards only B2B-building attack and gates on own-death curves.
+// Committed N/W/Q and risk sums exclude virtual visits. Python supplies batched neural
+// evaluations, root noise, and final temperature sampling.
 
 // Reentrant env-pathfinder enumeration (pathfinder.c, linked into this extension).
 void find_placement_candidates_c(const uint16_t* board_rows, int board_height,
@@ -2572,6 +2561,7 @@ int find_unique_placements_c(const uint16_t* board_rows, int board_height,
 #define MBH 40            // board height (20 visible + 20 buffer)
 #define MAXVQ 16          // visible-queue storage
 #define MAX_PATH 1024
+#define RISK_HORIZON 24
 #define MAX_LPR 16        // max leaves collected per tree per round (intra-tree batching)
 
 typedef struct {
@@ -2598,7 +2588,15 @@ typedef struct {
     int leaves_per_round;        // L: leaves collected per tree per net round (>=1)
     float vloss;                 // virtual-loss magnitude (scaled-Q units)
     float fpu;                   // unvisited q = node value - fpu; <0 scores 0
+    int simulation_budget, risk_gate;
+    float risk_threshold, risk_margin;
 } MConfig;
+
+typedef struct {
+    float prediction[MCAP][RISK_HORIZON];
+    float sum[MCAP][RISK_HORIZON];
+    bool breaks[MCAP], immediate_death[MCAP];
+} MRisk;
 
 typedef struct MNode {
     MState st;
@@ -2608,9 +2606,9 @@ typedef struct MNode {
     int legal[MCAP]; int n_legal;
     int desc[MCAP][5];            // (is_hold, rot, norm_col, landing_row, spin) per legal slot
     float prior[MCAP], N[MCAP], W[MCAP], Q[MCAP], edge_reward[MCAP];
-    // Shaping-free value channel: edge_value carries only the death term, Wv accumulates
-    // it with the leaf values, so the root readout is a Q that skips the shaping.
-    float edge_value[MCAP], Wv[MCAP];
+    // Wv accumulates objective returns in attack/risk mode, leaf + death in scalar mode.
+    float edge_value[MCAP], Wv[MCAP], virtual_visits[MCAP];
+    MRisk* risk;
     struct MNode* child[MCAP];
 } MNode;
 
@@ -2631,7 +2629,9 @@ typedef struct {
     // Descents that collided with a pending leaf. Their virtual loss steers the round's
     // later descents elsewhere and is reverted with the pending ones.
     PathEntry cpath[MAX_LPR][MAX_PATH]; int cpath_len[MAX_LPR]; int n_collided;
-    float qmin, qmax;            // range of backed-up Q this tree has seen (q_norm)
+    float qmin, qmax;            // range of committed Q
+    MRisk* risk_pool;
+    int completed, max_depth, error;
 } MTree;
 
 typedef struct {
@@ -2645,9 +2645,13 @@ typedef struct {
 
 // --- node arena (bump allocator; no malloc in the parallel region) ---
 static MNode* mtree_alloc(MTree* t) {
-    if (t->pool_used >= t->pool_cap) return NULL;  // budget exhausted (sized to num_sims+1)
+    if (t->pool_used >= t->pool_cap) return NULL;  // arena full
     MNode* n = &t->pool[t->pool_used++];
     memset(n, 0, sizeof(MNode));
+    if (t->risk_pool) {
+        n->risk = &t->risk_pool[t->pool_used - 1];
+        memset(n->risk, 0, sizeof(MRisk));
+    }
     return n;
 }
 
@@ -2726,9 +2730,7 @@ static int residual_match(const uint16_t* board, int bh) {
     return 0;
 }
 
-// --- one placement step (mirror placement_step / the b2b game-loop body); returns raw
-//     attack, writes the credited attack (all of it for a difficult clear, only the rows
-//     it cancels from the own queue otherwise) and the plain-clear flag ---
+// One placement: full physical attack/cancellation, objective credit, and death.
 static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* out_terminal,
                              float* out_credit, bool* out_plain) {
     int is_hold = d[0], rot = d[1], norm_col = d[2], landing_row = d[3], spin = d[4];
@@ -2748,7 +2750,8 @@ static float mcts_apply_step(MState* s, const MConfig* cfg, const int* d, bool* 
     s->b2b = ar.new_b2b; s->combo = ar.new_combo;
     float attack = ar.attack;
     int pending = garb_total(s->gq, s->gcnt);
-    *out_credit = ar.b2b_maintaining ? attack : fminf(attack, (float)pending);
+    *out_credit = ar.b2b_maintaining ? attack
+        : (cfg->risk_gate ? 0.0f : fminf(attack, (float)pending));
     *out_plain = clears > 0 && !ar.b2b_maintaining && pending == 0;
     s->active = mstate_pop(s);
 
@@ -2814,6 +2817,18 @@ static bool mcts_enumerate(MNode* node, const MConfig* cfg) {
         node->desc[slot][3] = elr[i];
         node->desc[slot][4] = espin[i];
     }
+    if (node->risk) {
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            MState post = node->st;
+            bool terminal = false, plain = false;
+            float credit = 0.0f;
+            mcts_apply_step(&post, cfg, node->desc[slot], &terminal, &credit, &plain);
+            node->risk->breaks[slot] = post.combo >= 0
+                && post.b2b != node->st.b2b + 1;
+            node->risk->immediate_death[slot] = terminal;
+        }
+    }
     return node->n_legal > 0;
 }
 
@@ -2852,16 +2867,99 @@ static void mcts_fill_request(const MNode* node, const MConfig* cfg, float* boar
     }
 }
 
+// Risk curves describe death within h+1 placements, including the selected action.
+static float mcts_action_risk(const MNode* node, int slot, int h) {
+    if (node->risk->immediate_death[slot]) return 1.0f;
+    return node->N[slot] > 0.0f
+        ? node->risk->sum[slot][h] / node->N[slot]
+        : node->risk->prediction[slot][h];
+}
+
+static void mcts_gate(const MNode* node, const MConfig* cfg, uint8_t* eligible) {
+    memset(eligible, 0, MCAP);
+    float best_keep = 2.0f, best_admitted = 2.0f;
+    if (cfg->risk_gate) {
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            if (!node->risk->breaks[slot])
+                best_keep = fminf(best_keep,
+                    mcts_action_risk(node, slot, RISK_HORIZON - 1));
+        }
+    }
+    for (int k = 0; k < node->n_legal; k++) {
+        int slot = node->legal[k];
+        if (!cfg->risk_gate) { eligible[slot] = 1; continue; }
+        float risk = mcts_action_risk(node, slot, RISK_HORIZON - 1);
+        bool admit = !node->risk->breaks[slot] || best_keep > 1.0f
+            || (best_keep > cfg->risk_threshold
+                && risk <= best_keep - cfg->risk_margin);
+        eligible[slot] = admit;
+        if (admit) best_admitted = fminf(best_admitted, risk);
+    }
+    if (cfg->risk_gate) {
+        float limit = best_admitted <= cfg->risk_threshold
+            ? cfg->risk_threshold : best_admitted + 1e-6f;
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            if (mcts_action_risk(node, slot, RISK_HORIZON - 1) > limit)
+                eligible[slot] = 0;
+        }
+    }
+}
+
+// Leaf continuation follows the gated policy prior.
+static void mcts_leaf_risk(const MNode* node, const MConfig* cfg, float* curve) {
+    memset(curve, 0, RISK_HORIZON * sizeof(float));
+    if (node->terminal || node->n_legal == 0) {
+        for (int h = 0; h < RISK_HORIZON; h++) curve[h] = 1.0f;
+        return;
+    }
+    uint8_t eligible[MCAP];
+    mcts_gate(node, cfg, eligible);
+    float mass = 0.0f;
+    for (int k = 0; k < node->n_legal; k++) {
+        int slot = node->legal[k];
+        if (!eligible[slot]) continue;
+        float weight = node->prior[slot];
+        mass += weight;
+        for (int h = 0; h < RISK_HORIZON; h++)
+            curve[h] += weight * mcts_action_risk(node, slot, h);
+    }
+    if (mass > 0.0f)
+        for (int h = 0; h < RISK_HORIZON; h++) curve[h] /= mass;
+    else {
+        int count = 0;
+        for (int k = 0; k < node->n_legal; k++) {
+            int slot = node->legal[k];
+            if (!eligible[slot]) continue;
+            count++;
+            for (int h = 0; h < RISK_HORIZON; h++)
+                curve[h] += mcts_action_risk(node, slot, h);
+        }
+        if (count) for (int h = 0; h < RISK_HORIZON; h++) curve[h] /= count;
+    }
+}
+
 // --- PUCT ---
 // Q is min-max normalised over the tree when q_norm is set, raw return_scale units
 // otherwise. An unvisited child scores the node's own net value minus cfg->fpu, floored
 // at the tree minimum under q_norm; with fpu < 0 it scores 0.
 static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float qmax) {
-    float total = 0.0f;
-    for (int k = 0; k < node->n_legal; k++) total += node->N[node->legal[k]];
+    float total = 0.0f, prior_mass = 0.0f;
+    int eligible_count = 0;
+    uint8_t eligible[MCAP];
+    mcts_gate(node, cfg, eligible);
+    for (int k = 0; k < node->n_legal; k++) {
+        int slot = node->legal[k];
+        if (eligible[slot]) {
+            total += node->N[slot] + node->virtual_visits[slot];
+            prior_mass += node->prior[slot];
+            eligible_count++;
+        }
+    }
     float best = -1e30f; int best_slot = node->legal[0];
     float sq = sqrtf(total + 1e-8f);
-    bool norm = cfg->q_norm && qmax > qmin;
+    bool norm = cfg->q_norm && qmax - qmin > 1e-6f;
     float q_new = 0.0f;
     if (cfg->fpu >= 0.0f) {
         float par = node->value;
@@ -2871,10 +2969,16 @@ static int mcts_select(const MNode* node, const MConfig* cfg, float qmin, float 
     }
     for (int k = 0; k < node->n_legal; k++) {
         int slot = node->legal[k];
+        if (!eligible[slot]) continue;
         float n = node->N[slot];
+        float virtual = node->virtual_visits[slot];
         float q = q_new;
         if (n > 0) { q = node->Q[slot]; if (norm) q = (q - qmin) / (qmax - qmin); }
-        float u = cfg->c_puct * node->prior[slot] * sq / (1.0f + n);
+        q -= cfg->vloss * virtual / fmaxf(1.0f, n + virtual);
+        float prior = node->prior[slot];
+        if (cfg->risk_gate)
+            prior = prior_mass > 0 ? prior / prior_mass : 1.0f / eligible_count;
+        float u = cfg->c_puct * prior * sq / (1.0f + n + virtual);
         float score = q + u;
         if (score > best) { best = score; best_slot = slot; }
     }
@@ -2884,10 +2988,24 @@ static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, in
                          float leaf_value) {
     float g = leaf_value;
     float gv = leaf_value;
+    float curve[RISK_HORIZON] = {0};
+    if (cfg->risk_gate && len) {
+        MNode* leaf = path[len - 1].node->child[path[len - 1].slot];
+        mcts_leaf_risk(leaf, cfg, curve);
+    }
+    t->completed++;
+    if (len > t->max_depth) t->max_depth = len;
     for (int i = len - 1; i >= 0; i--) {
         MNode* node = path[i].node; int slot = path[i].slot;
         g = node->edge_reward[slot] + cfg->gamma * g;
         gv = node->edge_value[slot] + cfg->gamma * gv;
+        if (cfg->risk_gate) {
+            bool died = node->risk->immediate_death[slot];
+            for (int h = RISK_HORIZON - 1; h >= 0; h--)
+                curve[h] = died ? 1.0f : (h ? curve[h - 1] : 0.0f);
+            for (int h = 0; h < RISK_HORIZON; h++)
+                node->risk->sum[slot][h] += curve[h];
+        }
         node->N[slot] += 1.0f;
         node->W[slot] += g;
         node->Wv[slot] += gv;
@@ -2897,22 +3015,17 @@ static void mtree_backup(MTree* t, const MConfig* cfg, const PathEntry* path, in
     }
 }
 
-// Virtual loss: pessimize each traversed edge so the next descent in the same round diverges.
-// The inverse revert in apply_leaves restores W/N exactly before the real backup.
+// Virtual visits affect selection only; committed N/W/Q stay unchanged.
 static void mtree_apply_vloss(const PathEntry* path, int len, float vloss) {
     for (int i = 0; i < len; i++) {
         MNode* node = path[i].node; int slot = path[i].slot;
-        node->N[slot] += 1.0f;
-        node->W[slot] -= vloss;
-        node->Q[slot] = node->W[slot] / node->N[slot];
+        node->virtual_visits[slot] += 1.0f;
     }
 }
 static void mtree_revert_vloss(const PathEntry* path, int len, float vloss) {
     for (int i = 0; i < len; i++) {
         MNode* node = path[i].node; int slot = path[i].slot;
-        node->N[slot] -= 1.0f;
-        node->W[slot] += vloss;
-        node->Q[slot] = node->N[slot] > 0.0f ? node->W[slot] / node->N[slot] : 0.0f;
+        node->virtual_visits[slot] -= 1.0f;
     }
 }
 
@@ -2955,12 +3068,14 @@ static float mcts_scale_reward(const MConfig* cfg, float reward) {
     return reward / (cfg->return_scale + 1e-8f);
 }
 
-// --- one round for a tree: collect up to L leaves via virtual loss. Fills t->pending[0..n_pending)
-//     and their paths; terminal/dead leaves back up in-place; stops on collision or arena-full. ---
+// Collect up to L leaves and their paths; terminal descents back up immediately.
 static void mcts_collect_round(MTree* t, const MConfig* cfg) {
     t->n_pending = 0;
     t->n_collided = 0;
     int L = cfg->leaves_per_round;
+    if (cfg->simulation_budget >= 0 && L > cfg->simulation_budget - t->completed)
+        L = cfg->simulation_budget - t->completed;
+    if (t->error) return;
     // Every descent that backs up counts as one simulation: a pending leaf (backed up when
     // its evaluation arrives) or a dead end (backed up here). A collision counts for nothing,
     // so it gets a virtual loss and the round keeps going, bounded so an exhausted frontier
@@ -2985,12 +3100,13 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 }
                 break;
             }
+            if (plen >= MAX_PATH) { t->error = 2; return; }
             int slot = mcts_select(node, cfg, t->qmin, t->qmax);
             path[plen].node = node; path[plen].slot = slot; plen++;
             MNode* child = node->child[slot];
             if (child == NULL) {
                 MNode* leaf = mtree_alloc(t);
-                if (leaf == NULL) { mtree_backup(t, cfg, path, plen, 0.0f); done++; break; }  // arena full
+                if (leaf == NULL) { t->error = 1; return; }
                 leaf->st = node->st;
                 bool terminal = false;
                 float credit = 0.0f;
@@ -3002,6 +3118,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                 bool dead = terminal || !mcts_enumerate(leaf, cfg);
                 if (dead) {
                     leaf->terminal = true;
+                    if (node->risk) node->risk->immediate_death[slot] = true;
                     node->edge_value[slot] = -cfg->w_death / (cfg->return_scale + 1e-8f);
                     // Both potentials read 0 at a terminal: the edge returns
                     // -w_b2b*Phi(parent) and refunds the parent's board penalty.
@@ -3011,6 +3128,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                            - cfg->w_death
                            - cfg->w_b2b * b2b_phi(node->st.b2b))
                               / (cfg->return_scale + 1e-8f);
+                    if (cfg->risk_gate) node->edge_value[slot] = node->edge_reward[slot];
                     mtree_backup(t, cfg, path, plen, 0.0f);
                     done++;
                     break;
@@ -3033,6 +3151,7 @@ static void mcts_collect_round(MTree* t, const MConfig* cfg) {
                        - cfg->gamma * mcts_board_penalty(cfg, leaf->st.board))
                           / (cfg->return_scale + 1e-8f)
                     + res_bonus;
+                if (cfg->risk_gate) node->edge_value[slot] = node->edge_reward[slot];
                 leaf->awaiting_eval = true;
                 t->pending[t->n_pending] = leaf;
                 t->path_len[t->n_pending] = plen;
@@ -3102,6 +3221,7 @@ void* mcts_create(int num_trees, int board_height, int queue_size,
     if (leaves_per_round > MAX_LPR) leaves_per_round = MAX_LPR;
     e->cfg.leaves_per_round = leaves_per_round;
     e->cfg.vloss = vloss;
+    e->cfg.simulation_budget = -1;
     e->trees = (MTree*)calloc(num_trees, sizeof(MTree));
     for (int i = 0; i < num_trees; i++) {
         e->trees[i].pool = (MNode*)calloc((size_t)max_nodes, sizeof(MNode));
@@ -3120,6 +3240,7 @@ void mcts_set_root(void* h, int tree, const uint16_t* board, int active, int hol
     t->qmin = 1e30f; t->qmax = -1e30f; t->n_collided = 0;
     t->root = NULL; t->alive = false; t->dead = false;
     t->pool_used = 0; t->n_pending = 0;
+    t->completed = t->max_depth = t->error = 0;
     MNode* root = mtree_alloc(t);
     MState* s = &root->st;
     memset(s, 0, sizeof(*s));
@@ -3226,7 +3347,6 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
             leaf->expanded = true;
             leaf->awaiting_eval = false;
             msoftmax_into_prior(leaf, &logits[(size_t)row * MCAP]);
-            // Bootstrap is the net value directly; the bank is priced per-edge by Phi.
             float boot = leaf->value;
             mtree_revert_vloss(t->path[p], t->path_len[p], cfg->vloss);
             mtree_backup(t, cfg, t->path[p], t->path_len[p], boot);
@@ -3235,6 +3355,7 @@ void mcts_apply_leaves(void* h, const float* logits, const float* values) {
         for (int c = 0; c < t->n_collided; c++)
             mtree_revert_vloss(t->cpath[c], t->cpath_len[c], cfg->vloss);
         t->n_collided = 0;
+        t->n_pending = 0;
     }
 }
 
@@ -3252,17 +3373,98 @@ void mcts_result(void* h, float* pi, float* counts, int* root_desc, int* dead,
         if (!t->alive || t->root == NULL) { dead[i] = 1; continue; }
         dead[i] = 0;
         MNode* root = t->root;
-        float total = 0.0f, wv = 0.0f;
+        uint8_t eligible[MCAP];
+        mcts_gate(root, &e->cfg, eligible);
+        float total = 0.0f, wv = 0.0f, prior_mass = 0.0f;
+        int eligible_count = 0;
         for (int k = 0; k < root->n_legal; k++) {
-            total += root->N[root->legal[k]];
-            wv += root->Wv[root->legal[k]];
+            int slot = root->legal[k];
+            if (!eligible[slot]) continue;
+            eligible_count++;
+            total += root->N[slot];
+            wv += root->Wv[slot];
+            prior_mass += root->prior[slot];
         }
         if (total > 0.0f) root_value[i] = wv / total;
         for (int k = 0; k < root->n_legal; k++) {
             int slot = root->legal[k];
             counts[(size_t)i * MCAP + slot] = root->N[slot];
-            pi[(size_t)i * MCAP + slot] = total > 0 ? root->N[slot] / total : root->prior[slot];
+            pi[(size_t)i * MCAP + slot] = !eligible[slot] ? 0.0f
+                : (total > 0 ? root->N[slot] / total
+                   : (prior_mass > 0 ? root->prior[slot] / prior_mass
+                      : 1.0f / eligible_count));
             for (int d = 0; d < 5; d++) root_desc[((size_t)i * MCAP + slot) * 5 + d] = root->desc[slot][d];
+        }
+    }
+}
+
+// Optional attack/risk protocol; scalar clients use the same search engine.
+int mcts_protocol_version(void) { return 1; }
+int mcts_risk_horizon(void) { return RISK_HORIZON; }
+
+int mcts_configure(void* h, int budget, int risk_gate, float threshold, float margin) {
+    MEngine* e = (MEngine*)h;
+    e->cfg.simulation_budget = budget;
+    e->cfg.risk_gate = risk_gate;
+    e->cfg.risk_threshold = threshold;
+    e->cfg.risk_margin = margin;
+    if (risk_gate) {
+        for (int i = 0; i < e->num_trees; i++) {
+            e->trees[i].risk_pool = calloc(e->max_nodes, sizeof(MRisk));
+            if (!e->trees[i].risk_pool) return 0;
+        }
+    }
+    return 1;
+}
+
+void mcts_apply_risks(void* h, const float* risks, int roots) {
+    MEngine* e = (MEngine*)h;
+    int row = 0;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        int count = roots ? 1 : t->n_pending;
+        for (int p = 0; p < count; p++) {
+            MNode* node = roots ? t->root : t->pending[p];
+            if (node->risk) memcpy(node->risk->prediction,
+                risks + (size_t)row * MCAP * RISK_HORIZON,
+                sizeof(node->risk->prediction));
+            row++;
+        }
+    }
+}
+
+// stats columns: completed, maximum depth, error, minimum Q, maximum Q, alive.
+void mcts_progress(void* h, float* stats) {
+    MEngine* e = (MEngine*)h;
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        stats[6*i] = t->completed;
+        stats[6*i+1] = t->max_depth;
+        stats[6*i+2] = t->error;
+        stats[6*i+3] = t->qmin;
+        stats[6*i+4] = t->qmax;
+        stats[6*i+5] = t->alive;
+    }
+}
+
+void mcts_root_risks(void* h, float* curves, uint8_t* eligible, uint8_t* breaks) {
+    MEngine* e = (MEngine*)h;
+    memset(curves, 0, (size_t)e->num_trees * MCAP * RISK_HORIZON * sizeof(float));
+    memset(eligible, 0, (size_t)e->num_trees * MCAP);
+    memset(breaks, 0, (size_t)e->num_trees * MCAP);
+    for (int i = 0; i < e->num_trees; i++) {
+        MTree* t = &e->trees[i];
+        if (!t->alive) continue;
+        MNode* root = t->root;
+        mcts_gate(root, &e->cfg, eligible + (size_t)i * MCAP);
+        if (!root->risk) continue;
+        for (int k = 0; k < root->n_legal; k++) {
+            int slot = root->legal[k];
+            breaks[(size_t)i * MCAP + slot] = root->risk->breaks[slot];
+            for (int h = 0; h < RISK_HORIZON; h++)
+                curves[((size_t)i * MCAP + slot) * RISK_HORIZON + h]
+                    = mcts_action_risk(root, slot, h);
         }
     }
 }
@@ -3271,7 +3473,10 @@ void mcts_destroy(void* h) {
     MEngine* e = (MEngine*)h;
     if (!e) return;
     omp_set_num_threads(e->prev_omp_threads);
-    for (int i = 0; i < e->num_trees; i++) free(e->trees[i].pool);
+    for (int i = 0; i < e->num_trees; i++) {
+        free(e->trees[i].pool);
+        free(e->trees[i].risk_pool);
+    }
     free(e->trees);
     free(e);
 }

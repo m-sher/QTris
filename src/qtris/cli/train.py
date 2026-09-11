@@ -64,8 +64,7 @@ def main() -> None:
         "--n-step",
         type=int,
         default=14,
-        help="1v1 only: n-step value target horizon (raw outcome z within n of the "
-        "game end, the post-search root value n steps later elsewhere).",
+        help="1v1 only: productive-attack target horizon before learner bootstrap.",
     )
     parser.add_argument(
         "--num-simulations", type=int, default=64, help="MCTS simulations per move."
@@ -103,8 +102,7 @@ def main() -> None:
         "--gamma",
         type=float,
         default=None,
-        help="single-player only: discount for MCTS backup + MC return target "
-        "(default 0.99). Rejected for 1v1, whose reward is terminal-only.",
+        help="MCTS and return discount (single: 0.99; 1v1: 0.97).",
     )
     parser.add_argument(
         "--temp-moves",
@@ -134,7 +132,7 @@ def main() -> None:
         "--w-death",
         type=float,
         default=100.0,
-        help="terminal-edge death penalty (raw attack units; also the realized death reward).",
+        help="single-player terminal-edge death penalty in raw attack units.",
     )
     parser.add_argument(
         "--q-norm",
@@ -184,7 +182,8 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint-dir",
         default="checkpoints/placement_az",
-        help="AZ checkpoint directory (a non-empty dir silently resumes).",
+        help="AZ checkpoint directory; 1v1 defaults to checkpoints/1v1_attack_risk. "
+        "Existing compatible checkpoints resume.",
     )
     parser.add_argument(
         "--run-name",
@@ -246,15 +245,32 @@ def main() -> None:
         "--garbage-rows-max", type=int, default=4, help="max garbage rows per spawn."
     )
 
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="1v1: initialize encoder/policy from a checkpoint into an empty destination.",
+    )
+    parser.add_argument(
+        "--risk-threshold",
+        type=float,
+        default=0.10,
+        help="1v1: maximum safe 24-placement own-death probability.",
+    )
+    parser.add_argument(
+        "--risk-margin",
+        type=float,
+        default=0.05,
+        help="1v1: minimum absolute risk reduction required to break B2B.",
+    )
+    parser.add_argument(
+        "--risk-coef",
+        type=float,
+        default=1.0,
+        help="1v1: masked death-hazard loss coefficient.",
+    )
     args = parser.parse_args()
 
     if args.mode == "1v1":
-        if args.gamma is not None:
-            parser.error(
-                "1v1 does not accept --gamma: its reward is terminal-only "
-                "(z in {-1,0,1}) and the n-step target is undiscounted. Use "
-                "--n-step to trade outcome grounding against bootstrap."
-            )
         from qtris.training._1v1_placement_az import main as run
     else:
         from qtris.training.placement_az import main as run

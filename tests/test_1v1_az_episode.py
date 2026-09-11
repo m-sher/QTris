@@ -1,116 +1,96 @@
 import numpy as np
 import pytest
 
-from qtris.training._1v1_placement_az import (
-    _episode,
-    _grounding,
-    _n_step,
-)
+from qtris.training._1v1_placement_az import _episode, _finalize_episodes
+from qtris.training.attack_risk import death_targets, n_step_attack, risk_calibration
 
 
-def _pend(n1, n2, v=0.5):
+def _pend(n1, n2):
     return {
-        "p1": [{"v_search": v + 0.01 * i} for i in range(n1)],
-        "p2": [{"v_search": v + 0.01 * i} for i in range(n2)],
+        key: [{"reward": 0.006 * (i + 1), "bootstrap_value": 0.1 * i} for i in range(n)]
+        for key, n in (("p1", n1), ("p2", n2))
     }
 
 
-def test_episode_emits_both_players_rows():
-    rows, glen, p1_won, draw = _episode(_pend(6, 6), True, False, 3)
-    assert len(rows) == 12
-    assert glen == 6
-    assert (p1_won, draw) == (False, False)
-    assert [r[2] for r in rows] == [1.0] * 6 + [0.0] * 6
-
-
-def test_episode_z_is_per_player_and_opposite():
-    rows, *_ = _episode(_pend(4, 4), False, True, 3)
-    assert {r[3] for r in rows if r[2] == 1.0} == {1.0}
-    assert {r[3] for r in rows if r[2] == 0.0} == {-1.0}
-
-
-def test_episode_steps_to_end_counts_down_per_trajectory():
-    rows, *_ = _episode(_pend(4, 3), False, True, 3)
-    assert [r[4] for r in rows if r[2] == 1.0] == [3, 2, 1, 0]
-    assert [r[4] for r in rows if r[2] == 0.0] == [2, 1, 0]
-
-
-def test_episode_targets_match_n_step():
-    """The targets are the pure n-step targets, for both players."""
-    pend = _pend(5, 5, v=0.25)
-    rows, *_ = _episode(pend, True, False, 2)
-    exp1 = _n_step([p["v_search"] for p in pend["p1"]], -1.0, 2, False)
-    exp2 = _n_step([p["v_search"] for p in pend["p2"]], 1.0, 2, False)
-    assert [r[1] for r in rows if r[2] == 1.0] == pytest.approx(exp1)
-    assert [r[1] for r in rows if r[2] == 0.0] == pytest.approx(exp2)
-
-
-def test_n_step_bootstraps_n_ahead_and_grounds_the_tail():
-    """A row bootstraps on the search value exactly n positions later; every row within
-    n of the end gets raw z, the terminal row included, unless the game was truncated,
-    when those rows take the final position's value instead."""
-    values = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
-    targets = _n_step(values, -1.0, 2, False)
-    assert targets == pytest.approx([0.3, 0.4, 0.5, 0.6, -1.0, -1.0])
-    assert _n_step(values, -1.0, 10, False) == pytest.approx([-1.0] * 6)
-    assert _n_step([0.7], 1.0, 1, False) == pytest.approx([1.0])
-    assert _n_step(values, 0.0, 2, True) == pytest.approx(
-        [0.3, 0.4, 0.5, 0.6, 0.6, 0.6]
+def test_discounted_setup_return_and_post_action_tail():
+    assert n_step_attack([0, 0, 0.018], [10, 20, 30], 2, 0.5, 4) == pytest.approx(
+        [7.5, 0.009 + 1, 0.018 + 2]
     )
-    assert _n_step(values, 0.0, 10, True) == pytest.approx([0.6] * 6)
+    assert n_step_attack([0.006], [99], 14, 0.97, 0) == pytest.approx([0.006])
+    assert n_step_attack([0.006], [99], 14, 0.97, 2) == pytest.approx([1.946])
 
 
-def test_capped_game_is_a_draw_for_rating_and_a_truncation_for_the_target():
-    """A game the move cap ends with neither player dead scores as a draw (z=0, is_draw)
-    while its tail rows bootstrap on the final position's search value."""
-    pend = _pend(4, 4)
-    rows, _glen, p1_won, draw = _episode(pend, False, False, 2)
-    assert (p1_won, draw) == (False, True)
-    assert {r[3] for r in rows} == {0.0}
-    learner = [r for r in rows if r[2] == 1.0]
-    last = pend["p1"][3]["v_search"]
-    assert [r[1] for r in learner[-2:]] == pytest.approx([last, last])
-    assert learner[0][1] == pytest.approx(pend["p1"][2]["v_search"])
+def test_own_death_zero_bootstrap_winner_censored():
+    rows, glen, won, draw = _episode(_pend(3, 3), True, False, 14, tails=(9, 2))
+    assert glen == 3 and not won and not draw
+    loser, winner = rows[2], rows[-1]
+    assert loser[1] == pytest.approx(0.018)
+    assert winner[1] == pytest.approx(0.018 + 0.97 * 2)
+    assert loser[0]["hazard_target"][0] == 1
+    assert winner[0]["hazard_target"].sum() == 0
+    assert winner[0]["hazard_mask"].sum() == 1
+    assert winner[0]["death_observed"].sum() == 1
+    assert [r[2] for r in rows] == [1] * 3 + [0] * 3
 
 
-def test_episode_draw_when_both_die():
-    """A double-KO is a real draw: z=0, and the tail targets are that outcome."""
-    rows, _glen, p1_won, draw = _episode(_pend(3, 3), True, True, 3)
-    assert (p1_won, draw) == (False, True)
-    assert {r[3] for r in rows} == {0.0}
-    assert [r[1] for r in rows] == pytest.approx([0.0] * 6)
+def test_simultaneous_death_is_positive_for_both_players():
+    rows, _, won, draw = _episode(_pend(2, 2), True, True, 14, tails=(4, 5))
+    assert draw and not won
+    for row in (rows[1], rows[-1]):
+        assert row[1] == pytest.approx(0.012)
+        assert row[0]["hazard_target"][0] == 1
+        assert row[0]["death_target"].sum() == 24
+    assert {r[3] for r in rows} == {0}
 
 
-def test_episode_none_when_empty():
-    assert _episode(_pend(0, 0), True, False, 3) is None
+def test_timeout_retains_final_reward_and_bootstraps_both_post_states():
+    rows, _, _, draw = _episode(_pend(2, 2), False, False, 14, tails=(4, 5))
+    assert draw
+    assert rows[1][1] == pytest.approx(0.012 + 0.97 * 4)
+    assert rows[-1][1] == pytest.approx(0.012 + 0.97 * 5)
+    assert _episode(_pend(0, 0), True, True, 14) is None
 
 
-def test_episode_uneven_trajectories():
-    rows, glen, *_ = _episode(_pend(5, 0), True, False, 3)
-    assert glen == 5
-    assert len(rows) == 5
+def test_hazard_death_at_horizon_and_censoring():
+    targets, mask, cumulative, observed = death_targets(25, True)
+    assert targets[0].sum() == 0 and mask[0].sum() == 24
+    assert targets[1, 23] == 1 and cumulative[1, 23] == 1
+    assert targets[-1, 0] == 1 and mask[-1].sum() == 1
+    assert observed[-1].sum() == 24
+    targets, mask, cumulative, observed = death_targets(3, False)
+    assert targets.sum() == cumulative.sum() == 0
+    assert mask.sum() == observed.sum() == 6
 
 
-def test_grounding_buckets_by_steps_to_end():
-    """Rows split by steps_to_end; empty and constant buckets yield None."""
-    n = np.array([0, 1, 2, 70, 80, 90])
-    z = np.array([1.0, -1.0, 1.0, 1.0, -1.0, 1.0])
-    v_root = np.array([0.9, -0.9, 0.9, 0.1, 0.1, 0.1])
-    g = _grounding(v_root, z, n)
-    assert g["corr_n0_10"] == pytest.approx(1.0)
-    assert g["corr_n60plus"] is None  # v_root constant -> undefined
-    assert g["brier_n0_10"] < g["brier_n60plus"]
-    assert g["corr_n10_30"] is None and g["brier_n10_30"] is None
+def test_calibration_excludes_unobserved_future():
+    _, _, y, seen = death_targets(3, False)
+    p = np.full_like(y, 0.2)
+    result = risk_calibration(p, y, seen)
+    assert result["brier_h1"] == pytest.approx(0.04)
+    assert result["brier_h24"] is None
+    assert result["censored_fraction_h24"] == 1
 
 
-def test_grounding_scores_against_outcome_not_target():
-    n = np.array([0, 1])
-    g = _grounding(np.array([1.0, -1.0]), np.array([-1.0, 1.0]), n)
-    assert g["brier_n0_10"] == pytest.approx(1.0)
-    assert g["corr_n0_10"] == pytest.approx(-1.0)
+def test_both_players_bootstrap_from_same_current_learner():
+    class Learner:
+        def state_value(self, board, pieces, bcg):
+            return bcg[:, :1]
 
+    def observation(value):
+        return (
+            np.zeros((24, 10, 1), np.float32),
+            np.zeros(7, np.int64),
+            np.array([value, 0, 0], np.float32),
+        )
 
-def test_grounding_draws_map_to_one_half():
-    n = np.array([0, 1])
-    g = _grounding(np.array([0.0, 0.0]), np.array([0.0, 0.0]), n)
-    assert g["brier_n0_10"] == pytest.approx(0.0)
+    pend = _pend(3, 3)
+    for player, offset in (("p1", 10), ("p2", 20)):
+        for i, pos in enumerate(pend[player]):
+            pos["board"], pos["pieces"], pos["bcg"] = observation(offset + i)
+            pos["v_search"] = -999
+    episodes = [(pend, False, False, (observation(13), observation(23)))]
+    rows, *_ = _finalize_episodes(episodes, Learner(), 4, 1, 0.5)[0]
+    assert rows[0][1] == pytest.approx(0.006 + 0.5 * 11)
+    assert rows[3][1] == pytest.approx(0.006 + 0.5 * 21)
+    assert rows[2][1] == pytest.approx(0.018 + 0.5 * 13)
+    assert rows[5][1] == pytest.approx(0.018 + 0.5 * 23)

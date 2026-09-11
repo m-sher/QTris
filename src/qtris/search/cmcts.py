@@ -1,13 +1,4 @@
-"""Thin ctypes wrapper over the fully-C MCTS engine in `b2b_search.c`.
-
-The engine holds one PUCT tree per game in C and runs the whole sim loop (descend / step /
-enumerate / backup) GIL-free, OpenMP-threaded across games. Only the TF policy/value net stays
-in Python: per round the driver calls `collect_leaves` (C emits up to `leaves_per_round` leaves
-per live tree, diverged by virtual loss), runs the net once on the batch, then `apply_leaves`
-(C sets priors + bootstrap, reverts the virtual loss, and backs up). Intra-tree batching cuts the
-sequential net calls per move from `num_simulations` to `ceil(num_simulations / leaves_per_round)`.
-Dirichlet root noise and final action sampling are generated in Python and passed in.
-"""
+"""ctypes protocol for batched C MCTS, committed statistics, and death-risk curves."""
 
 import ctypes
 import glob
@@ -21,6 +12,7 @@ from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
 
 CANDIDATE_CAPACITY = MCTS_CANDIDATE_CAPACITY
 FEATURE_DIM = 18
+RISK_HORIZON = 24
 _NET_ROWS = 24  # model-visible slice the C engine emits (bottom 24 of the 40-row board)
 _COL_BITS = (np.uint16(1) << np.arange(10, dtype=np.uint16)).astype(np.uint16)
 _MAX_GARB_ENTRIES = 32  # mirrors MAX_GARB_ENTRIES in b2b_search.c (fixed root gq array)
@@ -113,6 +105,27 @@ def _load_lib():
     lib.mcts_apply_leaves.restype = None
     lib.mcts_result.argtypes = [ctypes.c_void_p, _F32, _F32, _I32, _I32, _F32]
     lib.mcts_result.restype = None
+    try:
+        lib.mcts_protocol_version.restype = ctypes.c_int
+        lib.mcts_risk_horizon.restype = ctypes.c_int
+        if lib.mcts_protocol_version() != 1 or lib.mcts_risk_horizon() != RISK_HORIZON:
+            raise RuntimeError("MCTS protocol mismatch; rebuild tetrisenv")
+    except AttributeError:
+        raise RuntimeError("stale MCTS protocol; rebuild tetrisenv") from None
+    lib.mcts_configure.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_float,
+        ctypes.c_float,
+    ]
+    lib.mcts_configure.restype = ctypes.c_int
+    lib.mcts_apply_risks.argtypes = [ctypes.c_void_p, _F32, ctypes.c_int]
+    lib.mcts_apply_risks.restype = None
+    lib.mcts_progress.argtypes = [ctypes.c_void_p, _F32]
+    lib.mcts_progress.restype = None
+    lib.mcts_root_risks.argtypes = [ctypes.c_void_p, _F32, _U8, _U8]
+    lib.mcts_root_risks.restype = None
     lib.mcts_destroy.argtypes = [ctypes.c_void_p]
     lib.mcts_destroy.restype = None
     return lib
@@ -173,6 +186,9 @@ class CMCTS:
         w_plain=0.0,
         four_wide=False,
         w_residual=0.0,
+        risk_gate=False,
+        risk_threshold=0.10,
+        risk_margin=0.05,
     ):
         global _LIB
         if _LIB is None:
@@ -190,7 +206,18 @@ class CMCTS:
         self.qsize = queue_size
         self.pw = 2 + queue_size
         self.cap = CANDIDATE_CAPACITY
-        self.lpr = max(1, int(leaves_per_round))
+        self.lpr = min(16, max(1, int(leaves_per_round)))
+        self.risk_gate = bool(risk_gate)
+        if num_trees < 1 or num_simulations < 0:
+            raise ValueError("MCTS needs positive tree count and nonnegative budget")
+        if not 0 <= risk_threshold <= 1 or not 0 <= risk_margin <= 1:
+            raise ValueError("risk threshold and margin must be probabilities")
+        if risk_gate and any(
+            (w_death, w_b2b, w_height, w_bumpiness, w_holes, w_plain, w_residual)
+        ):
+            raise ValueError(
+                "attack/risk search requires zero shaping and death weights"
+            )
         self.h = self.lib.mcts_create(
             num_trees,
             board_height,
@@ -220,6 +247,11 @@ class CMCTS:
             int(bool(four_wide)),
             float(w_residual),
         )
+        if not self.lib.mcts_configure(
+            self.h, num_simulations, int(risk_gate), risk_threshold, risk_margin
+        ):
+            self.destroy()
+            raise MemoryError("cannot allocate MCTS risk arena")
         # request buffers: a round emits up to num_trees * lpr leaves; sliced to nv per round
         rows = num_trees * self.lpr
         self._boards = np.zeros(rows * _NET_ROWS * 10, np.float32)
@@ -295,7 +327,20 @@ class CMCTS:
     def collect_leaves(self):
         return self._collect(self.lib.mcts_collect_leaves)
 
-    def apply_roots(self, logits, values, dir_noise, dir_eps):
+    def _apply_risks(self, risks, rows, roots):
+        if not self.risk_gate:
+            return
+        risks = np.asarray(risks, np.float32)
+        if risks.shape != (rows, self.cap, RISK_HORIZON):
+            raise ValueError("MCTS requires one 24-placement risk curve per candidate")
+        if not np.isfinite(risks).all() or np.any((risks < 0) | (risks > 1)):
+            raise ValueError("nonfinite or out-of-range death risk")
+        if np.any(np.diff(risks, axis=-1) < -1e-6):
+            raise ValueError("death-risk curves must be monotonic")
+        self.lib.mcts_apply_risks(self.h, np.ascontiguousarray(risks).ravel(), roots)
+
+    def apply_roots(self, logits, values, dir_noise, dir_eps, risks=None):
+        self._apply_risks(risks, np.asarray(values).size, 1)
         self.lib.mcts_apply_roots(
             self.h,
             np.ascontiguousarray(logits, np.float32).ravel(),
@@ -304,7 +349,8 @@ class CMCTS:
             float(dir_eps),
         )
 
-    def apply_leaves(self, logits, values):
+    def apply_leaves(self, logits, values, risks=None):
+        self._apply_risks(risks, np.asarray(values).size, 0)
         self.lib.mcts_apply_leaves(
             self.h,
             np.ascontiguousarray(logits, np.float32).ravel(),
@@ -321,6 +367,22 @@ class CMCTS:
         dead = self._dead.astype(bool).copy()
         root_value = self._root_value.copy()
         return pi, counts, desc, dead, root_value
+
+    def progress(self):
+        stats = np.zeros((self.n, 6), np.float32)
+        self.lib.mcts_progress(self.h, stats.ravel())
+        if np.any(stats[:, 2]):
+            raise RuntimeError(f"MCTS arena/path exhausted: {stats[:, 2].tolist()}")
+        return stats
+
+    def root_risks(self):
+        curves = np.zeros((self.n, self.cap, RISK_HORIZON), np.float32)
+        eligible = np.zeros((self.n, self.cap), np.uint8)
+        breaks = np.zeros_like(eligible)
+        self.lib.mcts_root_risks(
+            self.h, curves.ravel(), eligible.ravel(), breaks.ravel()
+        )
+        return curves, eligible.astype(bool), breaks.astype(bool)
 
     def destroy(self):
         if self.h:

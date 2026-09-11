@@ -1,27 +1,4 @@
-"""PUCT MCTS over candidate placements, driven by the fully-C engine in `b2b_search.c`.
-
-The whole simulation loop (descend / step / enumerate / backup) runs in C on a compact
-bitboard+scalars node, OpenMP-threaded across the N self-play games; only the TF policy/value
-net stays in Python. Per move: build one C tree per game, evaluate the roots in one batched net
-call (+ Dirichlet noise), then for each simulation round `collect_leaves` -> one net call ->
-`apply_leaves` until the budget is spent, and read out per-root visit counts plus the
-shaping-free root value (leaf values + death edges only, in the same return_scale units
-as Q).
-
-Reward is per-edge `w_attack * credit`, where credit is a difficult clear's whole attack
-and only the rows a non-difficult clear cancels from the own garbage queue (combo and the
-b2b-break surge are already inside `compute_attack`'s attack), minus `w_plain` for a
-non-difficult clear made with nothing queued, plus two potential differences:
-`w_b2b * (gamma*Phi(child) - Phi(parent))` with `Phi = min(max(0, b2b), 45)`, and
-`pen(parent) - gamma*pen(child)` with `pen = w_height * min(1, max_height/24) +
-w_bumpiness * min(1, bumpiness/48) + w_holes * min(1, holes/16)`; terminal edges add
-`-w_death` and read both potentials as 0. In four_wide mode a clearing edge that leaves
-the middle stack matching a residual template adds `w_residual`. The leaf bootstrap is
-the net value directly. PUCT ranks on per-tree min-max normalised Q when `q_norm`, raw
-return_scale units otherwise; an unvisited child scores its parent's net value minus
-`fpu`, floored at the tree minimum under `q_norm`. Dirichlet noise + sampling stay in
-Python.
-"""
+"""Batched C PUCT search with scalar or productive-attack/death-risk critics."""
 
 from dataclasses import dataclass
 
@@ -29,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 
 from qtris.data.placement_features import MCTS_CANDIDATE_CAPACITY
-from qtris.search.cmcts import CMCTS
+from qtris.search.cmcts import CMCTS, RISK_HORIZON
 
 
 @dataclass
@@ -58,6 +35,9 @@ class MCTSConfig:
     leaves_per_round: int = (
         4  # intra-tree leaf batching: L leaves/tree/net-call (virtual loss)
     )
+    risk_gate: bool = False
+    risk_threshold: float = 0.10
+    risk_margin: float = 0.05
     vloss: float = 1.0  # virtual-loss magnitude (scaled-Q units)
 
 
@@ -67,9 +47,7 @@ class PlacementMCTS:
         self.cfg = cfg
 
     def _net_eval(self, boards, pieces, bcg, pls, masks):
-        # Pad to a fixed batch (num_trees * leaves_per_round) so the jit_compiled net sees one
-        # shape: each new batch size triggers an XLA recompile. Padded rows are masked off
-        # and sliced away.
+        # Pad to the fixed inference batch and discard padded outputs.
         nv = boards.shape[0]
         fb = self._fullb
         if nv < fb:
@@ -85,7 +63,10 @@ class PlacementMCTS:
                 z(pls),
                 z(masks),
             )
-        logits, value = self.net.policy_value(
+        forward = (
+            self.net.policy_attack_risk if self.cfg.risk_gate else self.net.policy_value
+        )
+        outputs = forward(
             (
                 tf.constant(boards, tf.float32),
                 tf.constant(pieces, tf.int64),
@@ -94,7 +75,9 @@ class PlacementMCTS:
                 tf.constant(masks, tf.bool),
             )
         )
-        return logits.numpy()[:nv], value.numpy()[:nv, 0]
+        logits, value = outputs[:2]
+        risks = outputs[2].numpy()[:nv] if self.cfg.risk_gate else None
+        return logits.numpy()[:nv], value.numpy()[:nv, 0], risks
 
     def _select_action(self, legal, counts, pi, temperature):
         c = counts[legal]
@@ -107,17 +90,14 @@ class PlacementMCTS:
         return int(np.random.choice(legal, p=probs))
 
     def search(self, real_envs, return_scale, temperatures):
-        """Run MCTS for one move across all games. `temperatures` is a per-game play
-        temperature (scalar broadcasts). Returns one result dict per game: either
-        {dead: True} or {dead: False, pi, counts, descriptor, visits, value, v_search,
-        board, pieces, bcg, cand_placements, cand_mask}. `descriptor` = (is_hold, rot,
-        norm_col, landing_row, spin); commit the real move via
-        `placement_step(env, searcher, descriptor)`. `counts` carries the root visit
-        counts alongside the normalized `pi`; `v_search` is the post-search shaping-free
-        root value."""
+        """Search one move per game and return observations, visits, and gated actions.
+
+        Counts retain all committed visits; pi and gate_mask describe final eligibility.
+        Commit descriptor=(hold, rotation, column, landing_row, spin) with placement_step.
+        """
         n = len(real_envs)
-        self._fullb = n * max(
-            1, self.cfg.leaves_per_round
+        self._fullb = n * min(
+            16, max(1, self.cfg.leaves_per_round)
         )  # fixed net batch (see _net_eval)
         temps = np.broadcast_to(np.asarray(temperatures, dtype=np.float32), (n,))
         e0 = real_envs[0]
@@ -150,6 +130,9 @@ class PlacementMCTS:
             w_plain=self.cfg.w_plain,
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
+            risk_gate=self.cfg.risk_gate,
+            risk_threshold=self.cfg.risk_threshold,
+            risk_margin=self.cfg.risk_margin,
         )
         try:
             for i, env in enumerate(real_envs):
@@ -159,7 +142,7 @@ class PlacementMCTS:
             nv, req = engine.collect_roots()
             if nv:
                 boards, pieces, bcg, pls, masks, tree_ids = req
-                logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
+                logits, values, risks = self._net_eval(boards, pieces, bcg, pls, masks)
                 noise = np.zeros((nv, MCTS_CANDIDATE_CAPACITY), dtype=np.float32)
                 for k in range(nv):
                     ls = np.flatnonzero(masks[k])
@@ -167,7 +150,7 @@ class PlacementMCTS:
                         noise[k, ls] = np.random.dirichlet(
                             [self.cfg.dirichlet_alpha] * ls.size
                         )
-                engine.apply_roots(logits, values, noise, self.cfg.dirichlet_eps)
+                engine.apply_roots(logits, values, noise, self.cfg.dirichlet_eps, risks)
                 for k in range(nv):
                     obs[tree_ids[k]] = {
                         "board": boards[k].copy(),
@@ -175,22 +158,38 @@ class PlacementMCTS:
                         "bcg": bcg[k].copy(),
                         "cand_placements": pls[k].copy(),
                         "cand_mask": masks[k].copy(),
+                        "risk_prediction": risks[k].copy()
+                        if risks is not None
+                        else None,
                         "value": float(
                             values[k]
                         ),  # net root value, for the AZ return bootstrap
                     }
 
-            lpr = max(1, self.cfg.leaves_per_round)
-            rounds = (self.cfg.num_simulations + lpr - 1) // lpr  # ceil: L leaves/round
-            for _ in range(rounds):
+            stats = engine.progress()
+            while np.any((stats[:, 5] > 0) & (stats[:, 0] < self.cfg.num_simulations)):
+                before = stats[:, 0].copy()
                 nv, req = engine.collect_leaves()
-                if nv == 0:
-                    break
-                boards, pieces, bcg, pls, masks, tree_ids = req
-                logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
-                engine.apply_leaves(logits, values)
+                if nv:
+                    boards, pieces, bcg, pls, masks, _tree_ids = req
+                    logits, values, risks = self._net_eval(
+                        boards, pieces, bcg, pls, masks
+                    )
+                else:
+                    logits = np.empty((0, MCTS_CANDIDATE_CAPACITY), np.float32)
+                    values = np.empty(0, np.float32)
+                    risks = np.empty(
+                        (0, MCTS_CANDIDATE_CAPACITY, RISK_HORIZON), np.float32
+                    )
+                engine.apply_leaves(logits, values, risks)
+                stats = engine.progress()
+                if np.array_equal(before, stats[:, 0]):
+                    raise RuntimeError(
+                        "MCTS stalled before completing its simulation budget"
+                    )
 
             pi, counts, desc, dead, root_value = engine.result()
+            curves, eligible, breaks = engine.root_risks()
         finally:
             engine.destroy()
 
@@ -199,10 +198,22 @@ class PlacementMCTS:
             if dead[i] or obs[i] is None:
                 results.append({"dead": True})
                 continue
-            legal = np.flatnonzero(desc[i, :, 0] >= 0)
+            legal = np.flatnonzero((desc[i, :, 0] >= 0) & eligible[i])
             slot = self._select_action(legal, counts[i], pi[i], float(temps[i]))
             row = {
                 "dead": False,
+                "slot": slot,
+                "gate_mask": eligible[i],
+                "break_mask": breaks[i],
+                "risk_curve": curves[i, slot],
+                "risk_chosen": float(curves[i, slot, -1]),
+                "risk_best_keep": float(
+                    curves[i, obs[i]["cand_mask"] & ~breaks[i], -1].min()
+                )
+                if np.any(obs[i]["cand_mask"] & ~breaks[i])
+                else None,
+                "max_depth": int(stats[i, 1]),
+                "completed_simulations": int(stats[i, 0]),
                 "pi": pi[i],
                 "counts": counts[i].copy(),
                 "descriptor": tuple(int(x) for x in desc[i, slot]),
@@ -218,7 +229,7 @@ class PlacementMCTS:
         bootstrap at the collection horizon. Returns a (num_games,) array; 0 where the root has
         no legal move (dead). Costs one batched root eval - the first half of `search()`."""
         n = len(real_envs)
-        self._fullb = n * max(1, self.cfg.leaves_per_round)
+        self._fullb = n * min(16, max(1, self.cfg.leaves_per_round))
         e0 = real_envs[0]
         engine = CMCTS(
             n,
@@ -249,6 +260,9 @@ class PlacementMCTS:
             w_plain=self.cfg.w_plain,
             four_wide=self.cfg.four_wide,
             w_residual=self.cfg.w_residual,
+            risk_gate=self.cfg.risk_gate,
+            risk_threshold=self.cfg.risk_threshold,
+            risk_margin=self.cfg.risk_margin,
         )
         out = np.zeros(n, dtype=np.float32)
         try:
@@ -257,7 +271,9 @@ class PlacementMCTS:
             nv, req = engine.collect_roots()
             if nv:
                 boards, pieces, bcg, pls, masks, tree_ids = req
-                _logits, values = self._net_eval(boards, pieces, bcg, pls, masks)
+                _logits, values, _risks = self._net_eval(
+                    boards, pieces, bcg, pls, masks
+                )
                 for k in range(nv):
                     out[tree_ids[k]] = values[k]
         finally:

@@ -22,10 +22,11 @@ from TetrisEnv.PyTetris1v1Env import PyTetris1v1Env
 from qtris.demo.constants import PIECE_COLORS, PIECE_DISPLAY
 from qtris.demo.panels import confirm_save, draw_death_envelope
 from qtris.demo.rendering import colorize_piece_sidebar, draw_garbage_bar
-from qtris.demo.utils import load_checkpoint, save_frames_as_video
+from qtris.demo.utils import save_frames_as_video
 from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
 from qtris.search.placement_search import descriptor_key_sequence
 from qtris.training._1v1_placement_az import _build_net
+from qtris.training.attack_risk import load_profile, resolve_checkpoint
 
 # Model params (match the 1v1 AZ trainer)
 piece_dim = 8
@@ -38,9 +39,42 @@ num_row_tiers = 2
 
 
 def load_net(checkpoint_dir):
-    net = _build_net(1, piece_dim, depth, num_heads, num_layers, queue_size)
-    load_checkpoint(net, checkpoint_dir)
+    prefix = resolve_checkpoint(checkpoint_dir)
+    profile = load_profile(prefix)
+    net = _build_net(
+        1,
+        piece_dim,
+        depth,
+        num_heads,
+        num_layers,
+        queue_size,
+        attack_risk=profile is not None,
+    )
+    names = [name for name, _ in tf.train.list_variables(prefix)]
+    has_risk = any("risk_top/" in name for name in names)
+    if has_risk != (profile is not None):
+        raise ValueError(
+            f"Checkpoint critic heads and objective profile disagree: {prefix}"
+        )
+    if any(name.startswith("model/") for name in names):
+        tf.train.Checkpoint(model=net).restore(prefix).expect_partial()
+    else:
+        net.load_weights(prefix).expect_partial()
     return net
+
+
+def load_search_config(path, sims=256, cpuct=1.5, leaves=4):
+    profile = load_profile(resolve_checkpoint(path))
+    settings = profile["search"] if profile else {"gamma": 1.0, "w_death": 1.0}
+    return MCTSConfig(
+        **{
+            **settings,
+            "num_simulations": sims,
+            "c_puct": cpuct,
+            "dirichlet_eps": 0.0,
+            "leaves_per_round": leaves,
+        }
+    )
 
 
 def main(cli_args):
@@ -67,16 +101,8 @@ def main(cli_args):
     p2_net = load_net(p2_ckpt)
     p1_net.summary()
 
-    cfg = MCTSConfig(
-        num_simulations=sims,
-        c_puct=cpuct,
-        dirichlet_eps=0.0,
-        leaves_per_round=leaves,
-        gamma=1.0,
-        w_death=1.0,
-    )
-    mcts1 = PlacementMCTS(p1_net, cfg)
-    mcts2 = PlacementMCTS(p2_net, cfg)
+    mcts1 = PlacementMCTS(p1_net, load_search_config(p1_ckpt, sims, cpuct, leaves))
+    mcts2 = PlacementMCTS(p2_net, load_search_config(p2_ckpt, sims, cpuct, leaves))
 
     py_env = PyTetris1v1Env(
         queue_size=queue_size,

@@ -1,26 +1,10 @@
-"""1v1 opponent-pool AlphaZero for the placement model.
-
-The learner (player 1) duels an opponent (player 2) sampled each generation from a pool of
-frozen past snapshots, via decoupled per-player MCTS: each player searches its own board
-(the opponent's already-sent garbage is seen at the root; none is modeled landing within the
-search horizon), the chosen placements are committed, and garbage is exchanged as
-`PyTetris1v1Env` does. The value head regresses n-step targets: a position within n_step of
-its game's end gets the realized outcome z in {-1, 0, +1}, or the final position's search
-value when the move cap ended the game unresolved; every earlier position gets the
-shaping-free post-search root value of the position n_step later. The search runs at
-w_death=1, gamma=1, return_scale=1 and MCTSConfig's shaping weights; own-death = -1 is the
-only in-search terminal.
-
-Both players' trajectories are trained, each labeled with its own outcome z; only the
-learner's (player 1) rows train the policy. The pool lives on disk under `<ckpt>/pool/gen_*`;
-gen_0 is seeded from the warm-started net and is the frozen reference for the periodic
-`win_rate_vs_ref` eval. Opponents are sampled recency-weighted per generation; the pool
-grows (gated on the learner's decisive win-rate EMA) and evicts oldest (gen_0 pinned).
-"""
+"""1v1 productive-attack learning with a B2B own-death risk gate."""
 
 import glob
 import os
 import random
+import time
+from pathlib import Path
 from collections import deque
 from dataclasses import replace as dc_replace
 
@@ -37,11 +21,30 @@ from qtris.data.placement_features import (
 )
 from qtris.models.placement.model import PlacementPolicyValueNet
 from qtris.observability.backend import finish, init_run, log_step
-from qtris.observability.models import OneVsOneAZLog, OneVsOnePlacementAZConfig
-from qtris.search.placement_mcts import MCTSConfig, PlacementMCTS
+from qtris.observability.models import (
+    OneVsOneAZLog,
+    OneVsOnePlacementAZConfig,
+    OneVsOneCollectionLog,
+)
+from qtris.search.placement_mcts import PlacementMCTS
 from qtris.search.placement_search import placement_step
 from qtris.training.whr import WHRBook
-from qtris.training.placement_az import _gen_log_probs, train_step
+from qtris.training.placement_az import _gen_log_probs, warm_start_policy_only
+from qtris.training.attack_risk import (
+    OBJECTIVE,
+    PROFILE_NAME,
+    attack_risk_config,
+    death_targets,
+    learner_values,
+    n_step_attack,
+    prepare_destination,
+    risk_calibration,
+    save_checkpoint,
+    save_profile,
+    state_observation,
+    train_step,
+)
+from qtris.search.cmcts import RISK_HORIZON
 
 
 def _build_game_pairs(num_games, queue_size, max_holes, max_len, seed0=123):
@@ -81,6 +84,10 @@ def _pos(r):
         "pi": r["pi"],
         "v_root": r["value"],
         "v_search": r["v_search"],
+        "slot": r["slot"],
+        "gate_mask": r["gate_mask"],
+        "risk_prediction": r["risk_prediction"][r["slot"]],
+        "risk_curve": r["risk_curve"],
     }
 
 
@@ -134,86 +141,121 @@ def _commit_and_exchange(env1, env2, searcher, desc1, desc2, rng):
     return died[0], died[1], info[0]["attack"], info[1]["attack"]
 
 
-def _n_step(values, z, n, truncated):
-    """n-step value targets for one trajectory (terminal-only reward, gamma=1): every
-    position bootstraps on the value n steps later, and the last n positions take the
-    outcome z, or the final position's value when the game was cut off unresolved."""
-    length = len(values)
-    tail = values[length - 1] if truncated else z
-    return [values[t + n] if t + n <= length - 1 else tail for t in range(length)]
-
-
 def _mean_or_none(xs):
     """Mean of a per-generation sample, or None when the generation had no events."""
     return float(np.mean(xs)) if xs else None
 
 
-GROUNDING_BUCKETS = ((0, 10), (10, 30), (30, 60), (60, 1 << 30))
+def _collection_metrics(
+    search_metrics,
+    cfg,
+    learner_attack,
+    productive_attack,
+    surge_attack,
+    learner_placements,
+    total_placements,
+    elapsed,
+):
+    return {
+        "attack/total_app": learner_attack / max(1, learner_placements),
+        "attack/productive_app": productive_attack / max(1, learner_placements),
+        "attack/surge_app": surge_attack / max(1, learner_placements),
+        "attack/other_app": (learner_attack - productive_attack - surge_attack)
+        / max(1, learner_placements),
+        "progress/generation_seconds": elapsed,
+        "progress/placements_per_second": total_placements / max(elapsed, 1e-9),
+        "search/requested_simulations": cfg.num_simulations,
+        "search/completed_simulations": _mean_or_none(
+            [r["completed_simulations"] for r in search_metrics]
+        ),
+        "search/max_depth": _mean_or_none([r["max_depth"] for r in search_metrics]),
+        "search/legal_candidates": _mean_or_none(
+            [int(r["cand_mask"].sum()) for r in search_metrics]
+        ),
+        "search/eligible_candidates": _mean_or_none(
+            [int(r["gate_mask"].sum()) for r in search_metrics]
+        ),
+        "gate/breaks_admitted": sum(
+            int(np.any(r["break_mask"] & r["gate_mask"])) for r in search_metrics
+        ),
+        "gate/breaks_blocked": sum(
+            int(np.any(r["break_mask"] & ~r["gate_mask"])) for r in search_metrics
+        ),
+        "gate/forced_breaks": sum(
+            int(r["risk_best_keep"] is None) for r in search_metrics
+        ),
+        "gate/breaks_chosen": sum(
+            int(r["break_mask"][r["slot"]]) for r in search_metrics
+        ),
+        "gate/chosen_risk": _mean_or_none([r["risk_chosen"] for r in search_metrics]),
+        "gate/break_risk_reduction": _mean_or_none(
+            [
+                r["risk_best_keep"] - r["risk_chosen"]
+                for r in search_metrics
+                if r["break_mask"][r["slot"]] and r["risk_best_keep"] is not None
+            ]
+        ),
+    }
 
 
-def _grounding(values, z, steps_to_end):
-    """corr(values, z) and Brier(values, z) per steps-to-end bucket, keyed
-    `corr_n0_10` / `brier_n0_10` and so on, with None for empty or degenerate buckets.
-
-    Draws (z=0) map to a Brier target of 0.5."""
-    p = (np.asarray(values, dtype=np.float64) + 1.0) * 0.5  # tanh value -> P(win)
-    o = (np.asarray(z, dtype=np.float64) + 1.0) * 0.5
-    out = {}
-    for lo, hi in GROUNDING_BUCKETS:
-        tag = f"n{lo}_{hi}" if hi < (1 << 30) else f"n{lo}plus"
-        m = (steps_to_end >= lo) & (steps_to_end < hi)
-        n = int(m.sum())
-        ok = n >= 2 and np.std(p[m]) > 1e-6 and np.std(o[m]) > 1e-6
-        out[f"corr_{tag}"] = float(np.corrcoef(p[m], o[m])[0, 1]) if ok else None
-        out[f"brier_{tag}"] = float(np.mean((p[m] - o[m]) ** 2)) if n else None
-    return out
-
-
-def _episode(pend, p1_died, p2_died, n_step):
-    """Stamp each player's value targets on its pending positions and return both players'
-    rows for training. Returns (rows[(pos, target, policy_mask, z, steps_to_end)], game_len,
-    p1_won, is_draw) keyed on the learner's (player-1) outcome, or None if nothing was
-    collected. A game with no death is a draw for rating and diagnostics but a truncation
-    for the value target. z and steps_to_end are carried for diagnostics and are not
-    training inputs."""
+def _episode(pend, p1_died, p2_died, n_step, gamma=0.97, tails=(0.0, 0.0)):
+    """Stamp productive-attack and censored own-death targets on both players' rows."""
     glen = max(len(pend["p1"]), len(pend["p2"]))
-    if glen == 0:
+    if not glen:
         return None
-    if p1_died and not p2_died:
-        z1, z2 = -1.0, 1.0
-    elif p2_died and not p1_died:
-        z1, z2 = 1.0, -1.0
-    else:
-        z1, z2 = 0.0, 0.0
-    truncated = not (p1_died or p2_died)
-    # policy_mask 1.0: learner rows, train policy and value. 0.0: opponent rows, value only.
+    z1 = float(p2_died) - float(p1_died)
     rows = []
-    for positions, z, mask in ((pend["p1"], z1, 1.0), (pend["p2"], z2, 0.0)):
-        n = len(positions)
-        if n == 0:
-            continue
-        targets = _n_step([p["v_search"] for p in positions], z, n_step, truncated)
-        rows += [
-            (p, t, mask, z, n - 1 - i)
-            for i, (p, t) in enumerate(zip(positions, targets))
-        ]
-    return rows, glen, z1 > 0.0, z1 == 0.0
+    for player, died, z, pm, tail in (
+        ("p1", p1_died, z1, 1.0, tails[0]),
+        ("p2", p2_died, -z1, 0.0, tails[1]),
+    ):
+        positions = pend[player]
+        targets = n_step_attack(
+            [p["reward"] for p in positions],
+            [p["bootstrap_value"] for p in positions],
+            n_step,
+            gamma,
+            0.0 if died else tail,
+        )
+        hazards, mask, cumulative, observed = death_targets(len(positions), died)
+        for i, (pos, target) in enumerate(zip(positions, targets)):
+            pos.update(
+                hazard_target=hazards[i],
+                hazard_mask=mask[i],
+                death_target=cumulative[i],
+                death_observed=observed[i],
+                own_terminal=bool(died and i == len(positions) - 1),
+            )
+            rows.append((pos, target, pm, z, len(positions) - i - 1))
+    return rows, glen, z1 > 0, z1 == 0
 
 
-def warm_start_full(net, warm):
-    """Restore a BC checkpoint into `net`, value head included; returns whether the
-    checkpoint carried one.
+def _finalize_episodes(episodes, net, batch_size, n_step, gamma):
+    """Evaluate all completed trajectories with the same pre-update learner."""
+    observations = []
+    for pend, _d1, _d2, tails in episodes:
+        for player in ("p1", "p2"):
+            observations.extend(
+                (p["board"], p["pieces"], p["bcg"]) for p in pend[player]
+            )
+        observations.extend(tails)
+    values = iter(learner_values(net, observations, batch_size))
+    completed = []
+    for pend, died1, died2, _tails in episodes:
+        for player in ("p1", "p2"):
+            for pos in pend[player]:
+                pos["bootstrap_value"] = float(next(values))
+        tails = (float(next(values)), float(next(values)))
+        ep = _episode(pend, died1, died2, n_step, gamma, tails)
+        if ep is not None:
+            completed.append(ep)
+    return completed
 
-    The placement pretrainer trains its value head with a tanh activation against a
-    centered bounded label, matching this net's head, so it transfers as an ordering
-    prior for the gen-0 leaf bootstraps. A policy-only checkpoint has no value head and
-    restores partial, leaving it fresh."""
-    tf.train.Checkpoint(model=net).restore(warm).expect_partial()
-    return any("value_top" in name for name, _ in tf.train.list_variables(warm))
 
-
-def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
-    """A tanh-value PlacementPolicyValueNet with its variables built (ready for restore)."""
+def _build_net(
+    batch_size, piece_dim, depth, num_heads, num_layers, queue_size, attack_risk=False
+):
+    """Build the selected placement critic profile and its restore-ready variables."""
     net = PlacementPolicyValueNet(
         batch_size=batch_size,
         piece_dim=piece_dim,
@@ -221,7 +263,8 @@ def _build_net(batch_size, piece_dim, depth, num_heads, num_layers, queue_size):
         num_heads=num_heads,
         num_layers=num_layers,
         dropout_rate=0.0,
-        value_activation="tanh",  # bound the value to the outcome target's [-1, 1]
+        value_activation=None if attack_risk else "tanh",
+        risk_horizon=RISK_HORIZON if attack_risk else 0,
     )
     net(
         (
@@ -244,7 +287,7 @@ def _pool_snaps(pool_dir):
     return sorted(snaps, key=lambda p: int(os.path.basename(p).split("_")[1]))
 
 
-def _save_pool(net, gen, pool_dir, max_pool_size):
+def _save_pool(net, gen, pool_dir, max_pool_size, cfg=None, n_step=14):
     """Snapshot the learner's weights into the pool, then FIFO-evict oldest (gen_0 pinned)."""
     os.makedirs(pool_dir, exist_ok=True)
     prefix = os.path.join(pool_dir, f"gen_{gen}")
@@ -252,6 +295,8 @@ def _save_pool(net, gen, pool_dir, max_pool_size):
         # Overwriting would silently corrupt the WHR log's gen_k = learner-at-k identity.
         raise FileExistsError(f"pool snapshot {prefix} already exists")
     net.save_weights(prefix)
+    if cfg is not None:
+        save_profile(prefix + ".objective.json", cfg, n_step)
     snaps = _pool_snaps(pool_dir)
     while len(snaps) > max_pool_size:
         victim = snaps[1] if os.path.basename(snaps[0]) == "gen_0" else snaps[0]
@@ -337,6 +382,7 @@ def main(args):
     mini_batch_size = getattr(args, "batch_size", 256)
     num_epochs = getattr(args, "num_epochs", 2)
     value_coef = getattr(args, "value_coef", 1.0)
+    risk_coef = getattr(args, "risk_coef", 1.0)
     learning_rate = getattr(args, "learning_rate", 3e-4)
     replay_capacity = getattr(args, "replay_capacity", 8_000)
     # Opponent-pool knobs.
@@ -348,7 +394,7 @@ def main(args):
     n_step = max(1, int(getattr(args, "n_step", 14)))
     checkpoint_dir = getattr(args, "checkpoint_dir", "checkpoints/placement_az")
     if checkpoint_dir == "checkpoints/placement_az":
-        checkpoint_dir = "checkpoints/1v1_placement_az"
+        checkpoint_dir = "checkpoints/1v1_attack_risk"
     pool_dir = os.path.join(checkpoint_dir, "pool")
     run_name = getattr(args, "run_name", None)
     seed = getattr(args, "seed", None)
@@ -361,50 +407,78 @@ def main(args):
 
     if seed is not None:
         np.random.seed(seed)
+        random.seed(seed)
+        tf.random.set_seed(seed)
     rng = random.Random(seed if seed is not None else 0)
 
-    # n-step value target in z units; own-death = -1, undiscounted, scale 1.
-    cfg = MCTSConfig(
+    cfg = attack_risk_config(
         num_simulations=getattr(args, "num_simulations", 256),
         c_puct=getattr(args, "c_puct", 1.5),
         dirichlet_alpha=getattr(args, "dirichlet_alpha", 0.3),
         dirichlet_eps=getattr(args, "dirichlet_eps", 0.25),
-        gamma=1.0,
+        gamma=0.97 if getattr(args, "gamma", None) is None else args.gamma,
         temp_moves=getattr(args, "temp_moves", 12),
-        w_death=1.0,
+        risk_threshold=getattr(args, "risk_threshold", 0.10),
+        risk_margin=getattr(args, "risk_margin", 0.05),
         q_norm=bool(getattr(args, "q_norm", True)),
         leaves_per_round=getattr(args, "leaves_per_round", 4),
         vloss=getattr(args, "vloss", 1.0),
     )
 
+    if (
+        not 0 < cfg.gamma <= 1
+        or not 0 <= cfg.risk_threshold <= 1
+        or not 0 <= cfg.risk_margin <= 1
+    ):
+        raise ValueError("invalid discount or risk gate probabilities")
+    init_source = prepare_destination(
+        checkpoint_dir, getattr(args, "init_checkpoint", None), cfg, n_step
+    )
+    save_profile(Path(pool_dir) / PROFILE_NAME, cfg, n_step)
+
     # Learner (player 1, trained); opponent + reference are frozen snapshots.
-    net = _build_net(num_games, piece_dim, depth, num_heads, num_layers, queue_size)
+    net = _build_net(
+        num_games, piece_dim, depth, num_heads, num_layers, queue_size, attack_risk=True
+    )
     optimizer = keras.optimizers.Adam(learning_rate, clipnorm=0.5)
     net.compile(optimizer=optimizer, jit_compile=True)
     net.summary()
-    opp_net = _build_net(num_games, piece_dim, depth, num_heads, num_layers, queue_size)
+    opp_net = _build_net(
+        num_games, piece_dim, depth, num_heads, num_layers, queue_size, attack_risk=True
+    )
     ref_net = _build_net(
-        eval_games, piece_dim, depth, num_heads, num_layers, queue_size
+        eval_games,
+        piece_dim,
+        depth,
+        num_heads,
+        num_layers,
+        queue_size,
+        attack_risk=True,
     )
 
-    checkpoint = tf.train.Checkpoint(model=net, optimizer=optimizer)
+    next_generation = tf.Variable(0, dtype=tf.int64, trainable=False)
+    optimizer.build(net.trainable_variables)
+    checkpoint = tf.train.Checkpoint(
+        model=net, optimizer=optimizer, next_generation=next_generation
+    )
     manager = tf.train.CheckpointManager(checkpoint, checkpoint_dir, max_to_keep=3)
     if manager.latest_checkpoint:
-        checkpoint.restore(manager.latest_checkpoint).expect_partial()
+        checkpoint.restore(manager.latest_checkpoint).assert_consumed()
         print(f"Resumed 1v1 AZ checkpoint {manager.latest_checkpoint}.", flush=True)
     else:
-        warm = tf.train.latest_checkpoint("checkpoints/placement_pretrained_policy")
+        warm = init_source or tf.train.latest_checkpoint(
+            "checkpoints/placement_pretrained_policy"
+        )
         if warm is not None:
-            warm_value = warm_start_full(net, warm)
+            warm_start_policy_only(net, warm)
             print(
-                f"Warm-started from BC checkpoint {warm} "
-                f"(value head {'restored' if warm_value else 'fresh'}).",
+                f"Initialized encoder/policy from {warm}; critics and optimizer fresh.",
                 flush=True,
             )
 
     # Seed the pool with gen_0 = the warm-started learner.
     if not _pool_snaps(pool_dir):
-        _save_pool(net, 0, pool_dir, max_pool_size)
+        _save_pool(net, 0, pool_dir, max_pool_size, cfg, n_step)
         print(f"Seeded opponent pool gen_0 at {pool_dir}.", flush=True)
     # Reference net = frozen gen_0, used by the win_rate_vs_ref eval.
     ref_prefix = os.path.join(pool_dir, "gen_0")
@@ -431,7 +505,7 @@ def main(args):
 
     # Resume-safe monotone generation: the append-only log and gen_k snapshot ids
     # both key on it, so it must never restart at 0 (gen_0 seed excluded).
-    gen0 = 0
+    gen0 = int(next_generation.numpy())
     if whr is not None:
         gen0 = max(gen0, whr.last_gen + 1)
     for snap in _pool_snaps(pool_dir):
@@ -470,6 +544,16 @@ def main(args):
         eval_interval=eval_interval,
         eval_games=eval_games,
         n_step=n_step,
+        objective=OBJECTIVE,
+        gamma=cfg.gamma,
+        risk_horizon=RISK_HORIZON,
+        risk_threshold=cfg.risk_threshold,
+        risk_margin=cfg.risk_margin,
+        risk_coef=risk_coef,
+        leaves_per_round=cfg.leaves_per_round,
+        vloss=cfg.vloss,
+        w_death=cfg.w_death,
+        init_checkpoint=init_source,
         resumed=resumed,
         checkpoint_dir=checkpoint_dir,
         run_name=run_name,
@@ -487,7 +571,9 @@ def main(args):
         run_name=run_name,
     )
 
-    pairs = _build_game_pairs(num_games, queue_size, 50, max_len)
+    pairs = _build_game_pairs(
+        num_games, queue_size, 50, max_len, seed0=seed if seed is not None else 123
+    )
     mcts = PlacementMCTS(net, cfg)
     opp_mcts = PlacementMCTS(opp_net, cfg)
     eval_cfg = dc_replace(cfg, dirichlet_eps=0.0)
@@ -522,9 +608,14 @@ def main(args):
     last_ref_dec = 0  # decisive games in the most recent eval-vs-ref window
 
     for gen in range(gen0, gen0 + num_generations):
+        gen_started = time.monotonic()
+        next_generation.assign(gen + 1)
         opp_tag = _sample_pool(opp_net, pool_dir)  # this generation's adversary
 
-        gen_pos = []  # (pos, target, policy_mask, z, steps_to_end)
+        gen_pos = []
+        completed_episodes = []
+        search_metrics = []
+        productive_attack = surge_attack = 0.0
         state_recs = []  # both players' state records for offline oracle relabeling
         game_lens, p1_wins = [], []  # p1_wins: one bool per DECISIVE game
         n_draw = 0
@@ -550,7 +641,7 @@ def main(args):
                     if a["dead"]:
                         b2b_at_death.append(e1._scorer._b2b)
                         n_deaths += 1
-                    ep = _episode(pending[g], a["dead"], b["dead"], n_step)
+                    p1_died, p2_died = a["dead"], b["dead"]
                 else:
                     pending[g]["p1"].append(_pos(a))
                     pending[g]["p2"].append(_pos(b))
@@ -558,9 +649,20 @@ def main(args):
                         state_recs.append(_state_record(e1))
                         state_recs.append(_state_record(e2))
                     pre_b2b = e1._scorer._b2b
+                    pre_b2b2 = e2._scorer._b2b
                     p1_died, p2_died, atk1, atk2 = _commit_and_exchange(
                         e1, e2, searcher, a["descriptor"], b["descriptor"], rng
                     )
+                    prod1 = atk1 if e1._scorer._b2b == pre_b2b + 1 else 0.0
+                    prod2 = atk2 if e2._scorer._b2b == pre_b2b2 + 1 else 0.0
+                    for player, prod in (("p1", prod1), ("p2", prod2)):
+                        pending[g][player][-1]["reward"] = cfg.w_attack * prod
+                        pending[g][player][-1]["productive_attack"] = prod
+                    productive_attack += prod1
+                    surge_attack += (
+                        pre_b2b if pre_b2b >= 4 and e1._scorer._b2b == -1 else 0
+                    )
+                    search_metrics.append(a)
                     post_b2b, post_combo = e1._scorer._b2b, e1._scorer._combo
                     broke = pre_b2b >= 0 and post_b2b == -1
                     if post_b2b == pre_b2b + 1:  # a difficult clear
@@ -600,16 +702,15 @@ def main(args):
                     cap = move_count[g] >= max_game_steps
                     if not (p1_died or p2_died or cap):
                         continue
-                    ep = _episode(pending[g], p1_died, p2_died, n_step)
 
-                if ep is not None:
-                    rows, glen, p1_won, draw = ep
-                    gen_pos.extend(rows)
-                    game_lens.append(glen)
-                    if draw:
-                        n_draw += 1
-                    else:
-                        p1_wins.append(p1_won)
+                completed_episodes.append(
+                    (
+                        pending[g],
+                        p1_died,
+                        p2_died,
+                        (state_observation(e1), state_observation(e2)),
+                    )
+                )
                 episode_max_b2b.append(ep_max_b2b[g])
                 ep_max_b2b[g] = -1
                 if cur_chain[g] > 0:
@@ -626,6 +727,16 @@ def main(args):
                 e2._reset()
                 move_count[g] = 0
                 pending[g] = {"p1": [], "p2": []}
+
+        for rows, glen, p1_won, draw in _finalize_episodes(
+            completed_episodes, net, mini_batch_size, n_step, cfg.gamma
+        ):
+            gen_pos.extend(rows)
+            game_lens.append(glen)
+            if draw:
+                n_draw += 1
+            else:
+                p1_wins.append(p1_won)
 
         if save_states_dir and state_recs:
             os.makedirs(save_states_dir, exist_ok=True)
@@ -662,8 +773,27 @@ def main(args):
             if write_gen:
                 whr.to_json(ratings_path)
 
+        collection_stats = _collection_metrics(
+            search_metrics,
+            cfg,
+            learner_attack,
+            productive_attack,
+            surge_attack,
+            learner_placements,
+            total_placements,
+            time.monotonic() - gen_started,
+        )
+        collection_stats.update(
+            {
+                "outcomes/app_learner": learner_attack / max(1, learner_placements),
+                "progress/completed_games": len(game_lens),
+                "progress/updates": 0,
+                "counts/n_deaths": n_deaths,
+            }
+        )
         n_new = len(gen_pos)
         if n_new == 0:
+            log_step(OneVsOneCollectionLog(diagnostics=collection_stats), step=gen)
             print(f"Gen {gen}: no games completed; skipping update.", flush=True)
             continue
 
@@ -677,14 +807,14 @@ def main(args):
         pi_tgt = np.stack([p["pi"] for p, *_ in gen_pos]).astype(np.float32)
         value_tgt = np.array([r[1] for r in gen_pos], dtype=np.float32)
         policy_mask = np.array([r[2] for r in gen_pos], dtype=np.float32)
-        outcome_z = np.array([r[3] for r in gen_pos], dtype=np.float32)
-        steps_to_end = np.array([r[4] for r in gen_pos], dtype=np.int64)
         v_root = np.array([p["v_root"] for p, *_ in gen_pos], dtype=np.float32)
-        v_search = np.array([p["v_search"] for p, *_ in gen_pos], dtype=np.float32)
+        gate_mask = np.stack([p["gate_mask"] for p, *_ in gen_pos])
+        slots = np.array([p["slot"] for p, *_ in gen_pos], np.int32)
+        hazard_target = np.stack([p["hazard_target"] for p, *_ in gen_pos])
+        hazard_mask = np.stack([p["hazard_mask"] for p, *_ in gen_pos])
         # gen_pos interleaves both players; policy_mask==1 is the learner.
         lrn = policy_mask == 1.0
-        # Search exploration: how the root visit mass spreads over legal candidates.
-        # perplexity = exp(H(pi)) = effective candidates searched (1.0 = tunnel vision).
+        # Policy perplexity is exp(H(pi)); 1 means one candidate carries all mass.
         pi_l = pi_tgt[lrn]
         p_nz = np.where(pi_l > 0.0, pi_l, 1.0)  # 0*log(0) = 0
         visit_perplexity = np.exp(-(pi_l * np.log(p_nz)).sum(axis=1))
@@ -704,6 +834,10 @@ def main(args):
                 "pi_target": pi_tgt,
                 "value_target": value_tgt,
                 "policy_mask": policy_mask,
+                "gate_mask": gate_mask,
+                "slot": slots,
+                "hazard_target": hazard_target,
+                "hazard_mask": hazard_mask,
             }
         )
         replay_size += n_new
@@ -711,6 +845,7 @@ def main(args):
             replay_size -= len(replay.popleft()["value_target"])
 
         if replay_size < mini_batch_size:
+            log_step(OneVsOneCollectionLog(diagnostics=collection_stats), step=gen)
             print(
                 f"Gen {gen}: replay {replay_size} < batch {mini_batch_size}; skipping update.",
                 flush=True,
@@ -737,7 +872,7 @@ def main(args):
                 tf.constant(pieces[learner_idx]),
                 tf.constant(bcg[learner_idx]),
                 tf.constant(cand_pl[learner_idx]),
-                tf.constant(cand_mk[learner_idx]),
+                tf.constant(gate_mask[learner_idx]),
             )
             lp_before = _gen_log_probs(net, *gi).numpy()
 
@@ -745,7 +880,12 @@ def main(args):
         updates = 0
         acc = {}
         for batch in ds:
-            step_out = train_step(net, batch, tf.constant(value_coef, tf.float32))
+            step_out = train_step(
+                net,
+                batch,
+                tf.constant(value_coef, tf.float32),
+                tf.constant(risk_coef, tf.float32),
+            )
             for k, v in step_out.items():
                 acc.setdefault(k, []).append(float(v))
             updates += 1
@@ -767,18 +907,43 @@ def main(args):
         draw_rate = n_draw / n_games if n_games else 0.0
         app = total_attack / total_placements if total_placements else 0.0
         app_learner = learner_attack / learner_placements if learner_placements else 0.0
-        dec = (outcome_z != 0.0) & lrn
+        attack_corr = None
         if (
-            dec.sum() >= 2
-            and np.std(v_root[dec]) > 1e-6
-            and np.std(value_tgt[dec]) > 1e-6
+            lrn.sum() >= 2
+            and np.std(v_root[lrn]) > 1e-6
+            and np.std(value_tgt[lrn]) > 1e-6
         ):
-            value_calibration = float(np.corrcoef(v_root[dec], value_tgt[dec])[0, 1])
-        else:
-            value_calibration = 0.0
-        grounding = _grounding(v_root[lrn], outcome_z[lrn], steps_to_end[lrn])
-        grounding_search = _grounding(v_search[lrn], outcome_z[lrn], steps_to_end[lrn])
-        raw_z_frac = float((steps_to_end < n_step).mean())
+            attack_corr = float(np.corrcoef(v_root[lrn], value_tgt[lrn])[0, 1])
+        learner_rows = [p for p, _target, pm, *_ in gen_pos if pm]
+        death_target = np.stack([p["death_target"] for p in learner_rows])
+        death_observed = np.stack([p["death_observed"] for p in learner_rows])
+        risk_stats = risk_calibration(
+            np.stack([p["risk_prediction"] for p in learner_rows]),
+            death_target,
+            death_observed,
+        )
+        risk_search_stats = risk_calibration(
+            np.stack([p["risk_curve"] for p in learner_rows]),
+            death_target,
+            death_observed,
+        )
+        extras = {
+            **{f"risk/{k}": v for k, v in risk_stats.items()},
+            **{f"risk_search/{k}": v for k, v in risk_search_stats.items()},
+            "attack/target_correlation": attack_corr,
+            "attack/target_mse": float(np.mean((v_root[lrn] - value_tgt[lrn]) ** 2)),
+            "risk/loss": opt["risk_loss"],
+            **_collection_metrics(
+                search_metrics,
+                cfg,
+                learner_attack,
+                productive_attack,
+                surge_attack,
+                learner_placements,
+                total_placements,
+                time.monotonic() - gen_started,
+            ),
+        }
 
         # Pool maintenance: EMA the decisive WR and grow the pool (gated). Rating
         # bookkeeping already ran pre-skip; a new snapshot registers + refits here
@@ -791,7 +956,7 @@ def main(args):
             and decisive >= 8
             and wr_ema >= pool_wr_gate
         ):
-            _save_pool(net, gen, pool_dir, max_pool_size)
+            _save_pool(net, gen, pool_dir, max_pool_size, cfg, n_step)
             print(f"Saved opponent-pool gen_{gen} (wr_ema {wr_ema:.3f}).", flush=True)
             if whr is not None:
                 whr.register_snapshot(f"gen_{gen}")
@@ -836,7 +1001,6 @@ def main(args):
                 draw_rate=draw_rate,
                 app=app,
                 app_learner=app_learner,
-                value_calibration=value_calibration,
                 avg_b2b=float(bcg[lrn, 0].mean()),
                 max_b2b=float(bcg[lrn, 0].max()),
                 avg_combo=float(bcg[lrn, 1].mean()),
@@ -863,11 +1027,10 @@ def main(args):
                 completed_games=n_games,
                 pool_size=len(present),
                 elo=elo_tags,
-                grounding=grounding,
-                grounding_search=grounding_search,
-                raw_z_frac=raw_z_frac,
+                diagnostics=extras,
                 board=batch["boards"][0, ..., 0].numpy(),
-            )
+            ),
+            step=gen,
         )
         print(
             f"Gen {gen} | Policy: {opt['policy_loss']:2.3f} | "
@@ -879,6 +1042,7 @@ def main(args):
         )
 
         if gen % 5 == 0:
-            manager.save()
+            save_checkpoint(manager, cfg, n_step)
 
+    save_checkpoint(manager, cfg, n_step)
     finish(run)
